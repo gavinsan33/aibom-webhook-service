@@ -1,8 +1,9 @@
 package config
 
 type Config struct {
-	TLSCertPath    string
-	TLSKeyPath     string
-	Port           int
-	DiscoveryImage string
+	TLSCertPath      string
+	TLSKeyPath       string
+	Port             int
+	DiscoveryImage   string
+	DatasetDetection bool
 }

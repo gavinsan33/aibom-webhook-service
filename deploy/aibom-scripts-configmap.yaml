@@ -1,0 +1,26 @@
+# This is a placeholder manifest. The actual ConfigMap should be created using:
+#
+#   kubectl create configmap aibom-scripts \
+#     --from-file=generate_snapshot.py=scripts/aibom-scripts/generate_snapshot.py \
+#     --from-file=dataset_detector.py=scripts/aibom-scripts/dataset_detector.py \
+#     -n <workload-namespace>
+#
+# Or use: make create-scripts-configmap NAMESPACE=<workload-namespace>
+#
+# This ConfigMap must exist in each namespace where instrumented workloads run
+# (NOT in aibom-system — pods can only mount ConfigMaps from their own namespace).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aibom-scripts
+  labels:
+    app.kubernetes.io/managed-by: aibom-webhook-service
+data:
+  generate_snapshot.py: |
+    # Source: coldpress/discovery/user_snapshot.yaml (extracted inline Python)
+    # See scripts/aibom-scripts/generate_snapshot.py for the full script
+    # Use 'kubectl create configmap --from-file' to create this ConfigMap
+  dataset_detector.py: |
+    # Source: coldpress/dataset_detector.py
+    # See scripts/aibom-scripts/dataset_detector.py for the full script
+    # Use 'kubectl create configmap --from-file' to create this ConfigMap

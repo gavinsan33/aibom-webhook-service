@@ -21,10 +21,11 @@ func main() {
 	flag.StringVar(&cfg.TLSCertPath, "tls-cert", "/certs/tls.crt", "path to TLS certificate")
 	flag.StringVar(&cfg.TLSKeyPath, "tls-key", "/certs/tls.key", "path to TLS private key")
 	flag.IntVar(&cfg.Port, "port", 8443, "webhook server port")
-	flag.StringVar(&cfg.DiscoveryImage, "discovery-image", "busybox:latest", "image for the discovery init container")
+	flag.StringVar(&cfg.DiscoveryImage, "discovery-image", "pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime", "image for the discovery init container")
+	flag.BoolVar(&cfg.DatasetDetection, "dataset-detection", true, "inject dataset detection hooks into application containers")
 	flag.Parse()
 
-	mutator := webhook.NewMutator(cfg.DiscoveryImage)
+	mutator := webhook.NewMutator(cfg.DiscoveryImage, cfg.DatasetDetection)
 	handler := webhook.NewHandler(mutator)
 
 	mux := http.NewServeMux()
@@ -45,7 +46,7 @@ func main() {
 	signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
 
 	go func() {
-		log.Printf("starting webhook server on :%d (discovery-image=%s)", cfg.Port, cfg.DiscoveryImage)
+		log.Printf("starting webhook server on :%d (discovery-image=%s, dataset-detection=%v)", cfg.Port, cfg.DiscoveryImage, cfg.DatasetDetection)
 		if err := server.ListenAndServeTLS(cfg.TLSCertPath, cfg.TLSKeyPath); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("server error: %v", err)
 		}

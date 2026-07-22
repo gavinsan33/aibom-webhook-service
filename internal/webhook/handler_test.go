@@ -15,7 +15,11 @@ import (
 )
 
 func newTestMutator() *Mutator {
-	return NewMutator("busybox:latest")
+	return NewMutator("pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime", true)
+}
+
+func newTestMutatorNoDataset() *Mutator {
+	return NewMutator("pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime", false)
 }
 
 func podWithOwner(kind string) *corev1.Pod {
@@ -50,6 +54,30 @@ func podWithGPU() *corev1.Pod {
 						Limits: corev1.ResourceList{
 							"nvidia.com/gpu": resource.MustParse("1"),
 						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func podWithExistingPythonPath() *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pod",
+			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{
+				{Kind: "Job", Name: "test-job"},
+			},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name:  "train",
+					Image: "pytorch:latest",
+					Env: []corev1.EnvVar{
+						{Name: "PYTHONPATH", Value: "/usr/local/lib/python3.10"},
+						{Name: "OTHER_VAR", Value: "keep"},
 					},
 				},
 			},
@@ -131,7 +159,30 @@ func TestShouldMutate_NoMatch(t *testing.T) {
 	}
 }
 
-// --- Mutate tests ---
+// --- Discovery init container tests ---
+
+func TestMutate_DiscoveryScriptCommand(t *testing.T) {
+	m := newTestMutator()
+	patches, err := m.Mutate(podWithOwner("Job"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, p := range patches {
+		if p.Path == "/spec/initContainers" {
+			containers := p.Value.([]corev1.Container)
+			c := containers[0]
+			if c.Command[0] != "/bin/bash" {
+				t.Errorf("expected /bin/bash command, got %q", c.Command[0])
+			}
+			if c.Args[0] != "python3 /scripts/generate_snapshot.py" {
+				t.Errorf("expected python3 script command, got %q", c.Args[0])
+			}
+			return
+		}
+	}
+	t.Error("init container patch not found")
+}
 
 func TestMutate_InjectsInitContainer(t *testing.T) {
 	m := newTestMutator()
@@ -140,10 +191,8 @@ func TestMutate_InjectsInitContainer(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	found := false
 	for _, p := range patches {
 		if p.Path == "/spec/initContainers" {
-			found = true
 			containers, ok := p.Value.([]corev1.Container)
 			if !ok {
 				t.Fatal("initContainers patch value is not []Container")
@@ -154,88 +203,13 @@ func TestMutate_InjectsInitContainer(t *testing.T) {
 			if len(containers[0].Env) != 5 {
 				t.Errorf("expected 5 env vars, got %d", len(containers[0].Env))
 			}
+			if len(containers[0].VolumeMounts) != 2 {
+				t.Errorf("expected 2 volume mounts (aibom-data + aibom-scripts), got %d", len(containers[0].VolumeMounts))
+			}
+			return
 		}
 	}
-	if !found {
-		t.Error("expected initContainers patch")
-	}
-}
-
-func TestMutate_InjectsVolume(t *testing.T) {
-	m := newTestMutator()
-	patches, err := m.Mutate(podWithOwner("Job"))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	found := false
-	for _, p := range patches {
-		if p.Path == "/spec/volumes" {
-			found = true
-			volumes, ok := p.Value.([]corev1.Volume)
-			if !ok {
-				t.Fatal("volumes patch value is not []Volume")
-			}
-			if volumes[0].Name != "aibom-data" {
-				t.Errorf("expected volume name 'aibom-data', got %q", volumes[0].Name)
-			}
-			if volumes[0].EmptyDir == nil {
-				t.Error("expected emptyDir volume source")
-			}
-		}
-	}
-	if !found {
-		t.Error("expected volumes patch")
-	}
-}
-
-func TestMutate_AddsLabel(t *testing.T) {
-	m := newTestMutator()
-	patches, err := m.Mutate(podWithOwner("Job"))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	found := false
-	for _, p := range patches {
-		if p.Path == "/metadata/labels" {
-			found = true
-			labels, ok := p.Value.(map[string]string)
-			if !ok {
-				t.Fatal("labels patch value is not map[string]string")
-			}
-			if labels["aibom.io/instrumented"] != "true" {
-				t.Error("expected aibom.io/instrumented label")
-			}
-		}
-	}
-	if !found {
-		t.Error("expected labels patch")
-	}
-}
-
-func TestMutate_ExistingLabels(t *testing.T) {
-	m := newTestMutator()
-	pod := podWithOwner("Job")
-	pod.Labels = map[string]string{"app": "training"}
-
-	patches, err := m.Mutate(pod)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	found := false
-	for _, p := range patches {
-		if p.Path == "/metadata/labels/aibom.io~1instrumented" {
-			found = true
-			if p.Value != "true" {
-				t.Errorf("expected label value 'true', got %v", p.Value)
-			}
-		}
-	}
-	if !found {
-		t.Error("expected escaped label path patch when labels already exist")
-	}
+	t.Error("initContainers patch not found")
 }
 
 func TestMutate_ExistingInitContainers(t *testing.T) {
@@ -250,18 +224,113 @@ func TestMutate_ExistingInitContainers(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	found := false
 	for _, p := range patches {
 		if p.Path == "/spec/initContainers/-" {
-			found = true
+			return // correct: appending
 		}
 		if p.Path == "/spec/initContainers" {
 			t.Error("should append with /- when initContainers already exist, not replace")
 		}
 	}
-	if !found {
-		t.Error("expected append patch at /spec/initContainers/-")
+	t.Error("expected append patch at /spec/initContainers/-")
+}
+
+// --- Volume tests ---
+
+func TestMutate_InjectsAIBOMDataVolume(t *testing.T) {
+	m := newTestMutator()
+	patches, err := m.Mutate(podWithOwner("Job"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
+
+	for _, p := range patches {
+		if p.Path == "/spec/volumes" {
+			volumes, ok := p.Value.([]corev1.Volume)
+			if !ok {
+				t.Fatal("volumes patch value is not []Volume")
+			}
+			if volumes[0].Name != "aibom-data" {
+				t.Errorf("expected first volume 'aibom-data', got %q", volumes[0].Name)
+			}
+			if volumes[0].EmptyDir == nil {
+				t.Error("expected emptyDir volume source")
+			}
+			return
+		}
+	}
+	t.Error("volumes patch not found")
+}
+
+func TestMutate_InjectsScriptsVolume(t *testing.T) {
+	m := newTestMutator()
+	patches, err := m.Mutate(podWithOwner("Job"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, p := range patches {
+		if p.Path == "/spec/volumes/-" {
+			vol, ok := p.Value.(corev1.Volume)
+			if !ok {
+				continue
+			}
+			if vol.Name == "aibom-scripts" {
+				if vol.ConfigMap == nil {
+					t.Error("expected ConfigMap volume source")
+				} else if vol.ConfigMap.Name != "aibom-scripts" {
+					t.Errorf("expected ConfigMap name 'aibom-scripts', got %q", vol.ConfigMap.Name)
+				}
+				return
+			}
+		}
+	}
+	t.Error("aibom-scripts volume patch not found")
+}
+
+// --- Label / annotation tests ---
+
+func TestMutate_AddsLabel(t *testing.T) {
+	m := newTestMutator()
+	patches, err := m.Mutate(podWithOwner("Job"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, p := range patches {
+		if p.Path == "/metadata/labels" {
+			labels, ok := p.Value.(map[string]string)
+			if !ok {
+				t.Fatal("labels patch value is not map[string]string")
+			}
+			if labels["aibom.io/instrumented"] != "true" {
+				t.Error("expected aibom.io/instrumented label")
+			}
+			return
+		}
+	}
+	t.Error("expected labels patch")
+}
+
+func TestMutate_ExistingLabels(t *testing.T) {
+	m := newTestMutator()
+	pod := podWithOwner("Job")
+	pod.Labels = map[string]string{"app": "training"}
+
+	patches, err := m.Mutate(pod)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, p := range patches {
+		if p.Path == "/metadata/labels/aibom.io~1instrumented" {
+			if p.Value != "true" {
+				t.Errorf("expected label value 'true', got %v", p.Value)
+			}
+			return
+		}
+	}
+	t.Error("expected escaped label path patch when labels already exist")
 }
 
 func TestMutate_NoMutationNeeded(t *testing.T) {
@@ -272,6 +341,102 @@ func TestMutate_NoMutationNeeded(t *testing.T) {
 	}
 	if patches != nil {
 		t.Errorf("expected nil patches for non-matching pod, got %d", len(patches))
+	}
+}
+
+// --- Dataset detector tests ---
+
+func TestMutate_InjectsDatasetDetectorEnvVars(t *testing.T) {
+	m := newTestMutator()
+	patches, err := m.Mutate(podWithOwner("Job"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	envVarNames := map[string]bool{}
+	for _, p := range patches {
+		if p.Path == "/spec/containers/0/env" {
+			envs, ok := p.Value.([]corev1.EnvVar)
+			if !ok {
+				t.Fatal("env patch value is not []EnvVar")
+			}
+			for _, e := range envs {
+				envVarNames[e.Name] = true
+			}
+		}
+	}
+
+	for _, expected := range []string{"AIBOM_DATASET_DETECT", "AIBOM_DEBUG", "AIBOM_DATASET_OUTPUT", "PYTHONPATH"} {
+		if !envVarNames[expected] {
+			t.Errorf("expected env var %q in dataset detector patches", expected)
+		}
+	}
+}
+
+func TestMutate_DatasetDetectorVolumeMount(t *testing.T) {
+	m := newTestMutator()
+	patches, err := m.Mutate(podWithOwner("Job"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, p := range patches {
+		if p.Path == "/spec/containers/0/volumeMounts" {
+			mounts, ok := p.Value.([]corev1.VolumeMount)
+			if !ok {
+				t.Fatal("volumeMounts patch value is not []VolumeMount")
+			}
+			foundDetector := false
+			for _, mount := range mounts {
+				if mount.MountPath == "/aibom-hooks/usercustomize.py" && mount.SubPath == "dataset_detector.py" {
+					foundDetector = true
+				}
+			}
+			if !foundDetector {
+				t.Error("expected usercustomize.py mount with subPath dataset_detector.py")
+			}
+			return
+		}
+	}
+	t.Error("container volumeMounts patch not found")
+}
+
+func TestMutate_PythonPathAppend(t *testing.T) {
+	m := newTestMutator()
+	patches, err := m.Mutate(podWithExistingPythonPath())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, p := range patches {
+		if p.Path == "/spec/containers/0/env/0/value" {
+			val, ok := p.Value.(string)
+			if !ok {
+				t.Fatal("PYTHONPATH replace value is not string")
+			}
+			if val != "/aibom-hooks:/usr/local/lib/python3.10" {
+				t.Errorf("expected prepended PYTHONPATH, got %q", val)
+			}
+			return
+		}
+	}
+	t.Error("expected PYTHONPATH replace patch")
+}
+
+func TestMutate_DatasetDetectionDisabled(t *testing.T) {
+	m := newTestMutatorNoDataset()
+	patches, err := m.Mutate(podWithOwner("Job"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, p := range patches {
+		if p.Path == "/spec/containers/0/env" || p.Path == "/spec/containers/0/env/-" {
+			t.Error("dataset detector env vars should not be injected when disabled")
+		}
+		if p.Path == "/spec/containers/0/volumeMounts" || p.Path == "/spec/containers/0/volumeMounts/-" {
+			t.Error("dataset detector volume mounts should not be injected when disabled")
+		}
 	}
 }
 

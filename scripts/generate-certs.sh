@@ -49,13 +49,15 @@ echo "CA bundle (paste into deploy/webhook-config.yaml caBundle field):"
 echo "${CA_BUNDLE}"
 echo ""
 
-# Create k8s secret if kubectl is available and cluster is reachable
-if command -v kubectl &>/dev/null && kubectl cluster-info &>/dev/null 2>&1; then
-    kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
-    kubectl -n "${NAMESPACE}" create secret tls "${SECRET_NAME}" \
+# Detect CLI (prefer oc, fall back to kubectl)
+CLI="$(command -v oc 2>/dev/null || command -v kubectl 2>/dev/null || true)"
+
+if [[ -n "${CLI}" ]] && "${CLI}" cluster-info &>/dev/null 2>&1; then
+    "${CLI}" create namespace "${NAMESPACE}" --dry-run=client -o yaml | "${CLI}" apply -f -
+    "${CLI}" -n "${NAMESPACE}" create secret tls "${SECRET_NAME}" \
         --cert="${CERT_DIR}/tls.crt" \
         --key="${CERT_DIR}/tls.key" \
-        --dry-run=client -o yaml | kubectl apply -f -
+        --dry-run=client -o yaml | "${CLI}" apply -f -
     echo "Secret ${SECRET_NAME} created in namespace ${NAMESPACE}"
 
     # Patch the webhook config with the CA bundle
@@ -64,6 +66,6 @@ if command -v kubectl &>/dev/null && kubectl cluster-info &>/dev/null 2>&1; then
         echo "Patched deploy/webhook-config.yaml with CA bundle"
     fi
 else
-    echo "kubectl not available or cluster not reachable — skipping secret creation"
+    echo "oc/kubectl not available or cluster not reachable — skipping secret creation"
     echo "Manually create the secret and patch webhook-config.yaml with the CA bundle above"
 fi
