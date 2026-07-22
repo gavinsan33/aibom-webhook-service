@@ -1,6 +1,6 @@
 # AIBOM Webhook Service
 
-A Kubernetes mutating admission webhook that automatically instruments AI workloads with [AIBOM](https://github.com/gavinsan33/coldpress) (AI Bill of Materials) metadata collection. When a pod is created in an opted-in namespace, the webhook injects hardware discovery, dataset detection, and tracking labels — no changes to the user's manifests required.
+A Kubernetes mutating admission webhook that automatically instruments AI workloads with AIBOM (AI Bill of Materials) metadata collection. When a pod is created in an opted-in namespace, the webhook injects hardware discovery, dataset detection, and tracking labels — no changes to the user's manifests required.
 
 ## How It Works
 
