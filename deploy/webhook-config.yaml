@@ -1,0 +1,26 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: aibom-webhook
+webhooks:
+  - name: aibom-webhook.aibom-system.svc
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Ignore
+    reinvocationPolicy: Never
+    namespaceSelector:
+      matchLabels:
+        aibom.io/enabled: "true"
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods"]
+        scope: Namespaced
+    clientConfig:
+      service:
+        name: aibom-webhook
+        namespace: aibom-system
+        path: /mutate
+        port: 443
+      caBundle: REPLACE_ME

@@ -1,0 +1,10 @@
+bin/
+certs/
+*.exe
+*.test
+*.out
+.idea
+.vscode
+*.swp
+*.swo
+*~

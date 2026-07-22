@@ -1,0 +1,71 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aibom-webhook
+  namespace: aibom-system
+  labels:
+    app: aibom-webhook
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: aibom-webhook
+  template:
+    metadata:
+      labels:
+        app: aibom-webhook
+    spec:
+      serviceAccountName: aibom-webhook
+      containers:
+        - name: webhook
+          image: aibom-webhook-service:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8443
+              name: webhook
+          args:
+            - --tls-cert=/certs/tls.crt
+            - --tls-key=/certs/tls.key
+            - --port=8443
+          volumeMounts:
+            - name: certs
+              mountPath: /certs
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8443
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8443
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+      volumes:
+        - name: certs
+          secret:
+            secretName: aibom-webhook-certs
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aibom-webhook
+  namespace: aibom-system
+spec:
+  selector:
+    app: aibom-webhook
+  ports:
+    - port: 443
+      targetPort: 8443
+      protocol: TCP
