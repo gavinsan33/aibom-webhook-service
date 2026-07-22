@@ -18,8 +18,8 @@ spec:
       serviceAccountName: aibom-webhook
       containers:
         - name: webhook
-          image: aibom-webhook-service:latest
-          imagePullPolicy: IfNotPresent
+          image: image-registry.openshift-image-registry.svc:5000/aibom-system/aibom-webhook-service:latest
+          imagePullPolicy: Always
           ports:
             - containerPort: 8443
               name: webhook
