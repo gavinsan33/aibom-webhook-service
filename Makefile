@@ -38,7 +38,10 @@ redeploy:
 	oc apply -f deploy/rbac.yaml
 	oc apply -f deploy/deployment.yaml
 	oc apply -f deploy/webhook-config.yaml
+	oc -n aibom-system start-build aibom-webhook-service --wait
+	oc -n aibom-system delete pods -l openshift.io/build.name --field-selector=status.phase==Succeeded
 	oc -n aibom-system rollout restart deployment/aibom-webhook
+	oc -n aibom-system rollout status deployment/aibom-webhook --timeout=120s
 
 undeploy:
 	oc delete -f deploy/webhook-config.yaml --ignore-not-found
