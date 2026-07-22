@@ -262,6 +262,26 @@ func TestOnJobEvent_NoInstrumentedPods_Skips(t *testing.T) {
 	}
 }
 
+func TestOnJobEvent_PostprocessJob_Skips(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	job := completedJob("train-job-aibom-postprocess", "test-ns")
+	job.Labels = map[string]string{LabelPostprocessFor: "train-job"}
+	pod := instrumentedPod("train-job-aibom-postprocess", "test-ns")
+
+	client := fake.NewSimpleClientset(ns, job, pod)
+	w := New(client, "busybox:latest")
+	startWatcher(t, w)
+
+	w.onJobEvent(job)
+
+	jobs, _ := client.BatchV1().Jobs("test-ns").List(context.TODO(), metav1.ListOptions{})
+	for _, j := range jobs.Items {
+		if j.Name == "train-job-aibom-postprocess-aibom-postprocess" {
+			t.Error("should not create a postprocess job for a postprocess job")
+		}
+	}
+}
+
 func TestJobNameTruncation(t *testing.T) {
 	longName := strings.Repeat("a", 60)
 	result := postprocessJobName(longName)

@@ -84,6 +84,10 @@ func (w *Watcher) onJobEvent(obj interface{}) {
 		return
 	}
 
+	if job.Labels[LabelPostprocessFor] != "" {
+		return
+	}
+
 	if !w.isJobComplete(job) {
 		return
 	}
