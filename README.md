@@ -14,6 +14,7 @@ A Kubernetes mutating admission webhook that automatically instruments AI worklo
    - An **emptyDir volume** (`aibom-data`) for discovery and detection output
    - A label `aibom.io/instrumented: "true"` to prevent double-injection
 6. The pod is created with the injections — the user's original YAML is untouched
+7. When the Job completes, the **watcher** detects it and creates a postprocess Job to compile the AIBOM
 
 Pods are matched if they are owned by a Job, JobSet, PyTorchJob, or RayJob, **or** if any container requests `nvidia.com/gpu` resources. The webhook always fails open (`failurePolicy: Ignore`) — if the service is down, pods are created normally.
 
@@ -116,12 +117,15 @@ curl -sk https://localhost:8443/healthz
 ## Project Structure
 
 ```
-cmd/webhook/main.go                # Entrypoint: TLS, HTTP server, graceful shutdown
+cmd/webhook/main.go                # Entrypoint: TLS, HTTP server, watcher, graceful shutdown
 internal/
   webhook/
     handler.go                      # AdmissionReview HTTP handler
     mutator.go                      # Pod matching + JSON patch construction
     handler_test.go                 # Unit tests
+  watcher/
+    watcher.go                      # Job completion watcher + postprocess Job creation
+    watcher_test.go                 # Unit tests
   config/config.go                  # Configuration struct
 deploy/
   namespace.yaml                    # aibom-system namespace
@@ -149,6 +153,8 @@ The webhook server accepts these flags:
 | `--port` | `8443` | Server port |
 | `--discovery-image` | `pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime` | Image for the discovery init container |
 | `--dataset-detection` | `true` | Inject dataset detection hooks into application containers |
+| `--enable-watcher` | `true` | Start the Job completion watcher |
+| `--postprocess-image` | `busybox:latest` | Image for AIBOM postprocess Jobs |
 
 ## What Gets Injected
 
@@ -170,6 +176,6 @@ When the webhook mutates a pod, it adds:
 ## Roadmap
 
 - **Phase 1**: Webhook with placeholder discovery init container
-- **Phase 2** (current): Real hardware discovery + dataset detector injection
-- **Phase 3**: Job watcher that detects workload completion and creates postprocess Jobs for AIBOM compilation
+- **Phase 2**: Real hardware discovery + dataset detector injection
+- **Phase 3** (current): Job watcher that detects workload completion and creates postprocess Jobs for AIBOM compilation
 - **Phase 4**: Production hardening (cert-manager TLS, Helm chart, metrics endpoint)

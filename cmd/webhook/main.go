@@ -8,11 +8,16 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/gavinsan33/aibom-webhook-service/internal/config"
+	"github.com/gavinsan33/aibom-webhook-service/internal/watcher"
 	"github.com/gavinsan33/aibom-webhook-service/internal/webhook"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 )
 
 func main() {
@@ -23,7 +28,12 @@ func main() {
 	flag.IntVar(&cfg.Port, "port", 8443, "webhook server port")
 	flag.StringVar(&cfg.DiscoveryImage, "discovery-image", "pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime", "image for the discovery init container")
 	flag.BoolVar(&cfg.DatasetDetection, "dataset-detection", true, "inject dataset detection hooks into application containers")
+	flag.BoolVar(&cfg.EnableWatcher, "enable-watcher", true, "start the Job completion watcher")
+	flag.StringVar(&cfg.PostprocessImage, "postprocess-image", "busybox:latest", "image for postprocess Jobs")
 	flag.Parse()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	mutator := webhook.NewMutator(cfg.DiscoveryImage, cfg.DatasetDetection)
 	handler := webhook.NewHandler(mutator)
@@ -52,13 +62,45 @@ func main() {
 		}
 	}()
 
+	if cfg.EnableWatcher {
+		clientset, err := buildClientset()
+		if err != nil {
+			log.Printf("WARNING: failed to create Kubernetes client, watcher disabled: %v", err)
+		} else {
+			w := watcher.New(clientset, cfg.PostprocessImage)
+			go func() {
+				if err := w.Start(ctx); err != nil {
+					log.Printf("watcher error: %v", err)
+				}
+			}()
+		}
+	}
+
 	<-stop
 	log.Println("shutting down...")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := server.Shutdown(ctx); err != nil {
+	cancel()
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Fatalf("shutdown error: %v", err)
 	}
 	log.Println("server stopped")
+}
+
+func buildClientset() (kubernetes.Interface, error) {
+	cfg, err := rest.InClusterConfig()
+	if err != nil {
+		kubeconfig := os.Getenv("KUBECONFIG")
+		if kubeconfig == "" {
+			home, _ := os.UserHomeDir()
+			kubeconfig = filepath.Join(home, ".kube", "config")
+		}
+		cfg, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
+		if err != nil {
+			return nil, fmt.Errorf("no in-cluster config and no kubeconfig found: %w", err)
+		}
+	}
+	return kubernetes.NewForConfig(cfg)
 }

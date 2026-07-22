@@ -6,4 +6,6 @@ type Config struct {
 	Port             int
 	DiscoveryImage   string
 	DatasetDetection bool
+	EnableWatcher    bool
+	PostprocessImage string
 }
