@@ -240,7 +240,7 @@ func collectAIBOMAnnotations(job *batchv1.Job) map[string]string {
 	return result
 }
 
-func (w *Watcher) createDataConfigMap(ctx context.Context, namespace, configMapName string, discoveries []string, datasets []string, annotations map[string]string) error {
+func (w *Watcher) createDataConfigMap(ctx context.Context, namespace, configMapName, jobName string, discoveries []string, datasets []string, annotations map[string]string) error {
 	// Build discovery data: array of discovery objects
 	var discoveryArray []json.RawMessage
 	for _, d := range discoveries {
@@ -267,7 +267,7 @@ func (w *Watcher) createDataConfigMap(ctx context.Context, namespace, configMapN
 			Name:      configMapName,
 			Namespace: namespace,
 			Labels: map[string]string{
-				LabelPostprocessFor: configMapName,
+				LabelPostprocessFor: jobName,
 			},
 		},
 		Data: map[string]string{
@@ -347,7 +347,7 @@ func (w *Watcher) createPostprocessJob(ctx context.Context, job *batchv1.Job) er
 	annotations := collectAIBOMAnnotations(job)
 
 	// Create ConfigMap with extracted data
-	if err := w.createDataConfigMap(ctx, job.Namespace, configMapName, discoveries, datasets, annotations); err != nil {
+	if err := w.createDataConfigMap(ctx, job.Namespace, configMapName, job.Name, discoveries, datasets, annotations); err != nil {
 		log.Printf("warning: could not create data configmap for %s/%s: %v", job.Namespace, job.Name, err)
 	}
 
