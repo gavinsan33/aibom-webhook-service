@@ -1,8 +1,9 @@
 BINARY_NAME := webhook-server
 IMG ?= aibom-webhook-service:latest
+POSTPROCESS_IMG ?= aibom-postprocess:latest
 NAMESPACE ?= default
 
-.PHONY: build test run docker-build docker-push deploy undeploy generate-certs create-scripts-configmap clean fmt vet
+.PHONY: build test run docker-build docker-push docker-build-postprocess docker-push-postprocess deploy undeploy generate-certs create-scripts-configmap clean fmt vet
 
 build:
 	go build -v -o bin/$(BINARY_NAME) ./cmd/webhook/
@@ -24,6 +25,12 @@ docker-build:
 
 docker-push:
 	docker push $(IMG)
+
+docker-build-postprocess:
+	docker build -t $(POSTPROCESS_IMG) postprocess/
+
+docker-push-postprocess:
+	docker push $(POSTPROCESS_IMG)
 
 generate-certs:
 	./scripts/generate-certs.sh

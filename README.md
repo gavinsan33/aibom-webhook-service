@@ -127,10 +127,14 @@ internal/
     watcher.go                      # Job completion watcher + postprocess Job creation
     watcher_test.go                 # Unit tests
   config/config.go                  # Configuration struct
+postprocess/
+  postprocess.py                    # AIBOM compiler (runs in postprocess Job)
+  Dockerfile                        # Postprocess container image
 deploy/
   namespace.yaml                    # aibom-system namespace
   rbac.yaml                         # ServiceAccount, ClusterRole, ClusterRoleBinding
   deployment.yaml                   # Deployment + Service
+  build.yaml                        # OpenShift BuildConfig + ImageStream
   webhook-config.yaml               # MutatingWebhookConfiguration
   aibom-scripts-configmap.yaml      # Reference manifest for the scripts ConfigMap
 scripts/
@@ -154,7 +158,7 @@ The webhook server accepts these flags:
 | `--discovery-image` | `pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime` | Image for the discovery init container |
 | `--dataset-detection` | `true` | Inject dataset detection hooks into application containers |
 | `--enable-watcher` | `true` | Start the Job completion watcher |
-| `--postprocess-image` | `busybox:latest` | Image for AIBOM postprocess Jobs |
+| `--postprocess-image` | `busybox:latest` | Image for AIBOM postprocess Jobs (set to the aibom-postprocess image) |
 
 ## What Gets Injected
 
@@ -173,9 +177,51 @@ When the webhook mutates a pod, it adds:
 - Captures dataset name, version, split, fingerprint, license, and training args
 - Writes `dataset_detected.json` to the `aibom-data` volume at process exit
 
+## Postprocess Flow
+
+When a Job completes, the watcher creates an AIBOM postprocess Job:
+
+1. **Data extraction**: The watcher reads pod logs from the completed Job's pods, extracting discovery JSON (from the `aibom-discovery` init container) and dataset JSON (from application containers) via delimited markers
+2. **ConfigMap creation**: Extracted data is stored in a ConfigMap (`{job-name}-aibom-postprocess-data`) in the workload namespace
+3. **Postprocess Job**: A Job is created running `postprocess.py`, which:
+   - Loads discovery and dataset data from the ConfigMap mount
+   - Optionally queries Grafana/Prometheus for telemetry (GPU utilization, memory, power, CPU, network)
+   - Compiles everything into an AIBOM JSON document
+   - Outputs the AIBOM to stdout (readable via `kubectl logs`)
+
+### AIBOM Annotations
+
+Users can optionally annotate their Jobs with `aibom.io/*` keys to provide experiment metadata:
+
+| Annotation | AIBOM Field |
+|------------|-------------|
+| `aibom.io/experiment-intent` | `experiment_intent` (training, sft, inference) |
+| `aibom.io/experiment-name` | `experiment_name` |
+| `aibom.io/model-name` | `model.name` |
+| `aibom.io/model-framework` | `model.framework` |
+| `aibom.io/dataset-name` | `dataset.declared.name` |
+| `aibom.io/dataset-source` | `dataset.declared.source` |
+| `aibom.io/optimizer` | `training.optimizer` |
+| `aibom.io/batch-size` | `training.batch_size` |
+| `aibom.io/epochs` | `training.epochs` |
+| `aibom.io/learning-rate` | `training.learning_rate` |
+
+Without annotations, the AIBOM is still generated from auto-detected data (hardware discovery, dataset detection, telemetry).
+
+### Grafana Credentials
+
+To enable telemetry collection, create a secret in each instrumented namespace:
+
+```bash
+oc create secret generic aibom-config \
+  --from-literal=grafana-url=https://grafana.example.com \
+  --from-literal=grafana-api-token=<token> \
+  -n my-ai-workloads
+```
+
 ## Roadmap
 
-- **Phase 1**: Webhook with placeholder discovery init container
-- **Phase 2**: Real hardware discovery + dataset detector injection
-- **Phase 3** (current): Job watcher that detects workload completion and creates postprocess Jobs for AIBOM compilation
-- **Phase 4**: Production hardening (cert-manager TLS, Helm chart, metrics endpoint)
+- **Phase 1** (complete): Webhook with placeholder discovery init container
+- **Phase 2** (complete): Real hardware discovery + dataset detector injection
+- **Phase 3** (complete): Job watcher + real postprocess container for AIBOM compilation
+- **Phase 4**: Production hardening (cert-manager TLS, Helm chart, metrics endpoint, AIBOM storage)

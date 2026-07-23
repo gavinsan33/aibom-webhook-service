@@ -2,6 +2,7 @@ package watcher
 
 import (
 	"context"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +12,20 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 )
+
+// mockLogReader returns pre-canned log content for each container.
+type mockLogReader struct {
+	logs map[string]string // key: "namespace/pod/container"
+}
+
+func (m *mockLogReader) GetLogs(_ context.Context, namespace, podName, containerName string) (io.ReadCloser, error) {
+	key := namespace + "/" + podName + "/" + containerName
+	content, ok := m.logs[key]
+	if !ok {
+		return io.NopCloser(strings.NewReader("")), nil
+	}
+	return io.NopCloser(strings.NewReader(content)), nil
+}
 
 func enabledNamespace(name string) *corev1.Namespace {
 	return &corev1.Namespace{
@@ -60,8 +75,9 @@ func instrumentedPod(jobName, namespace string) *corev1.Pod {
 			},
 		},
 		Spec: corev1.PodSpec{
-			RestartPolicy: corev1.RestartPolicyNever,
-			Containers:    []corev1.Container{{Name: "test", Image: "busybox"}},
+			RestartPolicy:  corev1.RestartPolicyNever,
+			InitContainers: []corev1.Container{{Name: initContainerName, Image: "pytorch:latest"}},
+			Containers:     []corev1.Container{{Name: "training", Image: "busybox"}},
 		},
 	}
 }
@@ -75,6 +91,133 @@ func startWatcher(t *testing.T, w *Watcher) {
 	w.factory.WaitForCacheSync(ctx.Done())
 	time.Sleep(50 * time.Millisecond)
 }
+
+// ---------------------------------------------------------------------------
+// extractDelimitedJSON tests
+// ---------------------------------------------------------------------------
+
+func TestExtractDelimitedJSON_Discovery(t *testing.T) {
+	logs := "Collecting info...\n===AIBOM_DISCOVERY_START===\n{\"gpu\":{\"count\":4}}\n===AIBOM_DISCOVERY_END===\nDone!\n"
+	result := extractDelimitedJSON(strings.NewReader(logs), discoveryStartMarker, discoveryEndMarker)
+	if result != `{"gpu":{"count":4}}` {
+		t.Errorf("got %q, want %q", result, `{"gpu":{"count":4}}`)
+	}
+}
+
+func TestExtractDelimitedJSON_Dataset(t *testing.T) {
+	logs := "Training epoch 1...\n===AIBOM_DATASET_START===\n{\"datasets\":[{\"name\":\"cifar10\"}]}\n===AIBOM_DATASET_END===\n"
+	result := extractDelimitedJSON(strings.NewReader(logs), datasetStartMarker, datasetEndMarker)
+	if result != `{"datasets":[{"name":"cifar10"}]}` {
+		t.Errorf("got %q, want %q", result, `{"datasets":[{"name":"cifar10"}]}`)
+	}
+}
+
+func TestExtractDelimitedJSON_NoMarkers(t *testing.T) {
+	logs := "Just some regular output\nnothing special here\n"
+	result := extractDelimitedJSON(strings.NewReader(logs), discoveryStartMarker, discoveryEndMarker)
+	if result != "" {
+		t.Errorf("expected empty string, got %q", result)
+	}
+}
+
+func TestExtractDelimitedJSON_InvalidJSON(t *testing.T) {
+	logs := "===AIBOM_DISCOVERY_START===\nnot-valid-json\n===AIBOM_DISCOVERY_END===\n"
+	result := extractDelimitedJSON(strings.NewReader(logs), discoveryStartMarker, discoveryEndMarker)
+	if result != "" {
+		t.Errorf("expected empty string for invalid JSON, got %q", result)
+	}
+}
+
+func TestExtractDelimitedJSON_StartOnly(t *testing.T) {
+	logs := "===AIBOM_DISCOVERY_START===\n{\"partial\":true}\n"
+	result := extractDelimitedJSON(strings.NewReader(logs), discoveryStartMarker, discoveryEndMarker)
+	if result != `{"partial":true}` {
+		t.Errorf("got %q, want %q", result, `{"partial":true}`)
+	}
+}
+
+func TestExtractDelimitedJSON_EmptyLogs(t *testing.T) {
+	result := extractDelimitedJSON(strings.NewReader(""), discoveryStartMarker, discoveryEndMarker)
+	if result != "" {
+		t.Errorf("expected empty string for empty logs, got %q", result)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// collectAIBOMAnnotations tests
+// ---------------------------------------------------------------------------
+
+func TestCollectAIBOMAnnotations_WithAnnotations(t *testing.T) {
+	job := completedJob("j1", "ns")
+	job.Annotations = map[string]string{
+		"aibom.io/experiment-intent": "training",
+		"aibom.io/model-name":        "llama-3",
+		"aibom.io/instrumented-by":   "webhook",
+		"aibom.io/postprocess-job":   "j1-aibom-postprocess",
+		"other-annotation":           "ignored",
+	}
+
+	result := collectAIBOMAnnotations(job)
+
+	if result["experiment-intent"] != "training" {
+		t.Errorf("experiment-intent = %q, want %q", result["experiment-intent"], "training")
+	}
+	if result["model-name"] != "llama-3" {
+		t.Errorf("model-name = %q, want %q", result["model-name"], "llama-3")
+	}
+	if _, ok := result["instrumented-by"]; ok {
+		t.Error("should not include instrumented-by (internal annotation)")
+	}
+	if _, ok := result["postprocess-job"]; ok {
+		t.Error("should not include postprocess-job (internal annotation)")
+	}
+	if _, ok := result["other-annotation"]; ok {
+		t.Error("should not include non-aibom.io annotations")
+	}
+}
+
+func TestCollectAIBOMAnnotations_NoAnnotations(t *testing.T) {
+	job := completedJob("j1", "ns")
+	result := collectAIBOMAnnotations(job)
+	if len(result) != 0 {
+		t.Errorf("expected empty map, got %v", result)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// mergeDatasets tests
+// ---------------------------------------------------------------------------
+
+func TestMergeDatasets_Multiple(t *testing.T) {
+	ds1 := `{"datasets":[{"dataset_name":"cifar10"}],"runtime_info":{"framework":"PyTorch"}}`
+	ds2 := `{"datasets":[{"dataset_name":"imagenet"}],"runtime_info":{"batch_size":32}}`
+
+	result := mergeDatasets([]string{ds1, ds2})
+	if !strings.Contains(result, "cifar10") || !strings.Contains(result, "imagenet") {
+		t.Errorf("merged result should contain both datasets: %s", result)
+	}
+	if !strings.Contains(result, "PyTorch") {
+		t.Errorf("merged result should contain runtime_info: %s", result)
+	}
+}
+
+func TestMergeDatasets_Empty(t *testing.T) {
+	result := mergeDatasets([]string{"", ""})
+	if result != "{}" {
+		t.Errorf("expected {}, got %s", result)
+	}
+}
+
+func TestMergeDatasets_Invalid(t *testing.T) {
+	result := mergeDatasets([]string{"not-json", `{"datasets":[]}`})
+	if result == "" {
+		t.Error("should still produce output from valid entries")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Core watcher event tests
+// ---------------------------------------------------------------------------
 
 func TestIsJobComplete(t *testing.T) {
 	tests := []struct {
@@ -140,11 +283,29 @@ func TestOnJobEvent_CreatesPostprocessJob(t *testing.T) {
 	pod := instrumentedPod("train-job", "test-ns")
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, "busybox:latest")
+	w := New(client, "aibom-postprocess:latest")
+
+	discoveryJSON := `{"pod_metadata":{"name":"train-job-pod","uid":"abc123"},"gpu":{"gpu_count":"2"}}`
+	w.logReader = &mockLogReader{
+		logs: map[string]string{
+			"test-ns/train-job-pod/aibom-discovery": "Starting...\n===AIBOM_DISCOVERY_START===\n" + discoveryJSON + "\n===AIBOM_DISCOVERY_END===\nDone\n",
+			"test-ns/train-job-pod/training":        "Training...\n",
+		},
+	}
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
 
+	// Verify ConfigMap was created
+	cm, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), "train-job-aibom-postprocess-data", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("configmap not created: %v", err)
+	}
+	if !strings.Contains(cm.Data["discovery.json"], "abc123") {
+		t.Errorf("configmap discovery.json should contain pod UID, got: %s", cm.Data["discovery.json"])
+	}
+
+	// Verify postprocess Job was created
 	ppJob, err := client.BatchV1().Jobs("test-ns").Get(context.TODO(), "train-job-aibom-postprocess", metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("postprocess job not created: %v", err)
@@ -158,12 +319,16 @@ func TestOnJobEvent_CreatesPostprocessJob(t *testing.T) {
 		t.Errorf("backoffLimit = %d, want 3", *ppJob.Spec.BackoffLimit)
 	}
 
-	if ppJob.Spec.Template.Spec.Containers[0].Image != "busybox:latest" {
-		t.Errorf("image = %q, want %q", ppJob.Spec.Template.Spec.Containers[0].Image, "busybox:latest")
+	container := ppJob.Spec.Template.Spec.Containers[0]
+	if container.Image != "aibom-postprocess:latest" {
+		t.Errorf("image = %q, want %q", container.Image, "aibom-postprocess:latest")
+	}
+	if len(container.Command) != 2 || container.Command[0] != "python3" {
+		t.Errorf("command = %v, want [python3 /app/postprocess.py]", container.Command)
 	}
 
 	envNames := make(map[string]string)
-	for _, e := range ppJob.Spec.Template.Spec.Containers[0].Env {
+	for _, e := range container.Env {
 		envNames[e.Name] = e.Value
 	}
 	if envNames["AIBOM_JOB_NAME"] != "train-job" {
@@ -172,10 +337,50 @@ func TestOnJobEvent_CreatesPostprocessJob(t *testing.T) {
 	if envNames["AIBOM_JOB_NAMESPACE"] != "test-ns" {
 		t.Errorf("AIBOM_JOB_NAMESPACE = %q, want %q", envNames["AIBOM_JOB_NAMESPACE"], "test-ns")
 	}
+	if envNames["AIBOM_INPUT_DIR"] != "/data/input" {
+		t.Errorf("AIBOM_INPUT_DIR = %q, want %q", envNames["AIBOM_INPUT_DIR"], "/data/input")
+	}
 
+	// Verify volume mount
+	if len(ppJob.Spec.Template.Spec.Volumes) != 1 {
+		t.Fatalf("expected 1 volume, got %d", len(ppJob.Spec.Template.Spec.Volumes))
+	}
+	if ppJob.Spec.Template.Spec.Volumes[0].ConfigMap.Name != "train-job-aibom-postprocess-data" {
+		t.Errorf("volume configmap name = %q, want %q", ppJob.Spec.Template.Spec.Volumes[0].ConfigMap.Name, "train-job-aibom-postprocess-data")
+	}
+
+	// Verify original job annotated
 	updatedJob, _ := client.BatchV1().Jobs("test-ns").Get(context.TODO(), "train-job", metav1.GetOptions{})
 	if updatedJob.Annotations[AnnotationPostprocess] != "train-job-aibom-postprocess" {
 		t.Errorf("annotation %s = %q, want %q", AnnotationPostprocess, updatedJob.Annotations[AnnotationPostprocess], "train-job-aibom-postprocess")
+	}
+}
+
+func TestOnJobEvent_WithAnnotations(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	job := completedJob("train-job", "test-ns")
+	job.Annotations = map[string]string{
+		"aibom.io/experiment-intent": "training",
+		"aibom.io/model-name":        "llama-3",
+	}
+	pod := instrumentedPod("train-job", "test-ns")
+
+	client := fake.NewSimpleClientset(ns, job, pod)
+	w := New(client, "aibom-postprocess:latest")
+	w.logReader = &mockLogReader{logs: map[string]string{}}
+	startWatcher(t, w)
+
+	w.onJobEvent(job)
+
+	cm, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), "train-job-aibom-postprocess-data", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("configmap not created: %v", err)
+	}
+	if !strings.Contains(cm.Data["annotations.json"], "training") {
+		t.Errorf("annotations.json should contain experiment-intent, got: %s", cm.Data["annotations.json"])
+	}
+	if !strings.Contains(cm.Data["annotations.json"], "llama-3") {
+		t.Errorf("annotations.json should contain model-name, got: %s", cm.Data["annotations.json"])
 	}
 }
 
@@ -237,7 +442,6 @@ func TestOnJobEvent_AlreadyPostprocessed_Skips(t *testing.T) {
 func TestOnJobEvent_NoInstrumentedPods_Skips(t *testing.T) {
 	ns := enabledNamespace("test-ns")
 	job := completedJob("plain-job", "test-ns")
-	// Pod without the instrumented label
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "plain-job-pod",

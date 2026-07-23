@@ -149,6 +149,11 @@ def _flush():
         with open(_OUTPUT_PATH, "w") as f:
             json.dump(output, f, indent=2, default=str)
         _dbg(f"Flush succeeded: {_OUTPUT_PATH} ({len(existing_ds)} datasets)")
+
+        # Print to stdout for log extraction by the watcher
+        print("===AIBOM_DATASET_START===", flush=True)
+        print(json.dumps(output, default=str), flush=True)
+        print("===AIBOM_DATASET_END===", flush=True)
     except Exception:
         _dbg_exc("_flush")
 

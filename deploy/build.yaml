@@ -25,3 +25,32 @@ spec:
       name: aibom-webhook-service:latest
   triggers:
     - type: ConfigChange
+---
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: aibom-postprocess
+  namespace: aibom-system
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: aibom-postprocess
+  namespace: aibom-system
+spec:
+  source:
+    type: Git
+    git:
+      uri: https://github.com/gavinsan33/aibom-webhook-service.git
+      ref: master
+    contextDir: postprocess
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: Dockerfile
+  output:
+    to:
+      kind: ImageStreamTag
+      name: aibom-postprocess:latest
+  triggers:
+    - type: ConfigChange

@@ -1,9 +1,13 @@
 package watcher
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"strings"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -22,13 +26,41 @@ const (
 	LabelPostprocessFor   = "aibom.io/postprocess-for"
 	AnnotationPostprocess = "aibom.io/postprocess-job"
 
-	resyncPeriod     = 30 * time.Second
-	maxJobNameLength = 63
+	annotationPrefix = "aibom.io/"
+
+	discoveryStartMarker = "===AIBOM_DISCOVERY_START==="
+	discoveryEndMarker   = "===AIBOM_DISCOVERY_END==="
+	datasetStartMarker   = "===AIBOM_DATASET_START==="
+	datasetEndMarker     = "===AIBOM_DATASET_END==="
+
+	initContainerName = "aibom-discovery"
+
+	resyncPeriod      = 30 * time.Second
+	maxJobNameLength  = 63
 	postprocessSuffix = "-aibom-postprocess"
+	configMapSuffix   = "-data"
 )
+
+// LogReader abstracts pod log access for testability.
+type LogReader interface {
+	GetLogs(ctx context.Context, namespace, podName, containerName string) (io.ReadCloser, error)
+}
+
+// kubeLogReader is the production LogReader using the Kubernetes API.
+type kubeLogReader struct {
+	clientset kubernetes.Interface
+}
+
+func (r *kubeLogReader) GetLogs(ctx context.Context, namespace, podName, containerName string) (io.ReadCloser, error) {
+	req := r.clientset.CoreV1().Pods(namespace).GetLogs(podName, &corev1.PodLogOptions{
+		Container: containerName,
+	})
+	return req.Stream(ctx)
+}
 
 type Watcher struct {
 	clientset        kubernetes.Interface
+	logReader        LogReader
 	postprocessImage string
 	factory          informers.SharedInformerFactory
 }
@@ -36,6 +68,7 @@ type Watcher struct {
 func New(clientset kubernetes.Interface, postprocessImage string) *Watcher {
 	w := &Watcher{
 		clientset:        clientset,
+		logReader:        &kubeLogReader{clientset: clientset},
 		postprocessImage: postprocessImage,
 		factory:          informers.NewSharedInformerFactory(clientset, resyncPeriod),
 	}
@@ -123,19 +156,201 @@ func (w *Watcher) isJobComplete(job *batchv1.Job) bool {
 }
 
 func (w *Watcher) hasInstrumentedPods(job *batchv1.Job) bool {
+	pods, err := w.getInstrumentedPods(job)
+	return err == nil && len(pods) > 0
+}
+
+func (w *Watcher) getInstrumentedPods(job *batchv1.Job) ([]corev1.Pod, error) {
 	pods, err := w.clientset.CoreV1().Pods(job.Namespace).List(context.TODO(), metav1.ListOptions{
 		LabelSelector: fmt.Sprintf("batch.kubernetes.io/job-name=%s,%s=true", job.Name, LabelInstrumented),
-		Limit:         1,
 	})
 	if err != nil {
-		log.Printf("failed to list pods for job %s/%s: %v", job.Namespace, job.Name, err)
-		return false
+		return nil, fmt.Errorf("list pods for job %s/%s: %w", job.Namespace, job.Name, err)
 	}
-	return len(pods.Items) > 0
+	return pods.Items, nil
+}
+
+// extractDelimitedJSON scans a log stream for a JSON block between start and end markers.
+func extractDelimitedJSON(reader io.Reader, startMarker, endMarker string) string {
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	capturing := false
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.TrimSpace(line) == startMarker {
+			capturing = true
+			continue
+		}
+		if strings.TrimSpace(line) == endMarker {
+			break
+		}
+		if capturing {
+			trimmed := strings.TrimSpace(line)
+			if json.Valid([]byte(trimmed)) {
+				return trimmed
+			}
+			log.Printf("warning: content between %s markers is not valid JSON", startMarker)
+			return ""
+		}
+	}
+	return ""
+}
+
+// extractDataFromPod reads pod logs and extracts discovery and dataset JSON.
+func (w *Watcher) extractDataFromPod(ctx context.Context, pod *corev1.Pod) (discoveryJSON, datasetJSON string) {
+	// Discovery: from init container
+	stream, err := w.logReader.GetLogs(ctx, pod.Namespace, pod.Name, initContainerName)
+	if err != nil {
+		log.Printf("warning: could not read logs for %s/%s container %s: %v",
+			pod.Namespace, pod.Name, initContainerName, err)
+	} else {
+		discoveryJSON = extractDelimitedJSON(stream, discoveryStartMarker, discoveryEndMarker)
+		stream.Close()
+	}
+
+	// Dataset: from application containers
+	for _, c := range pod.Spec.Containers {
+		stream, err := w.logReader.GetLogs(ctx, pod.Namespace, pod.Name, c.Name)
+		if err != nil {
+			continue
+		}
+		result := extractDelimitedJSON(stream, datasetStartMarker, datasetEndMarker)
+		stream.Close()
+		if result != "" {
+			datasetJSON = result
+			break
+		}
+	}
+
+	return discoveryJSON, datasetJSON
+}
+
+// collectAIBOMAnnotations returns job annotations with the aibom.io/ prefix stripped.
+func collectAIBOMAnnotations(job *batchv1.Job) map[string]string {
+	result := make(map[string]string)
+	for key, value := range job.Annotations {
+		if strings.HasPrefix(key, annotationPrefix) {
+			stripped := strings.TrimPrefix(key, annotationPrefix)
+			if stripped != "" && stripped != "instrumented" && stripped != "instrumented-by" && stripped != "postprocess-job" {
+				result[stripped] = value
+			}
+		}
+	}
+	return result
+}
+
+func (w *Watcher) createDataConfigMap(ctx context.Context, namespace, configMapName string, discoveries []string, datasets []string, annotations map[string]string) error {
+	// Build discovery data: array of discovery objects
+	var discoveryArray []json.RawMessage
+	for _, d := range discoveries {
+		if d != "" {
+			discoveryArray = append(discoveryArray, json.RawMessage(d))
+		}
+	}
+
+	discoveryData := "[]"
+	if len(discoveryArray) > 0 {
+		bytes, err := json.Marshal(discoveryArray)
+		if err == nil {
+			discoveryData = string(bytes)
+		}
+	}
+
+	// Merge dataset data
+	datasetData := mergeDatasets(datasets)
+
+	annotationsJSON, _ := json.Marshal(annotations)
+
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      configMapName,
+			Namespace: namespace,
+			Labels: map[string]string{
+				LabelPostprocessFor: configMapName,
+			},
+		},
+		Data: map[string]string{
+			"discovery.json":   discoveryData,
+			"dataset.json":     datasetData,
+			"annotations.json": string(annotationsJSON),
+		},
+	}
+
+	_, err := w.clientset.CoreV1().ConfigMaps(namespace).Create(ctx, cm, metav1.CreateOptions{})
+	if err != nil && !errors.IsAlreadyExists(err) {
+		return fmt.Errorf("create configmap %s: %w", configMapName, err)
+	}
+	return nil
+}
+
+// mergeDatasets combines multiple dataset JSON strings into one.
+func mergeDatasets(datasets []string) string {
+	type datasetFile struct {
+		Datasets    []json.RawMessage      `json:"datasets,omitempty"`
+		RuntimeInfo map[string]interface{} `json:"runtime_info,omitempty"`
+	}
+
+	merged := datasetFile{
+		RuntimeInfo: make(map[string]interface{}),
+	}
+
+	for _, raw := range datasets {
+		if raw == "" {
+			continue
+		}
+		var df datasetFile
+		if err := json.Unmarshal([]byte(raw), &df); err != nil {
+			continue
+		}
+		merged.Datasets = append(merged.Datasets, df.Datasets...)
+		for k, v := range df.RuntimeInfo {
+			if _, exists := merged.RuntimeInfo[k]; !exists {
+				merged.RuntimeInfo[k] = v
+			}
+		}
+	}
+
+	if len(merged.Datasets) == 0 && len(merged.RuntimeInfo) == 0 {
+		return "{}"
+	}
+
+	bytes, err := json.Marshal(merged)
+	if err != nil {
+		return "{}"
+	}
+	return string(bytes)
 }
 
 func (w *Watcher) createPostprocessJob(ctx context.Context, job *batchv1.Job) error {
 	postprocessName := postprocessJobName(job.Name)
+	configMapName := postprocessName + configMapSuffix
+	if len(configMapName) > maxJobNameLength {
+		configMapName = configMapName[:maxJobNameLength]
+	}
+
+	// Extract data from pod logs
+	pods, err := w.getInstrumentedPods(job)
+	if err != nil {
+		log.Printf("warning: could not list pods for %s/%s: %v", job.Namespace, job.Name, err)
+	}
+
+	var discoveries []string
+	var datasets []string
+	for _, pod := range pods {
+		disc, ds := w.extractDataFromPod(ctx, &pod)
+		discoveries = append(discoveries, disc)
+		datasets = append(datasets, ds)
+	}
+
+	// Collect AIBOM annotations from the job
+	annotations := collectAIBOMAnnotations(job)
+
+	// Create ConfigMap with extracted data
+	if err := w.createDataConfigMap(ctx, job.Namespace, configMapName, discoveries, datasets, annotations); err != nil {
+		log.Printf("warning: could not create data configmap for %s/%s: %v", job.Namespace, job.Name, err)
+	}
+
 	backoffLimit := int32(3)
 	optional := true
 
@@ -156,12 +371,11 @@ func (w *Watcher) createPostprocessJob(ctx context.Context, job *batchv1.Job) er
 						{
 							Name:    "aibom-postprocess",
 							Image:   w.postprocessImage,
-							Command: []string{"/bin/sh", "-c"},
-							Args:    []string{fmt.Sprintf("echo '[aibom] postprocess for job %s/%s'", job.Namespace, job.Name)},
+							Command: []string{"python3", "/app/postprocess.py"},
 							Env: []corev1.EnvVar{
 								{Name: "AIBOM_JOB_NAME", Value: job.Name},
 								{Name: "AIBOM_JOB_NAMESPACE", Value: job.Namespace},
-								{Name: "AIBOM_BASE_DIR", Value: "/tmp/aibom"},
+								{Name: "AIBOM_INPUT_DIR", Value: "/data/input"},
 								{
 									Name: "GRAFANA_URL",
 									ValueFrom: &corev1.EnvVarSource{
@@ -183,6 +397,23 @@ func (w *Watcher) createPostprocessJob(ctx context.Context, job *batchv1.Job) er
 									},
 								},
 							},
+							VolumeMounts: []corev1.VolumeMount{
+								{
+									Name:      "aibom-input",
+									MountPath: "/data/input",
+									ReadOnly:  true,
+								},
+							},
+						},
+					},
+					Volumes: []corev1.Volume{
+						{
+							Name: "aibom-input",
+							VolumeSource: corev1.VolumeSource{
+								ConfigMap: &corev1.ConfigMapVolumeSource{
+									LocalObjectReference: corev1.LocalObjectReference{Name: configMapName},
+								},
+							},
 						},
 					},
 				},
@@ -190,7 +421,7 @@ func (w *Watcher) createPostprocessJob(ctx context.Context, job *batchv1.Job) er
 		},
 	}
 
-	_, err := w.clientset.BatchV1().Jobs(job.Namespace).Create(ctx, postprocessJob, metav1.CreateOptions{})
+	_, err = w.clientset.BatchV1().Jobs(job.Namespace).Create(ctx, postprocessJob, metav1.CreateOptions{})
 	if err != nil && !errors.IsAlreadyExists(err) {
 		return fmt.Errorf("create postprocess job: %w", err)
 	}

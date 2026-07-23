@@ -27,7 +27,7 @@ spec:
             - --tls-cert=/certs/tls.crt
             - --tls-key=/certs/tls.key
             - --port=8443
-            - --postprocess-image=busybox:latest
+            - --postprocess-image=image-registry.openshift-image-registry.svc:5000/aibom-system/aibom-postprocess:latest
             - --enable-watcher=true
           volumeMounts:
             - name: certs

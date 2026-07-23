@@ -205,4 +205,9 @@ snapshot["benchmarks"]["context_switch"] = context_switch_benchmark()
 with open("/tmp/result/discovery.json", "w") as f:
     json.dump(snapshot, f, indent=2)
 
+# Print to stdout for log extraction by the watcher
+print("===AIBOM_DISCOVERY_START===")
+print(json.dumps(snapshot))
+print("===AIBOM_DISCOVERY_END===")
+
 print("Snapshot generation complete!")
