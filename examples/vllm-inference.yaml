@@ -1,0 +1,87 @@
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: aibom-vllm-benchmark
+  namespace: gavin-test
+spec:
+  replicatedJobs:
+    - name: server
+      replicas: 1
+      template:
+        metadata:
+          annotations:
+            aibom.io/experiment-intent: inference
+            aibom.io/experiment-name: vllm-granite-benchmark
+            aibom.io/model-name: drawais/Granite-3.3-8B-Instruct-AWQ-INT4
+            aibom.io/model-framework: vllm
+        spec:
+          parallelism: 1
+          completions: 1
+          backoffLimit: 0
+          template:
+            spec:
+              restartPolicy: Never
+              tolerations:
+                - operator: Exists
+              containers:
+                - name: server
+                  image: nvcr.io/nvidia/vllm:26.03-py3
+                  command:
+                    - python
+                    - -m
+                    - vllm.entrypoints.openai.api_server
+                    - --model=drawais/Granite-3.3-8B-Instruct-AWQ-INT4
+                    - --port=8000
+                    - --max-model-len=10000
+                    - --gpu-memory-utilization=0.6
+                  env:
+                    - name: HOME
+                      value: /tmp
+                  ports:
+                    - containerPort: 8000
+                      name: http
+                  readinessProbe:
+                    httpGet:
+                      path: /health
+                      port: 8000
+                    initialDelaySeconds: 30
+                    periodSeconds: 10
+                  resources:
+                    requests:
+                      nvidia.com/gpu: "1"
+                    limits:
+                      nvidia.com/gpu: "1"
+
+    - name: client
+      replicas: 1
+      template:
+        spec:
+          parallelism: 1
+          completions: 1
+          backoffLimit: 0
+          template:
+            spec:
+              restartPolicy: Never
+              tolerations:
+                - operator: Exists
+              containers:
+                - name: client
+                  image: ghcr.io/vllm-project/guidellm:nightly
+                  command:
+                    - guidellm
+                    - run
+                    - --backend=kind=openai_http,target=http://aibom-vllm-benchmark-server-0-0.aibom-vllm-benchmark.gavin-test.svc.cluster.local:8000
+                    - --data=kind=synthetic_text,prompt_tokens=256,output_tokens=128
+                    - --profile=kind=sweep
+                    - --constraint=kind=max_duration,seconds=30
+                    - --output=kind=json
+                  env:
+                    - name: HOME
+                      value: /tmp
+      dependsOn:
+        - name: server
+          status: Ready
+  successPolicy:
+    operator: All
+    targetReplicatedJobs:
+      - client

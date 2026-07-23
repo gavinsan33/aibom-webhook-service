@@ -135,8 +135,26 @@ func (w *Watcher) onJobEvent(obj interface{}) {
 		return
 	}
 
-	if !podsRequestGPU(pods) {
-		return
+	hasGPU := podsRequestGPU(pods)
+	hasAnnotations := len(collectAIBOMAnnotations(job)) > 0
+
+	if !hasGPU && !hasAnnotations {
+		if jobsetName := job.Labels["jobset.sigs.k8s.io/jobset-name"]; jobsetName != "" {
+			siblingJobs, listErr := w.clientset.BatchV1().Jobs(job.Namespace).List(context.TODO(), metav1.ListOptions{
+				LabelSelector: fmt.Sprintf("jobset.sigs.k8s.io/jobset-name=%s", jobsetName),
+			})
+			if listErr == nil {
+				for i := range siblingJobs.Items {
+					if len(collectAIBOMAnnotations(&siblingJobs.Items[i])) > 0 {
+						hasAnnotations = true
+						break
+					}
+				}
+			}
+		}
+		if !hasAnnotations {
+			return
+		}
 	}
 
 	if err := w.createPostprocessJob(context.TODO(), job); err != nil {
@@ -347,10 +365,27 @@ func (w *Watcher) createPostprocessJob(ctx context.Context, job *batchv1.Job) er
 		configMapName = strings.TrimRight(configMapName[:253], "-")
 	}
 
-	// Extract data from pod logs
+	// Extract data from pod logs — include sibling JobSet pods if applicable
 	pods, err := w.getInstrumentedPods(job)
 	if err != nil {
 		log.Printf("warning: could not list pods for %s/%s: %v", job.Namespace, job.Name, err)
+	}
+
+	if jobsetName := job.Labels["jobset.sigs.k8s.io/jobset-name"]; jobsetName != "" {
+		siblingPods, err := w.clientset.CoreV1().Pods(job.Namespace).List(ctx, metav1.ListOptions{
+			LabelSelector: fmt.Sprintf("jobset.sigs.k8s.io/jobset-name=%s,%s=true", jobsetName, LabelInstrumented),
+		})
+		if err == nil {
+			seen := make(map[string]bool)
+			for _, p := range pods {
+				seen[p.Name] = true
+			}
+			for _, p := range siblingPods.Items {
+				if !seen[p.Name] {
+					pods = append(pods, p)
+				}
+			}
+		}
 	}
 
 	var discoveries []string
@@ -361,8 +396,21 @@ func (w *Watcher) createPostprocessJob(ctx context.Context, job *batchv1.Job) er
 		datasets = append(datasets, ds)
 	}
 
-	// Collect AIBOM annotations from the job
+	// Collect AIBOM annotations from the job and sibling jobs in the JobSet
 	annotations := collectAIBOMAnnotations(job)
+	if jobsetName := job.Labels["jobset.sigs.k8s.io/jobset-name"]; jobsetName != "" && len(annotations) == 0 {
+		siblingJobs, err := w.clientset.BatchV1().Jobs(job.Namespace).List(ctx, metav1.ListOptions{
+			LabelSelector: fmt.Sprintf("jobset.sigs.k8s.io/jobset-name=%s", jobsetName),
+		})
+		if err == nil {
+			for i := range siblingJobs.Items {
+				if sa := collectAIBOMAnnotations(&siblingJobs.Items[i]); len(sa) > 0 {
+					annotations = sa
+					break
+				}
+			}
+		}
+	}
 
 	// Create ConfigMap with extracted data
 	if err := w.createDataConfigMap(ctx, job.Namespace, configMapName, job.Name, discoveries, datasets, annotations); err != nil {
