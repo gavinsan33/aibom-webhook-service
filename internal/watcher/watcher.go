@@ -325,8 +325,8 @@ func mergeDatasets(datasets []string) string {
 func (w *Watcher) createPostprocessJob(ctx context.Context, job *batchv1.Job) error {
 	postprocessName := postprocessJobName(job.Name)
 	configMapName := postprocessName + configMapSuffix
-	if len(configMapName) > maxJobNameLength {
-		configMapName = configMapName[:maxJobNameLength]
+	if len(configMapName) > 253 {
+		configMapName = strings.TrimRight(configMapName[:253], "-")
 	}
 
 	// Extract data from pod logs
@@ -441,5 +441,6 @@ func postprocessJobName(jobName string) string {
 	if len(jobName) > maxBase {
 		jobName = jobName[:maxBase]
 	}
+	jobName = strings.TrimRight(jobName, "-")
 	return jobName + postprocessSuffix
 }

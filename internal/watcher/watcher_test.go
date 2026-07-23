@@ -502,4 +502,14 @@ func TestJobNameTruncation(t *testing.T) {
 	if shortResult != "my-job-aibom-postprocess" {
 		t.Errorf("postprocess job name = %q, want %q", shortResult, "my-job-aibom-postprocess")
 	}
+
+	// Name that would produce a trailing dash after truncation
+	dashName := strings.Repeat("a", 44) + "-"
+	dashResult := postprocessJobName(dashName)
+	if strings.Contains(dashResult, "--") {
+		t.Errorf("postprocess job name %q should not contain double dash", dashResult)
+	}
+	if len(dashResult) > maxJobNameLength {
+		t.Errorf("postprocess job name length %d exceeds max %d", len(dashResult), maxJobNameLength)
+	}
 }

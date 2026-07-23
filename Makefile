@@ -60,7 +60,6 @@ undeploy:
 	oc delete -f deploy/namespace.yaml --ignore-not-found
 
 setup-namespace:
-	oc label namespace $(NAMESPACE) aibom.io/enabled=true --overwrite
 	oc policy add-role-to-group system:image-puller system:serviceaccounts:$(NAMESPACE) -n aibom-system
 	oc create configmap aibom-scripts \
 		--from-file=generate_snapshot.py=scripts/aibom-scripts/generate_snapshot.py \
