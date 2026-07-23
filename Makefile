@@ -51,7 +51,7 @@ redeploy:
 	oc -n aibom-system delete pods -l openshift.io/build.name --field-selector=status.phase==Succeeded
 	oc -n aibom-system rollout restart deployment/aibom-webhook
 	oc -n aibom-system rollout status deployment/aibom-webhook --timeout=120s
-	@echo "NOTE: Run 'make create-scripts-configmap NAMESPACE=<ns>' for each workload namespace"
+	@echo "NOTE: Run 'make setup-namespace NAMESPACE=<ns>' for each workload namespace"
 
 undeploy:
 	oc delete -f deploy/webhook-config.yaml --ignore-not-found
@@ -59,7 +59,9 @@ undeploy:
 	oc delete -f deploy/rbac.yaml --ignore-not-found
 	oc delete -f deploy/namespace.yaml --ignore-not-found
 
-create-scripts-configmap:
+setup-namespace:
+	oc label namespace $(NAMESPACE) aibom.io/enabled=true --overwrite
+	oc policy add-role-to-group system:image-puller system:serviceaccounts:$(NAMESPACE) -n aibom-system
 	oc create configmap aibom-scripts \
 		--from-file=generate_snapshot.py=scripts/aibom-scripts/generate_snapshot.py \
 		--from-file=dataset_detector.py=scripts/aibom-scripts/dataset_detector.py \

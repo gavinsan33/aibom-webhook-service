@@ -42,20 +42,16 @@ make run
 
 ## Workload Namespace Setup
 
-The `aibom-scripts` ConfigMap must exist in each namespace where instrumented workloads run. It contains the discovery script and dataset detector that get mounted into pods.
+Each namespace that runs instrumented workloads needs three things: the `aibom.io/enabled` label, image pull access to `aibom-system`, and the `aibom-scripts` ConfigMap. A single command handles all of it:
 
 ```bash
-# Create the ConfigMap in a workload namespace
-make create-scripts-configmap NAMESPACE=my-ai-workloads
-
-# Or manually:
-oc create configmap aibom-scripts \
-  --from-file=generate_snapshot.py=scripts/aibom-scripts/generate_snapshot.py \
-  --from-file=dataset_detector.py=scripts/aibom-scripts/dataset_detector.py \
-  -n my-ai-workloads
+make setup-namespace NAMESPACE=my-ai-workloads
 ```
 
-This ConfigMap is **not** created in `aibom-system` — pods can only mount ConfigMaps from their own namespace.
+This runs:
+1. `oc label namespace ... aibom.io/enabled=true` — opts the namespace into webhook instrumentation
+2. `oc policy add-role-to-group system:image-puller ...` — allows pods to pull the postprocess image from `aibom-system`
+3. Creates the `aibom-scripts` ConfigMap with the discovery and dataset detector scripts
 
 ## Cluster Deployment
 
@@ -67,9 +63,8 @@ make docker-push IMG=quay.io/<your-org>/aibom-webhook-service:latest
 # Update the image in deploy/deployment.yaml, then deploy
 make deploy
 
-# Opt in a namespace and create the scripts ConfigMap
-oc label namespace my-ai-workloads aibom.io/enabled=true
-make create-scripts-configmap NAMESPACE=my-ai-workloads
+# Set up a workload namespace (label, image pull access, scripts ConfigMap)
+make setup-namespace NAMESPACE=my-ai-workloads
 
 # Verify: submit a Job, check the pod for the init container
 oc get pod <pod-name> -n my-ai-workloads -o jsonpath='{.spec.initContainers[*].name}'
