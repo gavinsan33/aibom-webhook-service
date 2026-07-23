@@ -9,6 +9,7 @@ import (
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 )
@@ -77,7 +78,15 @@ func instrumentedPod(jobName, namespace string) *corev1.Pod {
 		Spec: corev1.PodSpec{
 			RestartPolicy:  corev1.RestartPolicyNever,
 			InitContainers: []corev1.Container{{Name: initContainerName, Image: "pytorch:latest"}},
-			Containers:     []corev1.Container{{Name: "training", Image: "busybox"}},
+			Containers: []corev1.Container{{
+				Name:  "training",
+				Image: "busybox",
+				Resources: corev1.ResourceRequirements{
+					Limits: corev1.ResourceList{
+						"nvidia.com/gpu": resource.MustParse("1"),
+					},
+				},
+			}},
 		},
 	}
 }
@@ -463,6 +472,36 @@ func TestOnJobEvent_NoInstrumentedPods_Skips(t *testing.T) {
 	_, err := client.BatchV1().Jobs("test-ns").Get(context.TODO(), "plain-job-aibom-postprocess", metav1.GetOptions{})
 	if err == nil {
 		t.Error("postprocess job should not have been created for non-instrumented job")
+	}
+}
+
+func TestOnJobEvent_NoGPU_Skips(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	job := completedJob("cpu-job", "test-ns")
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cpu-job-pod",
+			Namespace: "test-ns",
+			Labels: map[string]string{
+				"batch.kubernetes.io/job-name": "cpu-job",
+				LabelInstrumented:              "true",
+			},
+		},
+		Spec: corev1.PodSpec{
+			RestartPolicy: corev1.RestartPolicyNever,
+			Containers:    []corev1.Container{{Name: "test", Image: "busybox"}},
+		},
+	}
+
+	client := fake.NewSimpleClientset(ns, job, pod)
+	w := New(client, "busybox:latest")
+	startWatcher(t, w)
+
+	w.onJobEvent(job)
+
+	_, err := client.BatchV1().Jobs("test-ns").Get(context.TODO(), "cpu-job-aibom-postprocess", metav1.GetOptions{})
+	if err == nil {
+		t.Error("postprocess job should not have been created for non-GPU job")
 	}
 }
 

@@ -458,9 +458,10 @@ def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, tel
         )
 
         gpu_models = gpu_info.get("gpu_models", "")
-        gpu_type = (
-            gpu_models.strip().split("\n")[0].strip() if gpu_models else None
-        )
+        if gpu_models and gpu_models.strip().lower() not in ("", "not available"):
+            gpu_type = gpu_models.strip().split("\n")[0].strip()
+        else:
+            gpu_type = None
         mem_gb_str = system_info.get("memory_total_gb")
         mem_gb = round(float(mem_gb_str), 2) if mem_gb_str else None
 

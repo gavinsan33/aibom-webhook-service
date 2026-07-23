@@ -13,6 +13,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/informers"
@@ -129,7 +130,12 @@ func (w *Watcher) onJobEvent(obj interface{}) {
 		return
 	}
 
-	if !w.hasInstrumentedPods(job) {
+	pods, err := w.getInstrumentedPods(job)
+	if err != nil || len(pods) == 0 {
+		return
+	}
+
+	if !podsRequestGPU(pods) {
 		return
 	}
 
@@ -155,9 +161,21 @@ func (w *Watcher) isJobComplete(job *batchv1.Job) bool {
 	return false
 }
 
-func (w *Watcher) hasInstrumentedPods(job *batchv1.Job) bool {
-	pods, err := w.getInstrumentedPods(job)
-	return err == nil && len(pods) > 0
+func podsRequestGPU(pods []corev1.Pod) bool {
+	gpuResource := corev1.ResourceName("nvidia.com/gpu")
+	zero := resource.MustParse("0")
+	for i := range pods {
+		for j := range pods[i].Spec.Containers {
+			c := &pods[i].Spec.Containers[j]
+			if q, ok := c.Resources.Limits[gpuResource]; ok && q.Cmp(zero) > 0 {
+				return true
+			}
+			if q, ok := c.Resources.Requests[gpuResource]; ok && q.Cmp(zero) > 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (w *Watcher) getInstrumentedPods(job *batchv1.Job) ([]corev1.Pod, error) {
