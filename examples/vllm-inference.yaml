@@ -66,7 +66,8 @@ spec:
                 - operator: Exists
               containers:
                 - name: client
-                  image: ghcr.io/vllm-project/guidellm:nightly
+                  image: ghcr.io/vllm-project/guidellm@sha256:2d6924f600294d1a3e9b923d3fdd65eeb8e4c8f8cdbb9f120d259749897e67f8
+                  imagePullPolicy: Always
                   command:
                     - guidellm
                     - run

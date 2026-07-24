@@ -36,6 +36,8 @@ const (
 
 	initContainerName = "aibom-discovery"
 
+	finalizerName = "aibom.io/log-extraction"
+
 	resyncPeriod      = 30 * time.Second
 	maxJobNameLength  = 63
 	postprocessSuffix = "-aibom-postprocess"
@@ -77,6 +79,7 @@ func New(clientset kubernetes.Interface, postprocessImage string) *Watcher {
 	w.factory.Batch().V1().Jobs().Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    w.onJobEvent,
 		UpdateFunc: func(_, newObj interface{}) { w.onJobEvent(newObj) },
+		DeleteFunc: w.onJobEvent,
 	})
 
 	// Ensure the namespace informer is created so it syncs with the factory.
@@ -122,43 +125,96 @@ func (w *Watcher) onJobEvent(obj interface{}) {
 		return
 	}
 
-	if !w.isJobComplete(job) {
-		return
-	}
+	readyForPostprocess := w.isJobComplete(job) || job.DeletionTimestamp != nil
 
-	if job.Annotations != nil && job.Annotations[AnnotationPostprocess] != "" {
-		return
-	}
-
-	pods, err := w.getInstrumentedPods(job)
-	if err != nil || len(pods) == 0 {
-		return
-	}
-
-	hasGPU := podsRequestGPU(pods)
-	hasAnnotations := len(collectAIBOMAnnotations(job)) > 0
-
-	if !hasGPU && !hasAnnotations {
-		if jobsetName := job.Labels["jobset.sigs.k8s.io/jobset-name"]; jobsetName != "" {
-			siblingJobs, listErr := w.clientset.BatchV1().Jobs(job.Namespace).List(context.TODO(), metav1.ListOptions{
-				LabelSelector: fmt.Sprintf("jobset.sigs.k8s.io/jobset-name=%s", jobsetName),
-			})
-			if listErr == nil {
-				for i := range siblingJobs.Items {
-					if len(collectAIBOMAnnotations(&siblingJobs.Items[i])) > 0 {
-						hasAnnotations = true
-						break
-					}
-				}
-			}
-		}
-		if !hasAnnotations {
+	if !readyForPostprocess {
+		// Path A: job is new/running — add finalizer if it qualifies
+		if hasFinalizer(job) {
 			return
 		}
+		if !w.shouldPostprocess(job) {
+			return
+		}
+		if err := w.addFinalizer(context.TODO(), job); err != nil {
+			log.Printf("warning: could not add finalizer to %s/%s: %v", job.Namespace, job.Name, err)
+		}
+		return
+	}
+
+	// Path B: job is complete or being deleted — run postprocessing
+	if job.Annotations != nil && job.Annotations[AnnotationPostprocess] != "" {
+		if hasFinalizer(job) {
+			w.removeFinalizer(context.TODO(), job)
+		}
+		return
+	}
+
+	if !hasFinalizer(job) && !w.isJobComplete(job) {
+		return
+	}
+
+	if !w.shouldPostprocess(job) {
+		if hasFinalizer(job) {
+			w.removeFinalizer(context.TODO(), job)
+		}
+		return
 	}
 
 	if err := w.createPostprocessJob(context.TODO(), job); err != nil {
 		log.Printf("failed to create postprocess job for %s/%s: %v", job.Namespace, job.Name, err)
+	}
+
+	if hasFinalizer(job) {
+		w.removeFinalizer(context.TODO(), job)
+	}
+}
+
+func (w *Watcher) shouldPostprocess(job *batchv1.Job) bool {
+	pods, err := w.getInstrumentedPods(job)
+	if err != nil || len(pods) == 0 {
+		return false
+	}
+	return podsRequestGPU(pods) || len(collectAIBOMAnnotations(job)) > 0
+}
+
+func hasFinalizer(job *batchv1.Job) bool {
+	for _, f := range job.Finalizers {
+		if f == finalizerName {
+			return true
+		}
+	}
+	return false
+}
+
+func (w *Watcher) addFinalizer(ctx context.Context, job *batchv1.Job) error {
+	finalizers := append(job.Finalizers, finalizerName)
+	finalizersJSON, _ := json.Marshal(finalizers)
+	patch := fmt.Sprintf(`{"metadata":{"finalizers":%s}}`, finalizersJSON)
+	_, err := w.clientset.BatchV1().Jobs(job.Namespace).Patch(ctx, job.Name, types.MergePatchType, []byte(patch), metav1.PatchOptions{})
+	if err != nil {
+		return fmt.Errorf("add finalizer to %s/%s: %w", job.Namespace, job.Name, err)
+	}
+	log.Printf("added finalizer to %s/%s", job.Namespace, job.Name)
+	return nil
+}
+
+func (w *Watcher) removeFinalizer(ctx context.Context, job *batchv1.Job) {
+	var remaining []string
+	for _, f := range job.Finalizers {
+		if f != finalizerName {
+			remaining = append(remaining, f)
+		}
+	}
+	finalizersJSON, _ := json.Marshal(remaining)
+	if remaining == nil {
+		finalizersJSON = []byte("[]")
+	}
+	patch := fmt.Sprintf(`{"metadata":{"finalizers":%s}}`, finalizersJSON)
+	_, err := w.clientset.BatchV1().Jobs(job.Namespace).Patch(ctx, job.Name, types.MergePatchType, []byte(patch), metav1.PatchOptions{})
+	if err != nil {
+		log.Printf("warning: could not remove finalizer from %s/%s: %v", job.Namespace, job.Name, err)
+	} else {
+		log.Printf("removed finalizer from %s/%s", job.Namespace, job.Name)
 	}
 }
 

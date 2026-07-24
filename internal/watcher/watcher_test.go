@@ -525,6 +525,146 @@ func TestOnJobEvent_PostprocessJob_Skips(t *testing.T) {
 	}
 }
 
+func TestFinalizerAddedToGPUJob(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "gpu-job", Namespace: "test-ns"},
+	}
+	pod := instrumentedPod("gpu-job", "test-ns")
+
+	client := fake.NewSimpleClientset(ns, job, pod)
+	w := New(client, "busybox:latest")
+	startWatcher(t, w)
+
+	w.onJobEvent(job)
+
+	updated, err := client.BatchV1().Jobs("test-ns").Get(context.TODO(), "gpu-job", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("could not get job: %v", err)
+	}
+	if !hasFinalizer(updated) {
+		t.Error("finalizer should have been added to GPU job")
+	}
+
+	_, err = client.BatchV1().Jobs("test-ns").Get(context.TODO(), "gpu-job-aibom-postprocess", metav1.GetOptions{})
+	if err == nil {
+		t.Error("postprocess job should not be created before job completes")
+	}
+}
+
+func TestFinalizerNotAddedToNonGPUJob(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "cpu-job", Namespace: "test-ns"},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cpu-job-pod",
+			Namespace: "test-ns",
+			Labels: map[string]string{
+				"batch.kubernetes.io/job-name": "cpu-job",
+				LabelInstrumented:              "true",
+			},
+		},
+		Spec: corev1.PodSpec{
+			RestartPolicy: corev1.RestartPolicyNever,
+			Containers:    []corev1.Container{{Name: "test", Image: "busybox"}},
+		},
+	}
+
+	client := fake.NewSimpleClientset(ns, job, pod)
+	w := New(client, "busybox:latest")
+	startWatcher(t, w)
+
+	w.onJobEvent(job)
+
+	updated, _ := client.BatchV1().Jobs("test-ns").Get(context.TODO(), "cpu-job", metav1.GetOptions{})
+	if hasFinalizer(updated) {
+		t.Error("finalizer should not be added to non-GPU job without AIBOM annotations")
+	}
+}
+
+func TestPostprocessOnDeletion(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	now := metav1.Now()
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "server-job",
+			Namespace:         "test-ns",
+			DeletionTimestamp: &now,
+			Finalizers:        []string{finalizerName},
+			Annotations: map[string]string{
+				"aibom.io/experiment-intent": "inference",
+				"aibom.io/model-name":        "granite-8b",
+			},
+		},
+	}
+	pod := instrumentedPod("server-job", "test-ns")
+
+	client := fake.NewSimpleClientset(ns, job, pod)
+	w := New(client, "aibom-postprocess:latest")
+	w.logReader = &mockLogReader{logs: map[string]string{
+		"test-ns/server-job-pod/aibom-discovery": "===AIBOM_DISCOVERY_START===\n{\"gpu\":{\"gpu_count\":\"1\"}}\n===AIBOM_DISCOVERY_END===\n",
+	}}
+	startWatcher(t, w)
+
+	w.onJobEvent(job)
+
+	ppJob, err := client.BatchV1().Jobs("test-ns").Get(context.TODO(), "server-job-aibom-postprocess", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("postprocess job not created on deletion: %v", err)
+	}
+	if ppJob.Labels[LabelPostprocessFor] != "server-job" {
+		t.Errorf("label %s = %q, want %q", LabelPostprocessFor, ppJob.Labels[LabelPostprocessFor], "server-job")
+	}
+
+	cm, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), "server-job-aibom-postprocess-data", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("configmap not created: %v", err)
+	}
+	if !strings.Contains(cm.Data["annotations.json"], "inference") {
+		t.Errorf("annotations should contain experiment-intent: %s", cm.Data["annotations.json"])
+	}
+}
+
+func TestFinalizerAddedToAnnotatedJob(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "annotated-job",
+			Namespace: "test-ns",
+			Annotations: map[string]string{
+				"aibom.io/experiment-intent": "training",
+			},
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "annotated-job-pod",
+			Namespace: "test-ns",
+			Labels: map[string]string{
+				"batch.kubernetes.io/job-name": "annotated-job",
+				LabelInstrumented:              "true",
+			},
+		},
+		Spec: corev1.PodSpec{
+			RestartPolicy: corev1.RestartPolicyNever,
+			Containers:    []corev1.Container{{Name: "test", Image: "busybox"}},
+		},
+	}
+
+	client := fake.NewSimpleClientset(ns, job, pod)
+	w := New(client, "busybox:latest")
+	startWatcher(t, w)
+
+	w.onJobEvent(job)
+
+	updated, _ := client.BatchV1().Jobs("test-ns").Get(context.TODO(), "annotated-job", metav1.GetOptions{})
+	if !hasFinalizer(updated) {
+		t.Error("finalizer should be added to job with AIBOM annotations even without GPU")
+	}
+}
+
 func TestJobNameTruncation(t *testing.T) {
 	longName := strings.Repeat("a", 60)
 	result := postprocessJobName(longName)
