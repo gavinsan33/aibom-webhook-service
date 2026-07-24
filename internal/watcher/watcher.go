@@ -332,7 +332,7 @@ func collectAIBOMAnnotations(job *batchv1.Job) map[string]string {
 	return result
 }
 
-func (w *Watcher) createDataConfigMap(ctx context.Context, namespace, configMapName, jobName string, discoveries []string, datasets []string, annotations map[string]string) error {
+func (w *Watcher) createDataConfigMap(ctx context.Context, namespace, configMapName, jobName string, discoveries []string, datasets []string, annotations map[string]string, containersJSON string) error {
 	// Build discovery data: array of discovery objects
 	var discoveryArray []json.RawMessage
 	for _, d := range discoveries {
@@ -366,6 +366,7 @@ func (w *Watcher) createDataConfigMap(ctx context.Context, namespace, configMapN
 			"discovery.json":   discoveryData,
 			"dataset.json":     datasetData,
 			"annotations.json": string(annotationsJSON),
+			"containers.json":  containersJSON,
 		},
 	}
 
@@ -452,6 +453,28 @@ func (w *Watcher) createPostprocessJob(ctx context.Context, job *batchv1.Job) er
 		datasets = append(datasets, ds)
 	}
 
+	// Extract container commands for model detection
+	type containerInfo struct {
+		PodName string   `json:"pod_name"`
+		Name    string   `json:"name"`
+		Image   string   `json:"image"`
+		Command []string `json:"command"`
+		Args    []string `json:"args"`
+	}
+	var containers []containerInfo
+	for _, pod := range pods {
+		for _, c := range pod.Spec.Containers {
+			containers = append(containers, containerInfo{
+				PodName: pod.Name,
+				Name:    c.Name,
+				Image:   c.Image,
+				Command: c.Command,
+				Args:    c.Args,
+			})
+		}
+	}
+	containersJSON, _ := json.Marshal(containers)
+
 	// Collect AIBOM annotations from the job and sibling jobs in the JobSet
 	annotations := collectAIBOMAnnotations(job)
 	if jobsetName := job.Labels["jobset.sigs.k8s.io/jobset-name"]; jobsetName != "" && len(annotations) == 0 {
@@ -469,7 +492,7 @@ func (w *Watcher) createPostprocessJob(ctx context.Context, job *batchv1.Job) er
 	}
 
 	// Create ConfigMap with extracted data
-	if err := w.createDataConfigMap(ctx, job.Namespace, configMapName, job.Name, discoveries, datasets, annotations); err != nil {
+	if err := w.createDataConfigMap(ctx, job.Namespace, configMapName, job.Name, discoveries, datasets, annotations, string(containersJSON)); err != nil {
 		log.Printf("warning: could not create data configmap for %s/%s: %v", job.Namespace, job.Name, err)
 	}
 

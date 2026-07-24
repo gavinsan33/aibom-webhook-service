@@ -8,6 +8,7 @@ queries Grafana for telemetry, and produces an AIBOM JSON document.
 
 import json
 import os
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -110,6 +111,149 @@ def load_annotations():
     if data is None:
         return {}
     return data
+
+
+def load_containers():
+    data = load_json_file(f"{INPUT_DIR}/containers.json", "Container specs")
+    if data is None:
+        return []
+    if isinstance(data, list):
+        return data
+    return [data]
+
+
+# ---------------------------------------------------------------------------
+# Model detection (ported from coldpress/model_detector.py)
+# ---------------------------------------------------------------------------
+
+_QUANT_PATTERNS = [
+    (r"GPTQ[_-]Int8", "gptq", 8),
+    (r"GPTQ[_-]Int4", "gptq", 4),
+    (r"gptq[_-]4bit", "gptq", 4),
+    (r"GPTQ", "gptq", 4),
+    (r"[_-]AWQ\b", "awq", 4),
+    (r"[_-]awq\b", "awq", 4),
+    (r"AQLM[_-](\d+)Bit", "aqlm", None),
+    (r"AQLM", "aqlm", 2),
+    (r"EXL2", "exl2", None),
+    (r"SqueezeLLM[_-](\d+)bit", "squeezellm", None),
+    (r"SqueezeLLM", "squeezellm", 4),
+    (r"HQQ[_-](\d+)bit", "hqq", None),
+    (r"HQQ", "hqq", 4),
+    (r"QuIP", "quip", 2),
+    (r"EETQ", "eetq", 8),
+    (r"AutoRound", "autoround", 4),
+    (r"[_-]NVFP4\b", "fp4", 4),
+    (r"[_-]MXFP4\b", "fp4", 4),
+    (r"[_-]FP4\b", "fp4", 4),
+    (r"[_-]FP8\b", "fp8", 8),
+    (r"[_-]fp8\b", "fp8", 8),
+    (r"bnb[_-]4bit", "bitsandbytes", 4),
+    (r"bnb[_-]8bit", "bitsandbytes", 8),
+    (r"[_-]NF4\b", "bitsandbytes", 4),
+    (r"[_-]nf4\b", "bitsandbytes", 4),
+    (r"[_-]INT4\b", "int4", 4),
+    (r"[_-]int4\b", "int4", 4),
+    (r"[_-]INT8\b", "int8", 8),
+    (r"[_-]int8\b", "int8", 8),
+    (r"[_-]Marlin\b", "marlin", 4),
+    (r"[_-]marlin\b", "marlin", 4),
+    (r"GGUF", "gguf", None),
+    (r"GGML", "ggml", None),
+]
+
+_COMPILED_QUANT_PATTERNS = [(re.compile(p), method, bits) for p, method, bits in _QUANT_PATTERNS]
+
+
+def detect_quantization_from_name(model_name):
+    if not model_name:
+        return None
+    for pattern, method, bits in _COMPILED_QUANT_PATTERNS:
+        m = pattern.search(model_name)
+        if m:
+            result = {"quantization_method": method}
+            if bits is not None:
+                result["quantization_bits"] = bits
+            elif m.lastindex and m.group(1).isdigit():
+                result["quantization_bits"] = int(m.group(1))
+            return result
+    return None
+
+
+_VLLM_ARG_MAP = {
+    "--model": ("model_name", str),
+    "--served-model-name": ("served_model_name", str),
+    "--quantization": ("quantization", str),
+    "-q": ("quantization", str),
+    "--dtype": ("dtype", str),
+    "--max-model-len": ("max_model_len", int),
+    "--tensor-parallel-size": ("tensor_parallel_size", int),
+    "-tp": ("tensor_parallel_size", int),
+    "--pipeline-parallel-size": ("pipeline_parallel_size", int),
+    "-pp": ("pipeline_parallel_size", int),
+    "--gpu-memory-utilization": ("gpu_memory_utilization", float),
+    "--max-num-seqs": ("max_num_seqs", int),
+    "--seed": ("seed", int),
+    "--trust-remote-code": ("trust_remote_code", bool),
+    "--enforce-eager": ("enforce_eager", bool),
+    "--enable-prefix-caching": ("enable_prefix_caching", bool),
+    "--port": ("port", int),
+}
+
+_BOOL_FLAGS = {k for k, (_, t) in _VLLM_ARG_MAP.items() if t is bool}
+
+
+def detect_vllm_from_command(command):
+    if not command:
+        return None
+    joined = " ".join(command)
+    if "vllm" not in joined and "vllm.entrypoints" not in joined:
+        return None
+
+    result = {"serving_engine": "vllm"}
+
+    for i, arg in enumerate(command):
+        if "=" in arg:
+            key, _, val = arg.partition("=")
+        else:
+            key = arg
+            val = None
+
+        if key in _BOOL_FLAGS:
+            result[_VLLM_ARG_MAP[key][0]] = True
+            continue
+
+        if key not in _VLLM_ARG_MAP:
+            continue
+
+        name, conv = _VLLM_ARG_MAP[key]
+
+        if val is None and i + 1 < len(command):
+            val = command[i + 1]
+
+        if val is None:
+            continue
+
+        try:
+            result[name] = conv(val)
+        except (ValueError, TypeError):
+            result[name] = val
+
+    if "quantization" not in result and "model_name" in result:
+        quant = detect_quantization_from_name(result["model_name"])
+        if quant:
+            result.update(quant)
+
+    return result if len(result) > 1 else None
+
+
+def detect_model_from_containers(containers):
+    for container in containers:
+        command = container.get("command", []) + container.get("args", [])
+        result = detect_vllm_from_command(command)
+        if result:
+            return result
+    return {}
 
 
 # ---------------------------------------------------------------------------
@@ -324,9 +468,11 @@ def safe_get(data, *keys, default=None):
     return data if data != {} else default
 
 
-def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, telemetry):
+def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, telemetry, detected_model=None):
     print(f"  Discovery files: {len(discoveries)}")
     print(f"  Auto-detected datasets: {len(detected_datasets)}")
+    if detected_model:
+        print(f"  Detected model: {detected_model.get('model_name', 'unknown')}")
     if runtime_info:
         print(
             "  Runtime info: "
@@ -368,16 +514,19 @@ def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, tel
         "pods": pods,
     }
 
-    # Model info from annotations
-    model_name = annotations.get("model-name")
+    # Model info: auto-detected from container commands, then annotations override
+    dm = detected_model or {}
+    model_name = annotations.get("model-name") or dm.get("model_name")
+    quantization = annotations.get("quantization") or dm.get("quantization") or dm.get("quantization_method")
+    quantization_bits = _try_int(annotations.get("quantization-bits")) or dm.get("quantization_bits")
     aibom["model"] = {
         "name": model_name,
         "version": annotations.get("model-version"),
         "architecture": annotations.get("model-architecture"),
-        "framework": annotations.get("model-framework"),
-        "quantization": annotations.get("quantization"),
-        "quantization_bits": _try_int(annotations.get("quantization-bits")),
-        "dtype": annotations.get("dtype"),
+        "framework": annotations.get("model-framework") or dm.get("serving_engine"),
+        "quantization": quantization,
+        "quantization_bits": quantization_bits,
+        "dtype": annotations.get("dtype") or dm.get("dtype"),
     }
 
     # Dataset section
@@ -429,15 +578,13 @@ def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, tel
             "lora_alpha": _try_int(annotations.get("lora-alpha")),
         }
 
-    # Inference config
+    # Inference config: auto-detected from container commands, then annotations override
     if intent == "inference":
         aibom["inference"] = {
-            "serving_engine": annotations.get("serving-engine"),
-            "max_model_len": _try_int(annotations.get("max-model-len")),
-            "tensor_parallel_size": _try_int(annotations.get("tensor-parallel-size")),
-            "gpu_memory_utilization": _try_float(
-                annotations.get("gpu-memory-utilization")
-            ),
+            "serving_engine": annotations.get("serving-engine") or dm.get("serving_engine"),
+            "max_model_len": _try_int(annotations.get("max-model-len")) or dm.get("max_model_len"),
+            "tensor_parallel_size": _try_int(annotations.get("tensor-parallel-size")) or dm.get("tensor_parallel_size"),
+            "gpu_memory_utilization": _try_float(annotations.get("gpu-memory-utilization")) or dm.get("gpu_memory_utilization"),
             "temperature": _try_float(annotations.get("temperature")),
             "top_p": _try_float(annotations.get("top-p")),
             "max_tokens": _try_int(annotations.get("max-tokens")),
@@ -565,7 +712,19 @@ def main():
     discoveries = load_discovery()
     detected_datasets, runtime_info = load_datasets()
     annotations = load_annotations()
+    containers = load_containers()
     print()
+
+    # Model detection from container commands
+    detected_model = detect_model_from_containers(containers)
+    if detected_model:
+        print(f"--- Model Detection ---")
+        print(f"  Engine: {detected_model.get('serving_engine', 'unknown')}")
+        if detected_model.get("model_name"):
+            print(f"  Model: {detected_model['model_name']}")
+        if detected_model.get("quantization_method"):
+            print(f"  Quantization: {detected_model['quantization_method']} ({detected_model.get('quantization_bits', '?')}-bit)")
+        print()
 
     # Telemetry
     telemetry = None
@@ -584,7 +743,8 @@ def main():
     print("--- Phase 2: AIBOM Compilation ---")
     try:
         aibom = compile_aibom(
-            discoveries, detected_datasets, runtime_info, annotations, telemetry
+            discoveries, detected_datasets, runtime_info, annotations, telemetry,
+            detected_model=detected_model,
         )
     except Exception as e:
         print(f"ERROR: AIBOM compilation failed: {e}", file=sys.stderr)
