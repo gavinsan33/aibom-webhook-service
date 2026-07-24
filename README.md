@@ -14,9 +14,11 @@ A Kubernetes mutating admission webhook that automatically instruments AI worklo
    - An **emptyDir volume** (`aibom-data`) for discovery and detection output
    - A label `aibom.io/instrumented: "true"` to prevent double-injection
 6. The pod is created with the injections — the user's original YAML is untouched
-7. When the Job completes, the **watcher** detects it and creates a postprocess Job to compile the AIBOM
+7. When the Job completes (or is being deleted in a JobSet workflow), the **watcher** detects it and creates a postprocess Job to compile the AIBOM
 
-Pods are matched if they are owned by a Job, JobSet, PyTorchJob, or RayJob, **or** if any container requests `nvidia.com/gpu` resources. The webhook always fails open (`failurePolicy: Ignore`) — if the service is down, pods are created normally.
+Pods are matched if they are owned by a Job, JobSet, PyTorchJob, or RayJob, **or** if any container requests `nvidia.com/gpu` resources. When GPU resources are present, the webhook copies the GPU resource request to the discovery init container so `nvidia-smi` can detect the hardware. The webhook always fails open (`failurePolicy: Ignore`) — if the service is down, pods are created normally.
+
+Postprocessing is triggered for Jobs whose pods request GPUs or whose Job has `aibom.io/*` annotations. For JobSet workflows where a server pod is killed rather than completing (e.g., vLLM + client benchmarks), the watcher adds a Kubernetes **finalizer** (`aibom.io/log-extraction`) to hold the Job alive until logs are extracted and the postprocess Job is created.
 
 ## Prerequisites
 
@@ -137,6 +139,8 @@ scripts/
   aibom-scripts/
     generate_snapshot.py             # Hardware discovery script (from coldpress)
     dataset_detector.py              # Dataset detection hooks (from coldpress)
+examples/
+  vllm-inference.yaml               # Example JobSet: vLLM server + guidellm benchmark
 Dockerfile                          # Multi-stage build (distroless)
 Makefile                            # Build, test, deploy targets
 ```
@@ -174,11 +178,12 @@ When the webhook mutates a pod, it adds:
 
 ## Postprocess Flow
 
-When a Job completes, the watcher creates an AIBOM postprocess Job:
+When a Job completes or is being deleted (held by the finalizer), the watcher creates an AIBOM postprocess Job:
 
-1. **Data extraction**: The watcher reads pod logs from the completed Job's pods, extracting discovery JSON (from the `aibom-discovery` init container) and dataset JSON (from application containers) via delimited markers
-2. **ConfigMap creation**: Extracted data is stored in a ConfigMap (`{job-name}-aibom-postprocess-data`) in the workload namespace
-3. **Postprocess Job**: A Job is created running `postprocess.py`, which:
+1. **Data extraction**: The watcher reads pod logs from the Job's pods (and sibling pods in a JobSet), extracting discovery JSON (from the `aibom-discovery` init container) and dataset JSON (from application containers) via delimited markers
+2. **ConfigMap creation**: Extracted data plus `aibom.io/*` annotations are stored in a ConfigMap (`{job-name}-aibom-postprocess-data`) in the workload namespace
+3. **Finalizer removal**: If the Job has the `aibom.io/log-extraction` finalizer, it is removed after data extraction, allowing Kubernetes to complete the deletion
+4. **Postprocess Job**: A Job is created running `postprocess.py`, which:
    - Loads discovery and dataset data from the ConfigMap mount
    - Optionally queries Grafana/Prometheus for telemetry (GPU utilization, memory, power, CPU, network)
    - Compiles everything into an AIBOM JSON document
@@ -212,6 +217,21 @@ oc create secret generic aibom-config \
   --from-literal=grafana-url=https://grafana.example.com \
   --from-literal=grafana-api-token=<token> \
   -n my-ai-workloads
+```
+
+## Example: vLLM Inference Benchmark
+
+The `examples/vllm-inference.yaml` file shows a JobSet with a vLLM server and a guidellm benchmark client. The server has `aibom.io/*` annotations and GPU resources; the client depends on the server being ready. When the client finishes, the JobSet kills the server — but the finalizer holds it until the watcher extracts discovery logs and creates the postprocess Job.
+
+```bash
+# Deploy the example (namespace must be set up first)
+oc apply -f examples/vllm-inference.yaml
+
+# Watch progress
+oc get pods -n gavin-test -w
+
+# View the AIBOM after postprocessing completes
+oc logs -n gavin-test job/aibom-vllm-benchmark-server-0-aibom-postprocess
 ```
 
 ## Roadmap
