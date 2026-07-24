@@ -249,7 +249,7 @@ def detect_vllm_from_command(command):
 
 def detect_model_from_containers(containers):
     for container in containers:
-        command = container.get("command", []) + container.get("args", [])
+        command = (container.get("command") or []) + (container.get("args") or [])
         result = detect_vllm_from_command(command)
         if result:
             return result
