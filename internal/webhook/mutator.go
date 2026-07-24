@@ -46,7 +46,7 @@ func (m *Mutator) Mutate(pod *corev1.Pod) ([]PatchOperation, error) {
 	patches = appendVolume(patches, pod, buildScriptsVolume())
 
 	// Add discovery init container
-	initContainer := m.buildDiscoveryInitContainer()
+	initContainer := m.buildDiscoveryInitContainer(pod)
 	if len(pod.Spec.InitContainers) == 0 {
 		patches = append(patches, PatchOperation{
 			Op:    "add",
@@ -142,8 +142,8 @@ func requestsGPU(pod *corev1.Pod) bool {
 	return false
 }
 
-func (m *Mutator) buildDiscoveryInitContainer() corev1.Container {
-	return corev1.Container{
+func (m *Mutator) buildDiscoveryInitContainer(pod *corev1.Pod) corev1.Container {
+	c := corev1.Container{
 		Name:    "aibom-discovery",
 		Image:   m.DiscoveryImage,
 		Command: []string{"/bin/bash", "-c"},
@@ -160,6 +160,27 @@ func (m *Mutator) buildDiscoveryInitContainer() corev1.Container {
 			{Name: "aibom-scripts", MountPath: "/scripts", ReadOnly: true},
 		},
 	}
+
+	if gpuRes := podGPUResource(pod); gpuRes != nil {
+		c.Resources = corev1.ResourceRequirements{
+			Limits: corev1.ResourceList{corev1.ResourceName("nvidia.com/gpu"): *gpuRes},
+		}
+	}
+
+	return c
+}
+
+func podGPUResource(pod *corev1.Pod) *resource.Quantity {
+	gpuResource := corev1.ResourceName("nvidia.com/gpu")
+	for i := range pod.Spec.Containers {
+		if q, ok := pod.Spec.Containers[i].Resources.Limits[gpuResource]; ok && q.Cmp(resource.MustParse("0")) > 0 {
+			return &q
+		}
+		if q, ok := pod.Spec.Containers[i].Resources.Requests[gpuResource]; ok && q.Cmp(resource.MustParse("0")) > 0 {
+			return &q
+		}
+	}
+	return nil
 }
 
 // buildDatasetDetectorPatches creates JSON patches to inject dataset detection
