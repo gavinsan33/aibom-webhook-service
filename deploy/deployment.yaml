@@ -7,6 +7,8 @@ metadata:
     app: aibom-webhook
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: aibom-webhook
