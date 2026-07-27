@@ -182,6 +182,38 @@ def detect_quantization_from_name(model_name):
     return None
 
 
+def _coerce_scalar(s):
+    """Best-effort scalar type coercion for values inside a key=value list."""
+    if s.lower() in ("true", "false"):
+        return s.lower() == "true"
+    for conv in (int, float):
+        try:
+            return conv(s)
+        except ValueError:
+            pass
+    return s
+
+
+def _parse_json_or_kv(val):
+    """Parse a flag value that's either a JSON blob or a comma-separated
+    key=value list, e.g. vLLM's --speculative-config and
+    --override-generation-config accept both forms. Returns None if the
+    value can't be understood as either."""
+    val = val.strip()
+    if val.startswith("{"):
+        try:
+            return json.loads(val)
+        except (ValueError, TypeError):
+            return None
+    result = {}
+    for pair in val.split(","):
+        if "=" not in pair:
+            continue
+        k, _, v = pair.partition("=")
+        result[k.strip()] = _coerce_scalar(v.strip())
+    return result or None
+
+
 _VLLM_ARG_MAP = {
     "--model": ("model_name", str),
     "--served-model-name": ("served_model_name", str),
@@ -200,6 +232,10 @@ _VLLM_ARG_MAP = {
     "--enforce-eager": ("enforce_eager", bool),
     "--enable-prefix-caching": ("enable_prefix_caching", bool),
     "--port": ("port", int),
+    "--speculative-model": ("speculative_model", str),
+    "--num-speculative-tokens": ("num_speculative_tokens", int),
+    "--speculative-config": ("speculative_config", _parse_json_or_kv),
+    "--override-generation-config": ("generation_config_overrides", _parse_json_or_kv),
 }
 
 _BOOL_FLAGS = {k for k, (_, t) in _VLLM_ARG_MAP.items() if t is bool}
@@ -237,14 +273,29 @@ def detect_vllm_from_command(command):
             continue
 
         try:
-            result[name] = conv(val)
+            converted = conv(val)
         except (ValueError, TypeError):
-            result[name] = val
+            converted = val
+
+        if converted is not None:
+            result[name] = converted
 
     if "quantization" not in result and "model_name" in result:
         quant = detect_quantization_from_name(result["model_name"])
         if quant:
             result.update(quant)
+
+    # Normalize legacy --speculative-model/--num-speculative-tokens into the
+    # same shape as the modern --speculative-config flag.
+    if "speculative_config" not in result and (
+        "speculative_model" in result or "num_speculative_tokens" in result
+    ):
+        spec_config = {}
+        if "speculative_model" in result:
+            spec_config["model"] = result.pop("speculative_model")
+        if "num_speculative_tokens" in result:
+            spec_config["num_speculative_tokens"] = result.pop("num_speculative_tokens")
+        result["speculative_config"] = spec_config
 
     return result if len(result) > 1 else None
 
@@ -571,6 +622,8 @@ def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, tel
         "quantization_bits": quantization_bits,
         "dtype": annotations.get("dtype") or dm.get("dtype"),
     }
+    if dm.get("speculative_config"):
+        aibom["model"]["speculative_decoding"] = dm["speculative_config"]
 
     # Dataset section
     declared_dataset = {
@@ -623,13 +676,15 @@ def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, tel
 
     # Inference config: auto-detected from container commands, then annotations override
     if intent == "inference":
+        gen_overrides = dm.get("generation_config_overrides") or {}
         aibom["inference"] = {
             "serving_engine": annotations.get("serving-engine") or dm.get("serving_engine"),
             "max_model_len": _try_int(annotations.get("max-model-len")) or dm.get("max_model_len"),
             "tensor_parallel_size": _try_int(annotations.get("tensor-parallel-size")) or dm.get("tensor_parallel_size"),
             "gpu_memory_utilization": _try_float(annotations.get("gpu-memory-utilization")) or dm.get("gpu_memory_utilization"),
-            "temperature": _try_float(annotations.get("temperature")),
-            "top_p": _try_float(annotations.get("top-p")),
+            "temperature": _try_float(annotations.get("temperature")) or gen_overrides.get("temperature"),
+            "top_p": _try_float(annotations.get("top-p")) or gen_overrides.get("top_p"),
+            "top_k": _try_int(annotations.get("top-k")) or gen_overrides.get("top_k"),
             "max_tokens": _try_int(annotations.get("max-tokens")),
         }
 
@@ -780,6 +835,10 @@ def main():
             print(f"  Model: {detected_model['model_name']}")
         if detected_model.get("quantization_method"):
             print(f"  Quantization: {detected_model['quantization_method']} ({detected_model.get('quantization_bits', '?')}-bit)")
+        if detected_model.get("speculative_config"):
+            print(f"  Speculative decoding: {detected_model['speculative_config']}")
+        if detected_model.get("generation_config_overrides"):
+            print(f"  Generation config overrides: {detected_model['generation_config_overrides']}")
         print()
 
     # Telemetry

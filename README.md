@@ -236,8 +236,32 @@ Users can optionally annotate their Jobs with `aibom.io/*` keys to provide exper
 | `aibom.io/batch-size` | `training.batch_size` |
 | `aibom.io/epochs` | `training.epochs` |
 | `aibom.io/learning-rate` | `training.learning_rate` |
+| `aibom.io/top-k` | `inference.top_k` |
 
 Without annotations, the AIBOM is still generated from auto-detected data (hardware discovery, dataset detection, telemetry).
+
+### Model Auto-Detection
+
+For vLLM workloads, `postprocess.py` parses the serving container's command/args to auto-populate model and inference fields without requiring annotations. This only fires for containers running vLLM (detected via `vllm` appearing in the command) — other serving engines (TGI, SGLang, TensorRT-LLM, etc.) aren't currently supported.
+
+**Quantization from model name**: regex patterns match common quantization markers in the model name/path (e.g. `AWQ`, `GPTQ`, `INT4`/`INT8`, `FP4`/`FP8`, `bitsandbytes`/`NF4`, `Marlin`, `GGUF`, `AQLM`, `EXL2`, and others), extracting both the method and bit width. For example, `drawais/Granite-3.3-8B-Instruct-AWQ-INT4` detects `awq` at 4 bits.
+
+**vLLM CLI arguments**: flags on the server's `vllm serve` / `vllm.entrypoints.openai.api_server` invocation are parsed directly:
+
+| Flag | AIBOM Field |
+|------|-------------|
+| `--model` | `model.name` |
+| `--dtype` | `model.dtype` |
+| `--quantization` / `-q` | `model.quantization` |
+| `--max-model-len` | `inference.max_model_len` |
+| `--tensor-parallel-size` / `-tp` | `inference.tensor_parallel_size` |
+| `--gpu-memory-utilization` | `inference.gpu_memory_utilization` |
+| `--speculative-model` + `--num-speculative-tokens` (legacy), or `--speculative-config` (modern, JSON or `key=value` list) | `model.speculative_decoding` |
+| `--override-generation-config` (JSON or `key=value` list) | `inference.temperature`, `inference.top_p`, `inference.top_k` |
+
+Sampling parameters set per-request by a benchmark client (e.g. temperature passed in an HTTP request body) aren't visible here — this only sees what's baked into the server's own startup command.
+
+**Precedence**: auto-detected values are used as defaults; any corresponding `aibom.io/*` annotation always overrides them.
 
 ### Grafana Credentials
 
