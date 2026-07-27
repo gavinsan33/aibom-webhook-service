@@ -313,6 +313,20 @@ def query_grafana(grafana_url, api_token, datasource_uid, promql, start_ms, end_
         return None
 
 
+def build_grafana_explore_url(grafana_url, datasource_uid, named_queries, start_ms, end_ms):
+    end_ms_padded = end_ms + 5 * 60 * 1000  # pad to capture the final scrape interval
+    queries = [
+        {"refId": chr(65 + i), "expr": promql, "datasource": {"uid": datasource_uid}}
+        for i, (_, promql) in enumerate(named_queries)
+    ]
+    explore_state = {
+        "datasource": datasource_uid,
+        "queries": queries,
+        "range": {"from": str(start_ms), "to": str(end_ms_padded)},
+    }
+    return f"{grafana_url}/explore?left={urllib.parse.quote(json.dumps(explore_state))}"
+
+
 def parse_grafana_response(response):
     if not response or "results" not in response:
         return []
@@ -407,6 +421,9 @@ def collect_telemetry(discoveries):
             "pod_name": pod_name,
             "start_time": start_time,
             "metrics": {},
+            "grafana_explore_url": build_grafana_explore_url(
+                grafana_url, datasource_uid, list(metrics.items()), start_ms, end_ms
+            ),
         }
 
         for metric_name, promql in metrics.items():
@@ -651,6 +668,12 @@ def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, tel
                 if scale:
                     avg *= scale
                 utilization[field_name] = round(avg, 2)
+
+        utilization["grafana_links"] = [
+            {"pod_name": p["pod_name"], "explore_url": p["grafana_explore_url"]}
+            for p in telemetry["pods"]
+            if p.get("grafana_explore_url")
+        ]
 
         aibom["resource_utilization"] = utilization
     else:
