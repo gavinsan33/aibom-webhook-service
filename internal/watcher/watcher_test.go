@@ -724,6 +724,27 @@ func TestCollectAIBOM(t *testing.T) {
 	if !found {
 		t.Errorf("no file matching train-job_*.json found in %v", entries)
 	}
+
+	// Re-fetch the job as the informer would after the annotation patch, and
+	// replay the event — this must NOT collect a second time (guards against
+	// re-collecting on every resync period).
+	updated, err := client.BatchV1().Jobs("test-ns").Get(context.TODO(), "train-job-aibom-postprocess", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("could not re-fetch postprocess job: %v", err)
+	}
+	if updated.Annotations[AnnotationAIBOMCollected] == "" {
+		t.Fatal("expected postprocess job to be annotated as collected")
+	}
+
+	w.onJobEvent(updated)
+
+	entriesAfter, err := os.ReadDir(filepath.Join(storageDir, "test-ns"))
+	if err != nil {
+		t.Fatalf("could not read storage dir: %v", err)
+	}
+	if len(entriesAfter) != len(entries) {
+		t.Errorf("expected no new AIBOM file on resync, got %d entries (was %d)", len(entriesAfter), len(entries))
+	}
 }
 
 func TestCollectAIBOM_DisabledWhenNoStoragePath(t *testing.T) {

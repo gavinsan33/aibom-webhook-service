@@ -24,10 +24,11 @@ import (
 )
 
 const (
-	LabelEnabled          = "aibom.io/enabled"
-	LabelInstrumented     = "aibom.io/instrumented"
-	LabelPostprocessFor   = "aibom.io/postprocess-for"
-	AnnotationPostprocess = "aibom.io/postprocess-job"
+	LabelEnabled             = "aibom.io/enabled"
+	LabelInstrumented        = "aibom.io/instrumented"
+	LabelPostprocessFor      = "aibom.io/postprocess-for"
+	AnnotationPostprocess    = "aibom.io/postprocess-job"
+	AnnotationAIBOMCollected = "aibom.io/aibom-collected"
 
 	annotationPrefix = "aibom.io/"
 
@@ -131,7 +132,8 @@ func (w *Watcher) onJobEvent(obj interface{}) {
 	}
 
 	if job.Labels[LabelPostprocessFor] != "" {
-		if w.storagePath != "" && w.isJobComplete(job) {
+		alreadyCollected := job.Annotations != nil && job.Annotations[AnnotationAIBOMCollected] != ""
+		if w.storagePath != "" && w.isJobComplete(job) && !alreadyCollected {
 			w.collectAIBOM(context.TODO(), job)
 		}
 		return
@@ -279,6 +281,7 @@ func extractDelimitedJSON(reader io.Reader, startMarker, endMarker string) strin
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	capturing := false
+	var lines []string
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -290,14 +293,19 @@ func extractDelimitedJSON(reader io.Reader, startMarker, endMarker string) strin
 			break
 		}
 		if capturing {
-			trimmed := strings.TrimSpace(line)
-			if json.Valid([]byte(trimmed)) {
-				return trimmed
-			}
-			log.Printf("warning: content between %s markers is not valid JSON", startMarker)
-			return ""
+			lines = append(lines, line)
 		}
 	}
+
+	if len(lines) == 0 {
+		return ""
+	}
+
+	joined := strings.TrimSpace(strings.Join(lines, "\n"))
+	if json.Valid([]byte(joined)) {
+		return joined
+	}
+	log.Printf("warning: content between %s markers is not valid JSON", startMarker)
 	return ""
 }
 
@@ -650,4 +658,9 @@ func (w *Watcher) collectAIBOM(ctx context.Context, job *batchv1.Job) {
 	}
 
 	log.Printf("collected AIBOM for %s/%s -> %s", job.Namespace, originalJobName, path)
+
+	patch := fmt.Sprintf(`{"metadata":{"annotations":{"%s":"%s"}}}`, AnnotationAIBOMCollected, path)
+	if _, err := w.clientset.BatchV1().Jobs(job.Namespace).Patch(ctx, job.Name, types.MergePatchType, []byte(patch), metav1.PatchOptions{}); err != nil {
+		log.Printf("warning: could not annotate postprocess job %s/%s as collected: %v", job.Namespace, job.Name, err)
+	}
 }
