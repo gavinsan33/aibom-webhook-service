@@ -134,6 +134,7 @@ deploy/
   build.yaml                        # OpenShift BuildConfig + ImageStream
   webhook-config.yaml               # MutatingWebhookConfiguration
   aibom-scripts-configmap.yaml      # Reference manifest for the scripts ConfigMap
+  aibom-storage-pvc.yaml            # PVC for collected AIBOM files
 scripts/
   generate-certs.sh                 # Self-signed TLS cert generation
   aibom-scripts/
@@ -158,6 +159,7 @@ The webhook server accepts these flags:
 | `--dataset-detection` | `true` | Inject dataset detection hooks into application containers |
 | `--enable-watcher` | `true` | Start the Job completion watcher |
 | `--postprocess-image` | `busybox:latest` | Image for AIBOM postprocess Jobs (set to the aibom-postprocess image) |
+| `--aibom-storage-path` | `/data/aiboms` | Path to store collected AIBOM files (empty to disable) |
 
 ## What Gets Injected
 
@@ -188,6 +190,7 @@ When a Job completes or is being deleted (held by the finalizer), the watcher cr
    - Optionally queries Grafana/Prometheus for telemetry (GPU utilization, memory, power, CPU, network)
    - Compiles everything into an AIBOM JSON document
    - Outputs the AIBOM to stdout (readable via `kubectl logs`)
+5. **AIBOM collection**: When the postprocess Job completes, the watcher reads its logs, extracts the AIBOM JSON, and writes it to the storage PVC at `{namespace}/{job-name}_{timestamp}.json`
 
 ### Workload Selection and Grouping
 
@@ -246,6 +249,29 @@ oc create secret generic aibom-config \
   -n my-ai-workloads
 ```
 
+### AIBOM Storage
+
+By default, the watcher collects completed AIBOMs and writes them to a PVC mounted at `/data/aiboms`. Files are organized as `{namespace}/{job-name}_{timestamp}.json`, preserving history across re-runs.
+
+To set up storage:
+
+```bash
+# Create the PVC in aibom-system
+oc apply -f deploy/aibom-storage-pvc.yaml
+
+# The deployment already mounts it — just redeploy
+make redeploy
+```
+
+To browse collected AIBOMs:
+
+```bash
+oc exec -n aibom-system deploy/aibom-webhook -- ls /data/aiboms/
+oc exec -n aibom-system deploy/aibom-webhook -- cat /data/aiboms/gavin-test/my-job_20260727T153000Z.json
+```
+
+To disable collection, set `--aibom-storage-path=""` in the deployment args.
+
 ## Example: vLLM Inference Benchmark
 
 The `examples/vllm-inference.yaml` file shows a JobSet with a vLLM server and a guidellm benchmark client. The server has `aibom.io/*` annotations and GPU resources; the client depends on the server being ready. When the client finishes, the JobSet kills the server — but the finalizer holds it until the watcher extracts discovery logs and creates the postprocess Job.
@@ -266,4 +292,4 @@ oc logs -n gavin-test job/aibom-vllm-benchmark-server-0-aibom-postprocess
 - **Phase 1** (complete): Webhook with placeholder discovery init container
 - **Phase 2** (complete): Real hardware discovery + dataset detector injection
 - **Phase 3** (complete): Job watcher + real postprocess container for AIBOM compilation
-- **Phase 4**: Production hardening (cert-manager TLS, Helm chart, metrics endpoint, AIBOM storage)
+- **Phase 4** (in progress): Production hardening — AIBOM storage (complete), cert-manager TLS, Helm chart, metrics endpoint

@@ -3,6 +3,8 @@ package watcher
 import (
 	"context"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -272,7 +274,7 @@ func TestIsJobComplete(t *testing.T) {
 
 func TestIsNamespaceEnabled(t *testing.T) {
 	client := fake.NewSimpleClientset(enabledNamespace("enabled-ns"), disabledNamespace("disabled-ns"))
-	w := New(client, "busybox:latest")
+	w := New(client, "busybox:latest", "")
 	startWatcher(t, w)
 
 	if !w.isNamespaceEnabled("enabled-ns") {
@@ -292,7 +294,7 @@ func TestOnJobEvent_CreatesPostprocessJob(t *testing.T) {
 	pod := instrumentedPod("train-job", "test-ns")
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, "aibom-postprocess:latest")
+	w := New(client, "aibom-postprocess:latest", "")
 
 	discoveryJSON := `{"pod_metadata":{"name":"train-job-pod","uid":"abc123"},"gpu":{"gpu_count":"2"}}`
 	w.logReader = &mockLogReader{
@@ -375,7 +377,7 @@ func TestOnJobEvent_WithAnnotations(t *testing.T) {
 	pod := instrumentedPod("train-job", "test-ns")
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, "aibom-postprocess:latest")
+	w := New(client, "aibom-postprocess:latest", "")
 	w.logReader = &mockLogReader{logs: map[string]string{}}
 	startWatcher(t, w)
 
@@ -399,7 +401,7 @@ func TestOnJobEvent_NonEnabledNamespace_Skips(t *testing.T) {
 	pod := instrumentedPod("train-job", "disabled-ns")
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, "busybox:latest")
+	w := New(client, "busybox:latest", "")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -417,7 +419,7 @@ func TestOnJobEvent_IncompleteJob_Skips(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, job)
-	w := New(client, "busybox:latest")
+	w := New(client, "busybox:latest", "")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -435,7 +437,7 @@ func TestOnJobEvent_AlreadyPostprocessed_Skips(t *testing.T) {
 	pod := instrumentedPod("train-job", "test-ns")
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, "busybox:latest")
+	w := New(client, "busybox:latest", "")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -464,7 +466,7 @@ func TestOnJobEvent_NoInstrumentedPods_Skips(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, "busybox:latest")
+	w := New(client, "busybox:latest", "")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -494,7 +496,7 @@ func TestOnJobEvent_NoGPU_Skips(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, "busybox:latest")
+	w := New(client, "busybox:latest", "")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -512,7 +514,7 @@ func TestOnJobEvent_PostprocessJob_Skips(t *testing.T) {
 	pod := instrumentedPod("train-job-aibom-postprocess", "test-ns")
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, "busybox:latest")
+	w := New(client, "busybox:latest", "")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -533,7 +535,7 @@ func TestFinalizerAddedToGPUJob(t *testing.T) {
 	pod := instrumentedPod("gpu-job", "test-ns")
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, "busybox:latest")
+	w := New(client, "busybox:latest", "")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -573,7 +575,7 @@ func TestFinalizerNotAddedToNonGPUJob(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, "busybox:latest")
+	w := New(client, "busybox:latest", "")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -602,7 +604,7 @@ func TestPostprocessOnDeletion(t *testing.T) {
 	pod := instrumentedPod("server-job", "test-ns")
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, "aibom-postprocess:latest")
+	w := New(client, "aibom-postprocess:latest", "")
 	w.logReader = &mockLogReader{logs: map[string]string{
 		"test-ns/server-job-pod/aibom-discovery": "===AIBOM_DISCOVERY_START===\n{\"gpu\":{\"gpu_count\":\"1\"}}\n===AIBOM_DISCOVERY_END===\n",
 	}}
@@ -654,7 +656,7 @@ func TestFinalizerAddedToAnnotatedJob(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, "busybox:latest")
+	w := New(client, "busybox:latest", "")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -663,6 +665,78 @@ func TestFinalizerAddedToAnnotatedJob(t *testing.T) {
 	if !hasFinalizer(updated) {
 		t.Error("finalizer should be added to job with AIBOM annotations even without GPU")
 	}
+}
+
+func TestCollectAIBOM(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	ppJob := completedJob("train-job-aibom-postprocess", "test-ns")
+	ppJob.Labels = map[string]string{LabelPostprocessFor: "train-job"}
+	ppPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "train-job-aibom-postprocess-pod",
+			Namespace: "test-ns",
+			Labels: map[string]string{
+				"batch.kubernetes.io/job-name": "train-job-aibom-postprocess",
+			},
+		},
+		Spec: corev1.PodSpec{
+			RestartPolicy: corev1.RestartPolicyNever,
+			Containers:    []corev1.Container{{Name: postprocessContainerName, Image: "aibom-postprocess:latest"}},
+		},
+	}
+
+	storageDir := t.TempDir()
+	client := fake.NewSimpleClientset(ns, ppJob, ppPod)
+	w := New(client, "aibom-postprocess:latest", storageDir)
+
+	aibomContent := `{"experiment_intent":"training","model":{"name":"llama-3"}}`
+	w.logReader = &mockLogReader{
+		logs: map[string]string{
+			"test-ns/train-job-aibom-postprocess-pod/aibom-postprocess": "Processing...\n===AIBOM_RESULT_START===\n" + aibomContent + "\n===AIBOM_RESULT_END===\nDone\n",
+		},
+	}
+	startWatcher(t, w)
+
+	w.onJobEvent(ppJob)
+
+	entries, err := os.ReadDir(filepath.Join(storageDir, "test-ns"))
+	if err != nil {
+		t.Fatalf("expected namespace directory to be created: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("expected at least 1 AIBOM file")
+	}
+
+	var found bool
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "train-job_") && strings.HasSuffix(e.Name(), ".json") {
+			data, err := os.ReadFile(filepath.Join(storageDir, "test-ns", e.Name()))
+			if err != nil {
+				t.Fatalf("could not read AIBOM file: %v", err)
+			}
+			if string(data) != aibomContent {
+				t.Errorf("AIBOM content = %q, want %q", string(data), aibomContent)
+			}
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("no file matching train-job_*.json found in %v", entries)
+	}
+}
+
+func TestCollectAIBOM_DisabledWhenNoStoragePath(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	ppJob := completedJob("train-job-aibom-postprocess", "test-ns")
+	ppJob.Labels = map[string]string{LabelPostprocessFor: "train-job"}
+
+	client := fake.NewSimpleClientset(ns, ppJob)
+	w := New(client, "aibom-postprocess:latest", "")
+	startWatcher(t, w)
+
+	// Should not panic or attempt collection with empty storage path
+	w.onJobEvent(ppJob)
 }
 
 func TestJobNameTruncation(t *testing.T) {

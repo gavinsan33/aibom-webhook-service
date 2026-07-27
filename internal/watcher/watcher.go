@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -38,6 +40,11 @@ const (
 
 	finalizerName = "aibom.io/log-extraction"
 
+	resultStartMarker = "===AIBOM_RESULT_START==="
+	resultEndMarker   = "===AIBOM_RESULT_END==="
+
+	postprocessContainerName = "aibom-postprocess"
+
 	resyncPeriod      = 30 * time.Second
 	maxJobNameLength  = 63
 	postprocessSuffix = "-aibom-postprocess"
@@ -65,14 +72,16 @@ type Watcher struct {
 	clientset        kubernetes.Interface
 	logReader        LogReader
 	postprocessImage string
+	storagePath      string
 	factory          informers.SharedInformerFactory
 }
 
-func New(clientset kubernetes.Interface, postprocessImage string) *Watcher {
+func New(clientset kubernetes.Interface, postprocessImage, storagePath string) *Watcher {
 	w := &Watcher{
 		clientset:        clientset,
 		logReader:        &kubeLogReader{clientset: clientset},
 		postprocessImage: postprocessImage,
+		storagePath:      storagePath,
 		factory:          informers.NewSharedInformerFactory(clientset, resyncPeriod),
 	}
 
@@ -122,6 +131,9 @@ func (w *Watcher) onJobEvent(obj interface{}) {
 	}
 
 	if job.Labels[LabelPostprocessFor] != "" {
+		if w.storagePath != "" && w.isJobComplete(job) {
+			w.collectAIBOM(context.TODO(), job)
+		}
 		return
 	}
 
@@ -588,4 +600,54 @@ func postprocessJobName(jobName string) string {
 	}
 	jobName = strings.TrimRight(jobName, "-")
 	return jobName + postprocessSuffix
+}
+
+func (w *Watcher) collectAIBOM(ctx context.Context, job *batchv1.Job) {
+	originalJobName := job.Labels[LabelPostprocessFor]
+	if originalJobName == "" {
+		return
+	}
+
+	pods, err := w.clientset.CoreV1().Pods(job.Namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("batch.kubernetes.io/job-name=%s", job.Name),
+	})
+	if err != nil || len(pods.Items) == 0 {
+		log.Printf("warning: could not find pods for postprocess job %s/%s: %v", job.Namespace, job.Name, err)
+		return
+	}
+
+	var aibomJSON string
+	for _, pod := range pods.Items {
+		stream, err := w.logReader.GetLogs(ctx, pod.Namespace, pod.Name, postprocessContainerName)
+		if err != nil {
+			continue
+		}
+		aibomJSON = extractDelimitedJSON(stream, resultStartMarker, resultEndMarker)
+		stream.Close()
+		if aibomJSON != "" {
+			break
+		}
+	}
+
+	if aibomJSON == "" {
+		log.Printf("warning: no AIBOM output found in postprocess job %s/%s", job.Namespace, job.Name)
+		return
+	}
+
+	dir := filepath.Join(w.storagePath, job.Namespace)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		log.Printf("warning: could not create AIBOM storage directory %s: %v", dir, err)
+		return
+	}
+
+	timestamp := time.Now().UTC().Format("20060102T150405Z")
+	filename := fmt.Sprintf("%s_%s.json", originalJobName, timestamp)
+	path := filepath.Join(dir, filename)
+
+	if err := os.WriteFile(path, []byte(aibomJSON), 0o644); err != nil {
+		log.Printf("warning: could not write AIBOM to %s: %v", path, err)
+		return
+	}
+
+	log.Printf("collected AIBOM for %s/%s -> %s", job.Namespace, originalJobName, path)
 }

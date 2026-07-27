@@ -30,6 +30,7 @@ func main() {
 	flag.BoolVar(&cfg.DatasetDetection, "dataset-detection", true, "inject dataset detection hooks into application containers")
 	flag.BoolVar(&cfg.EnableWatcher, "enable-watcher", true, "start the Job completion watcher")
 	flag.StringVar(&cfg.PostprocessImage, "postprocess-image", "busybox:latest", "image for postprocess Jobs")
+	flag.StringVar(&cfg.AIBOMStoragePath, "aibom-storage-path", "/data/aiboms", "path to store collected AIBOM files (empty to disable)")
 	flag.Parse()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -67,7 +68,7 @@ func main() {
 		if err != nil {
 			log.Printf("WARNING: failed to create Kubernetes client, watcher disabled: %v", err)
 		} else {
-			w := watcher.New(clientset, cfg.PostprocessImage)
+			w := watcher.New(clientset, cfg.PostprocessImage, cfg.AIBOMStoragePath)
 			go func() {
 				if err := w.Start(ctx); err != nil {
 					log.Printf("watcher error: %v", err)
