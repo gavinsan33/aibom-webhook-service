@@ -135,6 +135,7 @@ deploy/
   webhook-config.yaml               # MutatingWebhookConfiguration
   aibom-scripts-configmap.yaml      # Reference manifest for the scripts ConfigMap
   aibom-storage-pvc.yaml            # PVC for collected AIBOM files
+  aibom-storage-browser.yaml        # nginx sidecar config + Service for browsing AIBOMs
 scripts/
   generate-certs.sh                 # Self-signed TLS cert generation
   aibom-scripts/
@@ -263,14 +264,21 @@ oc apply -f deploy/aibom-storage-pvc.yaml
 make redeploy
 ```
 
-To browse collected AIBOMs:
+**Browsing AIBOMs**
+
+The `aibom-webhook` pod runs an `aibom-storage-browser` sidecar (nginx) that serves the same PVC read-only over HTTP with directory listing enabled, fronted by a ClusterIP `aibom-storage` Service (`deploy/aibom-storage-browser.yaml`). It's cluster-internal only — no public URL — so access it via port-forward:
 
 ```bash
-oc exec -n aibom-system deploy/aibom-webhook -- ls /data/aiboms/
-oc exec -n aibom-system deploy/aibom-webhook -- cat /data/aiboms/gavin-test/my-job_20260727T153000Z.json
+oc port-forward -n aibom-system svc/aibom-storage 8080:80
 ```
 
-To disable collection, set `--aibom-storage-path=""` in the deployment args.
+Then open `http://localhost:8080` in a browser to navigate namespaces and download individual AIBOM `.json` files, or fetch one directly:
+
+```bash
+curl http://localhost:8080/gavin-test/my-job_20260727T153000Z.json
+```
+
+To disable collection entirely, set `--aibom-storage-path=""` in the deployment args.
 
 ## Example: vLLM Inference Benchmark
 
