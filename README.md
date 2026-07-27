@@ -189,6 +189,33 @@ When a Job completes or is being deleted (held by the finalizer), the watcher cr
    - Compiles everything into an AIBOM JSON document
    - Outputs the AIBOM to stdout (readable via `kubectl logs`)
 
+### Workload Selection and Grouping
+
+**Which jobs get postprocessed?**
+
+A job in an `aibom.io/enabled` namespace is selected for postprocessing if at least one of these is true:
+
+- Any of its pods request `nvidia.com/gpu` resources (limits or requests > 0)
+- The job has any `aibom.io/*` annotations (e.g., `aibom.io/model-name`, `aibom.io/experiment-intent`)
+
+Internal labels like `aibom.io/instrumented` and `aibom.io/postprocess-job` are excluded from this check. Jobs that are themselves postprocess jobs (labeled `aibom.io/postprocess-for`) are always skipped.
+
+**When does postprocessing trigger?**
+
+- When the job **completes** (has a `JobComplete` condition), or
+- When the job is **being deleted** (`DeletionTimestamp` is set) — this is the finalizer path, used for JobSet server pods that get killed rather than completing naturally
+
+Each job is postprocessed at most once. After the postprocess job is created, the original job is annotated with `aibom.io/postprocess-job` and subsequent events are skipped.
+
+**How are workloads grouped?**
+
+Each qualifying job gets its own postprocess job — there is no cross-job merging. However, if a job belongs to a **JobSet** (has the `jobset.sigs.k8s.io/jobset-name` label), its postprocess job pulls in additional data from siblings:
+
+- **Sibling pod logs**: Discovery and dataset data is extracted from all instrumented pods across the JobSet, not just the triggering job's pods
+- **Sibling annotations**: If the triggering job has no `aibom.io/*` annotations, annotations are inherited from other jobs in the same JobSet
+
+In a typical vLLM inference setup (server + client JobSet), only the server job qualifies for postprocessing (it has GPU resources and annotations). The client job has neither, so it's skipped — but the server's postprocess job still includes discovery data from client pods since they share the same JobSet.
+
 ### AIBOM Annotations
 
 Users can optionally annotate their Jobs with `aibom.io/*` keys to provide experiment metadata:
