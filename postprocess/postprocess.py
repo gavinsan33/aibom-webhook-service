@@ -455,14 +455,13 @@ def collect_telemetry(discoveries):
         if SUMMARY_QUERIES:
             total_ms = end_ms - start_ms
             # Exclude the cold-start window (up to one scrape interval with no
-            # updated observation from the hardware) from the averages, unless
-            # the run is too short to leave a meaningful window afterward.
-            if total_ms > 2 * SCRAPE_INTERVAL_MS:
-                summary_start_ms = start_ms + SCRAPE_INTERVAL_MS
-                includes_cold_start = False
-            else:
-                summary_start_ms = start_ms
-                includes_cold_start = True
+            # updated observation from the hardware) from the averages. Capped
+            # at half the run length rather than requiring a fixed minimum
+            # runtime, so short runs still get a partial correction instead of
+            # none at all.
+            exclude_ms = min(SCRAPE_INTERVAL_MS, total_ms // 2)
+            summary_start_ms = start_ms + exclude_ms
+            includes_cold_start = exclude_ms < SCRAPE_INTERVAL_MS
 
             duration = ms_to_promql_duration(end_ms - summary_start_ms)
             print(
