@@ -37,6 +37,8 @@ TELEMETRY_QUERIES = {
     "network_transmit": 'rate(container_network_transmit_bytes_total{pod="{pod_name}"}[10m])',
 }
 
+SCRAPE_INTERVAL_MS = 5 * 60 * 1000
+
 SUMMARY_QUERIES = {
     "avg_gpu_utilization": {
         "query": 'avg_over_time(nerc:dcgm_gpu_util:avg5m{exported_pod="{pod_name}"}[{duration}])',
@@ -314,9 +316,19 @@ def query_grafana(grafana_url, api_token, datasource_uid, promql, start_ms, end_
 
 
 def build_grafana_explore_url(grafana_url, datasource_uid, named_queries, start_ms, end_ms):
-    end_ms_padded = end_ms + 5 * 60 * 1000  # pad to capture the final scrape interval
+    end_ms_padded = end_ms + SCRAPE_INTERVAL_MS  # pad to capture the final scrape interval
+    # Metrics span wildly different scales (%, MiB, watts, cores, bytes), so
+    # plotting all of them by default produces an unreadable graph. Only the
+    # first metric starts visible; the rest are hidden but still present as
+    # toggleable query rows (Grafana persists a query's "hide" state in the
+    # URL itself, so this stays shareable/bookmarkable).
     queries = [
-        {"refId": chr(65 + i), "expr": promql, "datasource": {"uid": datasource_uid}}
+        {
+            "refId": chr(65 + i),
+            "expr": promql,
+            "datasource": {"uid": datasource_uid},
+            "hide": i != 0,
+        }
         for i, (_, promql) in enumerate(named_queries)
     ]
     explore_state = {
@@ -441,8 +453,22 @@ def collect_telemetry(discoveries):
                 print(f"      WARNING: No data returned")
 
         if SUMMARY_QUERIES:
-            duration = ms_to_promql_duration(end_ms - start_ms)
-            print(f"    Running summary queries (duration={duration})...")
+            total_ms = end_ms - start_ms
+            # Exclude the cold-start window (up to one scrape interval with no
+            # updated observation from the hardware) from the averages, unless
+            # the run is too short to leave a meaningful window afterward.
+            if total_ms > 2 * SCRAPE_INTERVAL_MS:
+                summary_start_ms = start_ms + SCRAPE_INTERVAL_MS
+                includes_cold_start = False
+            else:
+                summary_start_ms = start_ms
+                includes_cold_start = True
+
+            duration = ms_to_promql_duration(end_ms - summary_start_ms)
+            print(
+                f"    Running summary queries (duration={duration}, "
+                f"excludes_cold_start={not includes_cold_start})..."
+            )
             aggregated = {}
             for sq_name, sq_info in SUMMARY_QUERIES.items():
                 promql = (
@@ -452,7 +478,7 @@ def collect_telemetry(discoveries):
                 )
                 response = query_grafana(
                     grafana_url, api_token, datasource_uid, promql,
-                    start_ms, end_ms, instant=True,
+                    summary_start_ms, end_ms, instant=True,
                 )
                 value = parse_instant_value(response)
                 if value is not None:
@@ -464,6 +490,7 @@ def collect_telemetry(discoveries):
                 else:
                     print(f"      {sq_name}: no data")
             pod_telemetry["aggregated"] = aggregated
+            pod_telemetry["summary_includes_cold_start"] = includes_cold_start
 
         telemetry_summary["pods"].append(pod_telemetry)
 
@@ -674,6 +701,13 @@ def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, tel
             for p in telemetry["pods"]
             if p.get("grafana_explore_url")
         ]
+
+        # True if any pod's run was too short to exclude the cold-start
+        # window, meaning the averages above may include a period of
+        # stale/zero readings before the first scrape landed.
+        utilization["summary_includes_cold_start"] = any(
+            p.get("summary_includes_cold_start") for p in telemetry["pods"]
+        )
 
         aibom["resource_utilization"] = utilization
     else:
