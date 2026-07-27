@@ -4,6 +4,21 @@ metadata:
   name: aibom-storage-nginx-conf
   namespace: aibom-system
 data:
+  nginx.conf: |
+    worker_processes 1;
+    pid /tmp/nginx.pid;
+
+    events {
+      worker_connections 1024;
+    }
+
+    http {
+      include /etc/nginx/mime.types;
+      default_type application/octet-stream;
+      sendfile on;
+      keepalive_timeout 65;
+      include /etc/nginx/conf.d/*.conf;
+    }
   default.conf: |
     server {
       listen 8080;
