@@ -34,8 +34,8 @@ spec:
                     - --port=8000
                     - --max-model-len=10000
                     - --gpu-memory-utilization=0.6
-                    - --override-generation-config=temperature=0.7,top_p=0.9,top_k=20
-                    - --speculative-config=method=ngram,num_speculative_tokens=5,prompt_lookup_max=4
+                    - '--override-generation-config={"temperature": 0.7, "top_p": 0.9, "top_k": 20}'
+                    - '--speculative-config={"method": "ngram", "num_speculative_tokens": 5, "prompt_lookup_max": 4}'
                   env:
                     - name: HOME
                       value: /tmp
