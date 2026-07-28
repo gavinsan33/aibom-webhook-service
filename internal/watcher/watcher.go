@@ -423,6 +423,15 @@ func (w *Watcher) getInstrumentedPods(job *batchv1.Job) ([]corev1.Pod, error) {
 }
 
 // extractDelimitedJSON scans a log stream for a JSON block between start and end markers.
+// extractDelimitedJSON scans a log stream for a JSON block between start and end
+// markers. The emitting scripts print debug/log output on stderr and the markers plus
+// payload on stdout, all flushed immediately — but a container runtime merging the two
+// streams into one combined log does not guarantee their relative order is preserved,
+// so a debug line can land between the start marker and the JSON payload even though
+// the script itself never interleaves them. Rather than requiring the whole captured
+// span to be valid JSON, scan the captured lines for the one that parses on its own —
+// generate_snapshot.py and dataset_detector.py both always emit the payload as a single
+// json.dumps() line, so this is exact, not a heuristic.
 func extractDelimitedJSON(reader io.Reader, startMarker, endMarker string) string {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -443,15 +452,16 @@ func extractDelimitedJSON(reader io.Reader, startMarker, endMarker string) strin
 		}
 	}
 
-	if len(lines) == 0 {
-		return ""
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" && json.Valid([]byte(trimmed)) {
+			return trimmed
+		}
 	}
 
-	joined := strings.TrimSpace(strings.Join(lines, "\n"))
-	if json.Valid([]byte(joined)) {
-		return joined
+	if len(lines) > 0 {
+		log.Printf("warning: no valid JSON line found between %s markers", startMarker)
 	}
-	log.Printf("warning: content between %s markers is not valid JSON", startMarker)
 	return ""
 }
 

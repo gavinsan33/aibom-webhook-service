@@ -167,6 +167,24 @@ func TestExtractDelimitedJSON_InvalidJSON(t *testing.T) {
 	}
 }
 
+// TestExtractDelimitedJSON_InterleavedStderrLine reproduces a real interleaving seen
+// in production: dataset_detector.py's debug logging goes to stderr while the markers
+// and JSON payload go to stdout, both flushed immediately — but a container runtime
+// merging the two streams into one combined log doesn't guarantee their relative
+// order, so a debug line can land between the start marker and the JSON payload even
+// though the script itself never interleaves them.
+func TestExtractDelimitedJSON_InterleavedStderrLine(t *testing.T) {
+	logs := "===AIBOM_DATASET_START===\n" +
+		"[AIBOM-DEBUG] Flush succeeded: /tmp/aibom/dataset_detected.json (2 datasets)\n" +
+		`{"datasets":[{"dataset_name":"tatsu-lab/alpaca"}]}` + "\n" +
+		"===AIBOM_DATASET_END===\n"
+	result := extractDelimitedJSON(strings.NewReader(logs), datasetStartMarker, datasetEndMarker)
+	want := `{"datasets":[{"dataset_name":"tatsu-lab/alpaca"}]}`
+	if result != want {
+		t.Errorf("got %q, want %q", result, want)
+	}
+}
+
 func TestExtractDelimitedJSON_StartOnly(t *testing.T) {
 	logs := "===AIBOM_DISCOVERY_START===\n{\"partial\":true}\n"
 	result := extractDelimitedJSON(strings.NewReader(logs), discoveryStartMarker, discoveryEndMarker)
