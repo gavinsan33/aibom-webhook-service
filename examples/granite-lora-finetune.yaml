@@ -1,0 +1,74 @@
+# Single-GPU LoRA fine-tuning example (supervised fine-tuning / SFT).
+#
+# Fine-tunes a small Granite base model with a LoRA adapter via HuggingFace's
+# `trl sft` CLI — the standard, current way to run LoRA SFT without a custom
+# training script, mirroring how the vLLM examples just invoke a CLI rather
+# than bespoke code. LoRA freezes the base model and only trains a small
+# adapter, so this comfortably fits on a single GPU even though the vLLM
+# examples elsewhere in this repo use a larger 8B model for serving.
+#
+# The dataset is loaded via `datasets.load_dataset(...)`, which the webhook's
+# dataset_detector.py already auto-detects at runtime (no annotation needed
+# for dataset composition — aibom.io/dataset-* annotations below just record
+# the declared/intended dataset for comparison against what's auto-detected).
+#
+# --max_steps caps this to a short, testable run rather than a full training
+# pass over all 52k alpaca examples — same spirit as the vLLM benchmark's
+# `--constraint=kind=max_duration,seconds=30`.
+#
+# This is a plain batch/v1 Job (not a JobSet) since fine-tuning has no
+# separate client/server split — it already qualifies for postprocessing
+# today via its GPU resources and aibom.io/* annotations, triggering
+# normally on JobComplete (no finalizer needed, unlike the vLLM JobSet case
+# where the server gets killed rather than completing).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: aibom-granite-lora-finetune
+  namespace: gavin-test
+  annotations:
+    aibom.io/experiment-intent: sft
+    aibom.io/experiment-name: granite-lora-sft-benchmark
+
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: finetune
+          image: nvcr.io/nvidia/pytorch:26.03-py3
+          command:
+            - sh
+            - -c
+            - |
+              pip install --no-cache-dir -U trl peft datasets accelerate && \
+              export PATH="$HOME/.local/bin:$PATH" && \
+              trl sft \
+                --model_name_or_path ibm-granite/granite-3.3-2b-instruct \
+                --dataset_name tatsu-lab/alpaca \
+                --dataset_text_field text \
+                --output_dir /tmp/output \
+                --use_peft true \
+                --lora_r 16 \
+                --lora_alpha 32 \
+                --lora_dropout 0.05 \
+                --lora_target_modules q_proj k_proj v_proj o_proj \
+                --per_device_train_batch_size 4 \
+                --gradient_accumulation_steps 4 \
+                --learning_rate 2e-4 \
+                --num_train_epochs 1 \
+                --max_steps 50 \
+                --logging_steps 5 \
+                --bf16 true \
+                --report_to none
+          env:
+            - name: HOME
+              value: /tmp
+          resources:
+            requests:
+              nvidia.com/gpu: "1"
+            limits:
+              nvidia.com/gpu: "1"

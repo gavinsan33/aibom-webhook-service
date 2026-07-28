@@ -146,6 +146,7 @@ scripts/
 examples/
   vllm-inference.yaml               # Example JobSet: vLLM server + guidellm benchmark
   vllm-inference-rhoai.yaml         # Same model via a RHOAI/KServe InferenceService
+  granite-lora-finetune.yaml        # Example Job: single-GPU LoRA fine-tuning via trl sft
 Dockerfile                          # Multi-stage build (distroless)
 Makefile                            # Build, test, deploy targets
 ```
@@ -337,6 +338,17 @@ KServe predictor pods are owned by a ReplicaSet, not a Job/JobSet/PyTorchJob/Ray
 ```bash
 # Deploy the example (namespace must be set up first)
 oc apply -f examples/vllm-inference-rhoai.yaml
+```
+
+## Example: LoRA Fine-Tuning
+
+The `examples/granite-lora-finetune.yaml` file fine-tunes a small Granite base model with a LoRA adapter over the `tatsu-lab/alpaca` dataset, using HuggingFace's `trl sft` CLI — no custom training script needed, same spirit as the vLLM examples invoking a CLI directly. LoRA freezes the base model and only trains a small adapter, so it fits comfortably on a single GPU. The run is capped with `--max_steps 50` to stay a short, testable example rather than a full training pass.
+
+It's a plain `batch/v1` Job (no JobSet needed, since there's no separate client/server split), so it qualifies for postprocessing today via its GPU resources and `aibom.io/*` annotations and triggers normally on `JobComplete`. The dataset load (`datasets.load_dataset("tatsu-lab/alpaca")`) is picked up automatically by the existing HuggingFace hook in `dataset_detector.py` — the `aibom.io/dataset-*` annotations just record the declared dataset for comparison against what's auto-detected.
+
+```bash
+# Deploy the example (namespace must be set up first)
+oc apply -f examples/granite-lora-finetune.yaml
 ```
 
 ## Roadmap
