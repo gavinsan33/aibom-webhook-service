@@ -11,6 +11,7 @@ import (
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
@@ -898,9 +899,16 @@ func TestCollectAIBOM(t *testing.T) {
 			Containers:    []corev1.Container{{Name: postprocessContainerName, Image: "aibom-postprocess:latest"}},
 		},
 	}
+	dataConfigMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "train-job-aibom-postprocess-data",
+			Namespace: "test-ns",
+			Labels:    map[string]string{LabelPostprocessFor: "train-job"},
+		},
+	}
 
 	storageDir := t.TempDir()
-	client := fake.NewSimpleClientset(ns, ppJob, ppPod)
+	client := fake.NewSimpleClientset(ns, ppJob, ppPod, dataConfigMap)
 	w := New(client, "aibom-postprocess:latest", storageDir)
 
 	aibomContent := `{"experiment_intent":"training","model":{"name":"llama-3"}}`
@@ -939,25 +947,33 @@ func TestCollectAIBOM(t *testing.T) {
 		t.Errorf("no file matching train-job_*.json found in %v", entries)
 	}
 
-	// Re-fetch the job as the informer would after the annotation patch, and
-	// replay the event — this must NOT collect a second time (guards against
-	// re-collecting on every resync period).
-	updated, err := client.BatchV1().Jobs("test-ns").Get(context.TODO(), "train-job-aibom-postprocess", metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("could not re-fetch postprocess job: %v", err)
+	// The postprocess Job and its data ConfigMap have served their purpose and should
+	// be cleaned up so a rerun of the original workload under the same name doesn't
+	// collide with these artifacts on its next postprocess Job/ConfigMap creation.
+	_, err = client.BatchV1().Jobs("test-ns").Get(context.TODO(), "train-job-aibom-postprocess", metav1.GetOptions{})
+	if !apierrors.IsNotFound(err) {
+		t.Errorf("expected postprocess job to be deleted after collection, got err=%v", err)
 	}
-	if updated.Annotations[AnnotationAIBOMCollected] == "" {
-		t.Fatal("expected postprocess job to be annotated as collected")
+	_, err = client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), "train-job-aibom-postprocess-data", metav1.GetOptions{})
+	if !apierrors.IsNotFound(err) {
+		t.Errorf("expected postprocess data configmap to be deleted after collection, got err=%v", err)
 	}
 
-	w.onJobEvent(updated)
+	// Guard against double-collection: if a postprocess job somehow still exists
+	// with AnnotationAIBOMCollected already set (e.g. deletion failed), onJobEvent
+	// must not collect a second time.
+	alreadyCollected := completedJob("train-job-aibom-postprocess", "test-ns")
+	alreadyCollected.Labels = map[string]string{LabelPostprocessFor: "train-job"}
+	alreadyCollected.Annotations = map[string]string{AnnotationAIBOMCollected: "test-ns/train-job_stale.json"}
+
+	w.onJobEvent(alreadyCollected)
 
 	entriesAfter, err := os.ReadDir(filepath.Join(storageDir, "test-ns"))
 	if err != nil {
 		t.Fatalf("could not read storage dir: %v", err)
 	}
 	if len(entriesAfter) != len(entries) {
-		t.Errorf("expected no new AIBOM file on resync, got %d entries (was %d)", len(entriesAfter), len(entries))
+		t.Errorf("expected no new AIBOM file when already collected, got %d entries (was %d)", len(entriesAfter), len(entries))
 	}
 }
 

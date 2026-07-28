@@ -848,4 +848,19 @@ func (w *Watcher) collectAIBOM(ctx context.Context, job *batchv1.Job) {
 	if _, err := w.clientset.BatchV1().Jobs(job.Namespace).Patch(ctx, job.Name, types.MergePatchType, []byte(patch), metav1.PatchOptions{}); err != nil {
 		log.Printf("warning: could not annotate postprocess job %s/%s as collected: %v", job.Namespace, job.Name, err)
 	}
+
+	// The postprocess Job and its data ConfigMap have served their purpose now that
+	// the AIBOM JSON is durably on the storage PVC. Deleting them frees up their
+	// deterministic names so a same-named rerun of the original workload (e.g. after
+	// fixing a bug and reapplying the same manifest) doesn't silently collide with
+	// this run's leftover artifacts on its next postprocess Job/ConfigMap creation —
+	// Create would otherwise hit AlreadyExists and no-op, discarding the new data.
+	background := metav1.DeletePropagationBackground
+	if err := w.clientset.BatchV1().Jobs(job.Namespace).Delete(ctx, job.Name, metav1.DeleteOptions{PropagationPolicy: &background}); err != nil && !errors.IsNotFound(err) {
+		log.Printf("warning: could not delete postprocess job %s/%s: %v", job.Namespace, job.Name, err)
+	}
+	configMapName := job.Name + configMapSuffix
+	if err := w.clientset.CoreV1().ConfigMaps(job.Namespace).Delete(ctx, configMapName, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+		log.Printf("warning: could not delete postprocess data configmap %s/%s: %v", job.Namespace, configMapName, err)
+	}
 }
