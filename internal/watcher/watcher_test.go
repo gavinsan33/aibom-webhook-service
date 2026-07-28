@@ -2,6 +2,7 @@ package watcher
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -176,6 +177,53 @@ func TestExtractDelimitedJSON_InvalidJSON(t *testing.T) {
 func TestExtractDelimitedJSON_InterleavedStderrLine(t *testing.T) {
 	logs := "===AIBOM_DATASET_START===\n" +
 		"[AIBOM-DEBUG] Flush succeeded: /tmp/aibom/dataset_detected.json (2 datasets)\n" +
+		`{"datasets":[{"dataset_name":"tatsu-lab/alpaca"}]}` + "\n" +
+		"===AIBOM_DATASET_END===\n"
+	result := extractDelimitedJSON(strings.NewReader(logs), datasetStartMarker, datasetEndMarker)
+	want := `{"datasets":[{"dataset_name":"tatsu-lab/alpaca"}]}`
+	if result != want {
+		t.Errorf("got %q, want %q", result, want)
+	}
+}
+
+// TestExtractDelimitedJSON_MultilinePrettyPrinted reproduces postprocess.py's own
+// RESULT block, which (unlike generate_snapshot.py/dataset_detector.py) is pretty-
+// printed via json.dumps(aibom, indent=2) — the payload spans many lines, so no single
+// captured line is independently valid JSON on its own.
+func TestExtractDelimitedJSON_MultilinePrettyPrinted(t *testing.T) {
+	logs := "===AIBOM_RESULT_START===\n" +
+		"{\n" +
+		`  "experiment_intent": "sft",` + "\n" +
+		`  "model": {` + "\n" +
+		`    "name": "granite"` + "\n" +
+		"  }\n" +
+		"}\n" +
+		"===AIBOM_RESULT_END===\n"
+	result := extractDelimitedJSON(strings.NewReader(logs), resultStartMarker, resultEndMarker)
+	if !json.Valid([]byte(result)) {
+		t.Fatalf("expected valid JSON, got %q", result)
+	}
+	var parsed map[string]interface{}
+	if err := json.Unmarshal([]byte(result), &parsed); err != nil {
+		t.Fatalf("could not unmarshal result: %v", err)
+	}
+	if parsed["experiment_intent"] != "sft" {
+		t.Errorf("experiment_intent = %v, want sft", parsed["experiment_intent"])
+	}
+	model, ok := parsed["model"].(map[string]interface{})
+	if !ok || model["name"] != "granite" {
+		t.Errorf("model.name not correctly parsed, got %v", parsed["model"])
+	}
+}
+
+// TestExtractDelimitedJSON_SpuriousShortJSONToken reproduces a false positive found in
+// production: a short, unrelated line that happens to independently parse as valid JSON
+// (e.g. a bare quoted string naming a dataset split) landed between the markers before
+// the real payload line. Matching "any valid JSON line" picked that fragment over the
+// real object; matching must require the JSON-object shape the scripts actually emit.
+func TestExtractDelimitedJSON_SpuriousShortJSONToken(t *testing.T) {
+	logs := "===AIBOM_DATASET_START===\n" +
+		`"train"` + "\n" +
 		`{"datasets":[{"dataset_name":"tatsu-lab/alpaca"}]}` + "\n" +
 		"===AIBOM_DATASET_END===\n"
 	result := extractDelimitedJSON(strings.NewReader(logs), datasetStartMarker, datasetEndMarker)

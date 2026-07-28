@@ -423,15 +423,20 @@ func (w *Watcher) getInstrumentedPods(job *batchv1.Job) ([]corev1.Pod, error) {
 }
 
 // extractDelimitedJSON scans a log stream for a JSON block between start and end markers.
-// extractDelimitedJSON scans a log stream for a JSON block between start and end
-// markers. The emitting scripts print debug/log output on stderr and the markers plus
-// payload on stdout, all flushed immediately — but a container runtime merging the two
-// streams into one combined log does not guarantee their relative order is preserved,
-// so a debug line can land between the start marker and the JSON payload even though
-// the script itself never interleaves them. Rather than requiring the whole captured
-// span to be valid JSON, scan the captured lines for the one that parses on its own —
-// generate_snapshot.py and dataset_detector.py both always emit the payload as a single
-// json.dumps() line, so this is exact, not a heuristic.
+// extractDelimitedJSON scans a log stream for a JSON object between start and end
+// markers. Other output on stdout — debug logging landing out of order across a merged
+// stdout/stderr stream, or unrelated library logging (tqdm, dataset library internals,
+// etc.) running concurrently in the same container — can land between the markers even
+// though the emitting script itself never interleaves them. The payload's own
+// formatting also isn't uniform: generate_snapshot.py and dataset_detector.py emit it
+// as a single json.dumps() line, but postprocess.py's own RESULT block is pretty-
+// printed (json.dumps(..., indent=2)) across many lines. So rather than requiring a
+// single captured line — or the whole captured span — to already be valid JSON, find
+// each `{` in the captured text and let a streaming decoder consume exactly one
+// complete JSON value from that position, trying the next `{` if one candidate doesn't
+// parse. This handles noise before, after, or around the payload (as long as it
+// doesn't literally split the payload's own text, which isolated print() calls don't),
+// regardless of whether the payload itself spans one line or many.
 func extractDelimitedJSON(reader io.Reader, startMarker, endMarker string) string {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -452,16 +457,25 @@ func extractDelimitedJSON(reader io.Reader, startMarker, endMarker string) strin
 		}
 	}
 
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed != "" && json.Valid([]byte(trimmed)) {
-			return trimmed
-		}
+	if len(lines) == 0 {
+		return ""
 	}
 
-	if len(lines) > 0 {
-		log.Printf("warning: no valid JSON line found between %s markers", startMarker)
+	joined := strings.Join(lines, "\n")
+	for searchFrom := 0; ; {
+		idx := strings.IndexByte(joined[searchFrom:], '{')
+		if idx == -1 {
+			break
+		}
+		pos := searchFrom + idx
+		var raw json.RawMessage
+		if err := json.NewDecoder(strings.NewReader(joined[pos:])).Decode(&raw); err == nil {
+			return string(raw)
+		}
+		searchFrom = pos + 1
 	}
+
+	log.Printf("warning: no valid JSON object found between %s markers", startMarker)
 	return ""
 }
 
