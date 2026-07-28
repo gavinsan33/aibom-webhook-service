@@ -12,8 +12,7 @@ spec:
           annotations:
             aibom.io/experiment-intent: inference
             aibom.io/experiment-name: vllm-granite-benchmark
-            aibom.io/model-name: drawais/Granite-3.3-8B-Instruct-AWQ-INT4
-            aibom.io/model-framework: vllm
+
         spec:
           parallelism: 1
           completions: 1

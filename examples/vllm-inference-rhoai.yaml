@@ -1,0 +1,109 @@
+# RHOAI/KServe variant of vllm-inference.yaml.
+#
+# This deploys the same model via a KServe InferenceService (the route
+# Red Hat OpenShift AI's Model Serving UI uses) instead of a raw JobSet,
+# using a fully custom predictor container so vLLM pulls the model directly
+# from Hugging Face Hub — no dependency on a pre-provisioned S3/PVC model
+# store in this namespace. A plain batch/v1 Job runs the same guidellm
+# benchmark against the predictor's Service as the client in
+# vllm-inference.yaml — it just waits on the predictor's /health endpoint
+# itself, since a standalone Job has no JobSet dependsOn to order on.
+#
+# Scope: this currently validates webhook *mutation* only (the discovery
+# init container and dataset detector get injected into the predictor pod
+# via the requestsGPU fallback, since the pod is owned by a ReplicaSet, not
+# a Job/JobSet/PyTorchJob/RayJob). The watcher's postprocessing pipeline is
+# Job-based and has no trigger for a long-running Deployment-backed pod, so
+# no AIBOM gets compiled from this example yet — see README. The client Job
+# below also won't qualify for postprocessing on its own (no GPU resources
+# or aibom.io annotations, and it isn't part of a JobSet to inherit any),
+# it just exercises the predictor endpoint.
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: aibom-vllm-granite-rhoai
+  namespace: gavin-test
+  annotations:
+    serving.kserve.io/deploymentMode: RawDeployment
+spec:
+  predictor:
+    minReplicas: 1
+    maxReplicas: 1
+    annotations:
+      aibom.io/experiment-intent: inference
+      aibom.io/experiment-name: vllm-granite-rhoai-benchmark
+
+    tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+    containers:
+      - name: kserve-container
+        image: nvcr.io/nvidia/vllm:26.03-py3
+        command:
+          - python
+          - -m
+          - vllm.entrypoints.openai.api_server
+        args:
+          - --model=drawais/Granite-3.3-8B-Instruct-AWQ-INT4
+          - --port=8000
+          - --max-model-len=10000
+          - --gpu-memory-utilization=0.6
+          - '--override-generation-config={"temperature": 0.7, "top_p": 0.9, "top_k": 20}'
+          - '--speculative-config={"method": "ngram", "num_speculative_tokens": 5, "prompt_lookup_max": 4}'
+        env:
+          - name: HOME
+            value: /tmp
+        ports:
+          - containerPort: 8000
+            protocol: TCP
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        resources:
+          requests:
+            nvidia.com/gpu: "1"
+          limits:
+            nvidia.com/gpu: "1"
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: aibom-vllm-granite-rhoai-client
+  namespace: gavin-test
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      tolerations:
+        - operator: Exists
+      initContainers:
+        - name: wait-for-predictor
+          image: curlimages/curl:8.11.0
+          command:
+            - sh
+            - -c
+            - |
+              until curl -sf http://aibom-vllm-granite-rhoai-predictor.gavin-test.svc.cluster.local:8000/health; do
+                echo "waiting for predictor..."
+                sleep 5
+              done
+      containers:
+        - name: client
+          image: ghcr.io/vllm-project/guidellm@sha256:2d6924f600294d1a3e9b923d3fdd65eeb8e4c8f8cdbb9f120d259749897e67f8
+          imagePullPolicy: Always
+          command:
+            - guidellm
+            - run
+            - --backend=kind=openai_http,target=http://aibom-vllm-granite-rhoai-predictor.gavin-test.svc.cluster.local:8000
+            - --data=kind=synthetic_text,prompt_tokens=256,output_tokens=128
+            - --profile=kind=sweep
+            - --constraint=kind=max_duration,seconds=30
+            - --output=kind=json
+          env:
+            - name: HOME
+              value: /tmp

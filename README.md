@@ -143,6 +143,7 @@ scripts/
     dataset_detector.py              # Dataset detection hooks (from coldpress)
 examples/
   vllm-inference.yaml               # Example JobSet: vLLM server + guidellm benchmark
+  vllm-inference-rhoai.yaml         # Same model via a RHOAI/KServe InferenceService (mutation-only)
 Dockerfile                          # Multi-stage build (distroless)
 Makefile                            # Build, test, deploy targets
 ```
@@ -317,6 +318,17 @@ oc get pods -n gavin-test -w
 
 # View the AIBOM after postprocessing completes
 oc logs -n gavin-test job/aibom-vllm-benchmark-server-0-aibom-postprocess
+```
+
+## Example: vLLM via RHOAI/KServe Model Serving
+
+The `examples/vllm-inference-rhoai.yaml` file deploys the same model as a KServe `InferenceService` — the route Red Hat OpenShift AI's Model Serving UI uses — instead of a raw JobSet. It uses a fully custom predictor container (`spec.predictor.containers`) so vLLM pulls the model directly from Hugging Face Hub, avoiding any dependency on a pre-provisioned S3/PVC model store.
+
+**Current scope: webhook mutation only.** KServe predictor pods are owned by a ReplicaSet, not a Job/JobSet/PyTorchJob/RayJob, so the webhook only instruments them via the `requestsGPU` fallback match (`internal/webhook/mutator.go`) — this works today. The watcher's postprocessing pipeline, however, is entirely `batchv1.Job`-based (`internal/watcher/watcher.go`) and has no trigger for a long-running, Deployment-backed pod, so **no AIBOM gets compiled from this example yet**. Supporting that would mean teaching the watcher to also observe Pods/Deployments carrying KServe's `serving.kserve.io/inferenceservice` label and trigger on pod deletion instead of `JobComplete`.
+
+```bash
+# Deploy the example (namespace must be set up first)
+oc apply -f examples/vllm-inference-rhoai.yaml
 ```
 
 ## Roadmap
