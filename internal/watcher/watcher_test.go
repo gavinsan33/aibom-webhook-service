@@ -93,6 +93,31 @@ func instrumentedPod(jobName, namespace string) *corev1.Pod {
 	}
 }
 
+// instrumentedBarePod is like instrumentedPod but has no owning Job — the shape of a
+// KServe predictor pod (ReplicaSet-owned) that the pod-level finalizer path targets.
+func instrumentedBarePod(name, namespace string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			Labels:    map[string]string{LabelInstrumented: "true"},
+		},
+		Spec: corev1.PodSpec{
+			RestartPolicy:  corev1.RestartPolicyNever,
+			InitContainers: []corev1.Container{{Name: initContainerName, Image: "pytorch:latest"}},
+			Containers: []corev1.Container{{
+				Name:  "kserve-container",
+				Image: "vllm:latest",
+				Resources: corev1.ResourceRequirements{
+					Limits: corev1.ResourceList{
+						"nvidia.com/gpu": resource.MustParse("1"),
+					},
+				},
+			}},
+		},
+	}
+}
+
 func startWatcher(t *testing.T, w *Watcher) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -100,6 +125,8 @@ func startWatcher(t *testing.T, w *Watcher) {
 
 	w.factory.Start(ctx.Done())
 	w.factory.WaitForCacheSync(ctx.Done())
+	w.podFactory.Start(ctx.Done())
+	w.podFactory.WaitForCacheSync(ctx.Done())
 	time.Sleep(50 * time.Millisecond)
 }
 
@@ -168,7 +195,7 @@ func TestCollectAIBOMAnnotations_WithAnnotations(t *testing.T) {
 		"other-annotation":           "ignored",
 	}
 
-	result := collectAIBOMAnnotations(job)
+	result := collectAIBOMAnnotations(job.Annotations)
 
 	if result["experiment-intent"] != "training" {
 		t.Errorf("experiment-intent = %q, want %q", result["experiment-intent"], "training")
@@ -189,7 +216,7 @@ func TestCollectAIBOMAnnotations_WithAnnotations(t *testing.T) {
 
 func TestCollectAIBOMAnnotations_NoAnnotations(t *testing.T) {
 	job := completedJob("j1", "ns")
-	result := collectAIBOMAnnotations(job)
+	result := collectAIBOMAnnotations(job.Annotations)
 	if len(result) != 0 {
 		t.Errorf("expected empty map, got %v", result)
 	}
@@ -664,6 +691,193 @@ func TestFinalizerAddedToAnnotatedJob(t *testing.T) {
 	updated, _ := client.BatchV1().Jobs("test-ns").Get(context.TODO(), "annotated-job", metav1.GetOptions{})
 	if !hasFinalizer(updated) {
 		t.Error("finalizer should be added to job with AIBOM annotations even without GPU")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Pod-level finalizer tests (bare/ReplicaSet-owned pods, e.g. KServe predictors)
+// ---------------------------------------------------------------------------
+
+func TestPodFinalizerAddedToGPUPod(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	pod := instrumentedBarePod("predictor-pod", "test-ns")
+
+	client := fake.NewSimpleClientset(ns, pod)
+	w := New(client, "busybox:latest", "")
+	startWatcher(t, w)
+
+	w.onPodEvent(pod)
+
+	updated, err := client.CoreV1().Pods("test-ns").Get(context.TODO(), "predictor-pod", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("could not get pod: %v", err)
+	}
+	if !hasPodFinalizer(updated) {
+		t.Error("finalizer should have been added to GPU pod")
+	}
+
+	_, err = client.BatchV1().Jobs("test-ns").Get(context.TODO(), "predictor-pod-aibom-postprocess", metav1.GetOptions{})
+	if err == nil {
+		t.Error("postprocess job should not be created before pod is deleted")
+	}
+}
+
+func TestPodFinalizerNotAddedToNonGPUPod(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cpu-pod",
+			Namespace: "test-ns",
+			Labels:    map[string]string{LabelInstrumented: "true"},
+		},
+		Spec: corev1.PodSpec{
+			RestartPolicy: corev1.RestartPolicyNever,
+			Containers:    []corev1.Container{{Name: "test", Image: "busybox"}},
+		},
+	}
+
+	client := fake.NewSimpleClientset(ns, pod)
+	w := New(client, "busybox:latest", "")
+	startWatcher(t, w)
+
+	w.onPodEvent(pod)
+
+	updated, _ := client.CoreV1().Pods("test-ns").Get(context.TODO(), "cpu-pod", metav1.GetOptions{})
+	if hasPodFinalizer(updated) {
+		t.Error("finalizer should not be added to non-GPU pod without AIBOM annotations")
+	}
+}
+
+func TestPodFinalizerAddedToAnnotatedPod(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "annotated-pod",
+			Namespace: "test-ns",
+			Labels:    map[string]string{LabelInstrumented: "true"},
+			Annotations: map[string]string{
+				"aibom.io/experiment-intent": "inference",
+			},
+		},
+		Spec: corev1.PodSpec{
+			RestartPolicy: corev1.RestartPolicyNever,
+			Containers:    []corev1.Container{{Name: "test", Image: "busybox"}},
+		},
+	}
+
+	client := fake.NewSimpleClientset(ns, pod)
+	w := New(client, "busybox:latest", "")
+	startWatcher(t, w)
+
+	w.onPodEvent(pod)
+
+	updated, _ := client.CoreV1().Pods("test-ns").Get(context.TODO(), "annotated-pod", metav1.GetOptions{})
+	if !hasPodFinalizer(updated) {
+		t.Error("finalizer should be added to pod with AIBOM annotations even without GPU")
+	}
+}
+
+func TestPostprocessOnPodDeletion(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	now := metav1.Now()
+	pod := instrumentedBarePod("predictor-pod", "test-ns")
+	pod.DeletionTimestamp = &now
+	pod.Finalizers = []string{podFinalizerName}
+	pod.Annotations = map[string]string{
+		"aibom.io/experiment-intent": "inference",
+		"aibom.io/model-name":        "granite-8b",
+	}
+
+	client := fake.NewSimpleClientset(ns, pod)
+	w := New(client, "aibom-postprocess:latest", "")
+	w.logReader = &mockLogReader{logs: map[string]string{
+		"test-ns/predictor-pod/aibom-discovery": "===AIBOM_DISCOVERY_START===\n{\"gpu\":{\"gpu_count\":\"1\"}}\n===AIBOM_DISCOVERY_END===\n",
+	}}
+	startWatcher(t, w)
+
+	w.onPodEvent(pod)
+
+	ppJob, err := client.BatchV1().Jobs("test-ns").Get(context.TODO(), "predictor-pod-aibom-postprocess", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("postprocess job not created on pod deletion: %v", err)
+	}
+	if ppJob.Labels[LabelPostprocessFor] != "predictor-pod" {
+		t.Errorf("label %s = %q, want %q", LabelPostprocessFor, ppJob.Labels[LabelPostprocessFor], "predictor-pod")
+	}
+
+	cm, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), "predictor-pod-aibom-postprocess-data", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("configmap not created: %v", err)
+	}
+	if !strings.Contains(cm.Data["annotations.json"], "inference") {
+		t.Errorf("annotations should contain experiment-intent: %s", cm.Data["annotations.json"])
+	}
+
+	updated, err := client.CoreV1().Pods("test-ns").Get(context.TODO(), "predictor-pod", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("could not re-fetch pod: %v", err)
+	}
+	if hasPodFinalizer(updated) {
+		t.Error("finalizer should have been removed after postprocess job creation")
+	}
+	if updated.Annotations[AnnotationPostprocess] != "predictor-pod-aibom-postprocess" {
+		t.Errorf("annotation %s = %q, want %q", AnnotationPostprocess, updated.Annotations[AnnotationPostprocess], "predictor-pod-aibom-postprocess")
+	}
+}
+
+func TestOnPodEvent_JobOwnedPod_Skipped(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	now := metav1.Now()
+	pod := instrumentedBarePod("owned-pod", "test-ns")
+	pod.Labels["batch.kubernetes.io/job-name"] = "some-job"
+	pod.DeletionTimestamp = &now
+	pod.Finalizers = []string{podFinalizerName}
+
+	client := fake.NewSimpleClientset(ns, pod)
+	w := New(client, "busybox:latest", "")
+	startWatcher(t, w)
+
+	w.onPodEvent(pod)
+
+	_, err := client.BatchV1().Jobs("test-ns").Get(context.TODO(), "owned-pod-aibom-postprocess", metav1.GetOptions{})
+	if err == nil {
+		t.Error("postprocess job should not be created for a Job-owned pod via the pod path")
+	}
+
+	updated, _ := client.CoreV1().Pods("test-ns").Get(context.TODO(), "owned-pod", metav1.GetOptions{})
+	if updated.Annotations[AnnotationPostprocess] != "" {
+		t.Error("Job-owned pod should not be annotated by the pod path")
+	}
+}
+
+func TestOnPodEvent_NotInstrumented_Skipped(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "uninstrumented-pod",
+			Namespace: "test-ns",
+		},
+		Spec: corev1.PodSpec{
+			RestartPolicy: corev1.RestartPolicyNever,
+			Containers: []corev1.Container{{
+				Name:  "test",
+				Image: "busybox",
+				Resources: corev1.ResourceRequirements{
+					Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")},
+				},
+			}},
+		},
+	}
+
+	client := fake.NewSimpleClientset(ns, pod)
+	w := New(client, "busybox:latest", "")
+	startWatcher(t, w)
+
+	w.onPodEvent(pod)
+
+	updated, _ := client.CoreV1().Pods("test-ns").Get(context.TODO(), "uninstrumented-pod", metav1.GetOptions{})
+	if hasPodFinalizer(updated) {
+		t.Error("finalizer should not be added to a pod the webhook never instrumented")
 	}
 }
 

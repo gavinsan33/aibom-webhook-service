@@ -14,11 +14,13 @@ A Kubernetes mutating admission webhook that automatically instruments AI worklo
    - An **emptyDir volume** (`aibom-data`) for discovery and detection output
    - A label `aibom.io/instrumented: "true"` to prevent double-injection
 6. The pod is created with the injections — the user's original YAML is untouched
-7. When the Job completes (or is being deleted in a JobSet workflow), the **watcher** detects it and creates a postprocess Job to compile the AIBOM
+7. When the Job completes (or is being deleted in a JobSet workflow), the **watcher** detects it and creates a postprocess Job to compile the AIBOM. For long-running pods with no Job owner (e.g. KServe `InferenceService` predictor pods, which are owned by a ReplicaSet and never "complete"), the watcher instead triggers on the pod's deletion via a separate pod-level finalizer.
 
 Pods are matched if they are owned by a Job, JobSet, PyTorchJob, or RayJob, **or** if any container requests `nvidia.com/gpu` resources. When GPU resources are present, the webhook copies the GPU resource request to the discovery init container so `nvidia-smi` can detect the hardware. The webhook always fails open (`failurePolicy: Ignore`) — if the service is down, pods are created normally.
 
 Postprocessing is triggered for Jobs whose pods request GPUs or whose Job has `aibom.io/*` annotations. For JobSet workflows where a server pod is killed rather than completing (e.g., vLLM + client benchmarks), the watcher adds a Kubernetes **finalizer** (`aibom.io/log-extraction`) to hold the Job alive until logs are extracted and the postprocess Job is created.
+
+Bare/ReplicaSet-owned pods (no `batch.kubernetes.io/job-name` label) that carry `aibom.io/instrumented=true` are postprocessed independently, following the same GPU/annotation qualifying criteria but read directly off the pod (since there's no owning Job/JobSet to read them from — KServe, for instance, propagates `spec.predictor.annotations` onto the pod itself). The watcher adds a distinct **pod-level finalizer** (`aibom.io/log-extraction-pod`) while the pod is running, and since these pods never "complete," postprocessing triggers purely on deletion (`DeletionTimestamp` set). There's no JobSet-style sibling merging for this path — each qualifying pod gets its own postprocess Job independently.
 
 ## Prerequisites
 
@@ -143,7 +145,7 @@ scripts/
     dataset_detector.py              # Dataset detection hooks (from coldpress)
 examples/
   vllm-inference.yaml               # Example JobSet: vLLM server + guidellm benchmark
-  vllm-inference-rhoai.yaml         # Same model via a RHOAI/KServe InferenceService (mutation-only)
+  vllm-inference-rhoai.yaml         # Same model via a RHOAI/KServe InferenceService
 Dockerfile                          # Multi-stage build (distroless)
 Makefile                            # Build, test, deploy targets
 ```
@@ -220,6 +222,12 @@ Each qualifying job gets its own postprocess job — there is no cross-job mergi
 - **Sibling annotations**: If the triggering job has no `aibom.io/*` annotations, annotations are inherited from other jobs in the same JobSet
 
 In a typical vLLM inference setup (server + client JobSet), only the server job qualifies for postprocessing (it has GPU resources and annotations). The client job has neither, so it's skipped — but the server's postprocess job still includes discovery data from client pods since they share the same JobSet.
+
+**Which pods get postprocessed?**
+
+Bare pods with no Job owner — no `batch.kubernetes.io/job-name` label, e.g. a KServe `InferenceService` predictor pod owned by a ReplicaSet — are postprocessed via a separate path, following the same qualifying criteria as Jobs above but read directly from the pod itself (GPU resources on the pod's containers, or `aibom.io/*` annotations on the pod — KServe propagates `spec.predictor.annotations` down onto the pod). Only pods already carrying `aibom.io/instrumented=true` (i.e., ones the webhook mutated) are candidates.
+
+There's no "complete" state for a long-running pod, so postprocessing triggers purely on deletion (`DeletionTimestamp` set) via a distinct pod-level finalizer (`aibom.io/log-extraction-pod`), and there's no JobSet-style sibling merging — each qualifying pod gets its own postprocess Job independently.
 
 ### AIBOM Annotations
 
@@ -324,7 +332,7 @@ oc logs -n gavin-test job/aibom-vllm-benchmark-server-0-aibom-postprocess
 
 The `examples/vllm-inference-rhoai.yaml` file deploys the same model as a KServe `InferenceService` — the route Red Hat OpenShift AI's Model Serving UI uses — instead of a raw JobSet. It uses a fully custom predictor container (`spec.predictor.containers`) so vLLM pulls the model directly from Hugging Face Hub, avoiding any dependency on a pre-provisioned S3/PVC model store.
 
-**Current scope: webhook mutation only.** KServe predictor pods are owned by a ReplicaSet, not a Job/JobSet/PyTorchJob/RayJob, so the webhook only instruments them via the `requestsGPU` fallback match (`internal/webhook/mutator.go`) — this works today. The watcher's postprocessing pipeline, however, is entirely `batchv1.Job`-based (`internal/watcher/watcher.go`) and has no trigger for a long-running, Deployment-backed pod, so **no AIBOM gets compiled from this example yet**. Supporting that would mean teaching the watcher to also observe Pods/Deployments carrying KServe's `serving.kserve.io/inferenceservice` label and trigger on pod deletion instead of `JobComplete`.
+KServe predictor pods are owned by a ReplicaSet, not a Job/JobSet/PyTorchJob/RayJob, so the webhook instruments them via the `requestsGPU` fallback match (`internal/webhook/mutator.go`), same as any other GPU pod. Postprocessing is handled by the watcher's pod-level finalizer path (see [Which pods get postprocessed?](#workload-selection-and-grouping)): since the predictor pod never "completes," the watcher holds it open with a distinct finalizer (`aibom.io/log-extraction-pod`) on deletion (e.g. `oc delete pod`, a rollout, or scale-down), extracts its discovery/dataset logs and `aibom.io/*` annotations (propagated onto the pod by KServe from `spec.predictor.annotations`), and creates a postprocess Job directly from that single pod — there's no JobSet to pull sibling data from here. The client Job below still doesn't itself qualify for postprocessing (no GPU resources or `aibom.io/*` annotations, and it isn't part of a JobSet to inherit any) — it only exercises the predictor endpoint.
 
 ```bash
 # Deploy the example (namespace must be set up first)

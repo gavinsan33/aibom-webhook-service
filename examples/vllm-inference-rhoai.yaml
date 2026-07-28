@@ -9,15 +9,18 @@
 # vllm-inference.yaml — it just waits on the predictor's /health endpoint
 # itself, since a standalone Job has no JobSet dependsOn to order on.
 #
-# Scope: this currently validates webhook *mutation* only (the discovery
-# init container and dataset detector get injected into the predictor pod
-# via the requestsGPU fallback, since the pod is owned by a ReplicaSet, not
-# a Job/JobSet/PyTorchJob/RayJob). The watcher's postprocessing pipeline is
-# Job-based and has no trigger for a long-running Deployment-backed pod, so
-# no AIBOM gets compiled from this example yet — see README. The client Job
-# below also won't qualify for postprocessing on its own (no GPU resources
-# or aibom.io annotations, and it isn't part of a JobSet to inherit any),
-# it just exercises the predictor endpoint.
+# The discovery init container and dataset detector get injected into the
+# predictor pod via the webhook's requestsGPU fallback, since the pod is
+# owned by a ReplicaSet, not a Job/JobSet/PyTorchJob/RayJob. Postprocessing
+# is handled by the watcher's pod-level finalizer path (aibom.io/log-extraction-pod):
+# since the predictor pod never "completes", the watcher holds it open on
+# deletion (rollout, scale-down, or a manual `oc delete pod`), extracts its
+# discovery/dataset logs and aibom.io/* annotations (propagated onto the pod
+# by KServe from spec.predictor.annotations), and creates a postprocess Job
+# from that single pod — see README. The client Job below still won't
+# qualify for postprocessing on its own (no GPU resources or aibom.io
+# annotations, and it isn't part of a JobSet to inherit any) — it just
+# exercises the predictor endpoint.
 apiVersion: serving.kserve.io/v1beta1
 kind: InferenceService
 metadata:
