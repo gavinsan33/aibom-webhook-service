@@ -384,13 +384,69 @@ def _flatten_container_command(container):
     return command
 
 
+_LAUNCHERS = {"accelerate", "deepspeed", "torchrun", "mpirun"}
+
+
+def _find_flag_value(tokens, flag_names):
+    for i, tok in enumerate(tokens):
+        if tok.startswith("--") and "=" in tok:
+            key, _, val = tok.partition("=")
+            if key in flag_names:
+                return val
+        elif tok in flag_names and i + 1 < len(tokens):
+            return tokens[i + 1]
+    return None
+
+
+def detect_parallelization_from_command(tokens):
+    """Best-effort detection of a distributed-training launcher's
+    parallelization strategy (accelerate/deepspeed/torchrun/mpirun, or a bare
+    --fsdp/--deepspeed flag on the training command itself). This operates at
+    the launcher layer, independent of which training tool (trl, a custom
+    script, ...) is being launched.
+    """
+    if not tokens:
+        return None
+
+    launcher = next(
+        (os.path.basename(tok) for tok in tokens if os.path.basename(tok) in _LAUNCHERS),
+        None,
+    )
+    has_fsdp = any(t == "--fsdp" or t.startswith("--fsdp=") for t in tokens)
+    has_deepspeed_flag = any(t == "--deepspeed" or t.startswith("--deepspeed=") for t in tokens)
+    has_multi_gpu = "--multi_gpu" in tokens or "--multi-gpu" in tokens
+
+    if has_fsdp:
+        strategy = "fsdp"
+    elif has_deepspeed_flag or launcher == "deepspeed":
+        strategy = "deepspeed"
+    elif has_multi_gpu or launcher in ("torchrun", "mpirun"):
+        strategy = "data_parallel"
+    elif launcher == "accelerate":
+        num_processes = _try_int(_find_flag_value(tokens, ("--num_processes", "--num-processes")))
+        strategy = "data_parallel" if num_processes and num_processes > 1 else None
+    else:
+        strategy = None
+
+    return {"parallelization_strategy": strategy} if strategy else None
+
+
 def detect_model_from_containers(containers):
+    model_result = None
+    parallel_result = None
     for container in containers:
         tokens = _flatten_container_command(container)
-        result = detect_vllm_from_command(tokens) or detect_trl_from_command(tokens)
-        if result:
-            return result
-    return {}
+        if model_result is None:
+            model_result = detect_vllm_from_command(tokens) or detect_trl_from_command(tokens)
+        if parallel_result is None:
+            parallel_result = detect_parallelization_from_command(tokens)
+        if model_result and parallel_result:
+            break
+
+    result = dict(model_result or {})
+    if parallel_result:
+        result.update(parallel_result)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -755,7 +811,7 @@ def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, tel
             "random_seed": _first_not_none(
                 dm.get("random_seed"), _try_int(annotations.get("random-seed"))
             ),
-            "parallelization_strategy": annotations.get("parallelization-strategy"),
+            "parallelization_strategy": annotations.get("parallelization-strategy") or dm.get("parallelization_strategy"),
         }
 
     # Fine-tuning config

@@ -252,7 +252,9 @@ Without annotations, the AIBOM is still generated from auto-detected data (hardw
 
 ### Model Auto-Detection
 
-For vLLM workloads, `postprocess.py` parses the serving container's command/args to auto-populate model and inference fields without requiring annotations. This only fires for containers running vLLM (detected via `vllm` appearing in the command) — other serving engines (TGI, SGLang, TensorRT-LLM, etc.) aren't currently supported.
+`postprocess.py` parses each container's command/args to auto-populate model, fine-tuning, and inference fields without requiring annotations. Detection is command-based, so it also sees into `sh -c "... && trl sft ..."`-style wrapper scripts (common when a job needs to `pip install` before running its training CLI) by shell-splitting the script and scanning the resulting tokens the same way as a plain `command: [...]` list.
+
+Two serving/training tools are currently recognized this way: **vLLM** (serving) and **trl** (fine-tuning). Other serving engines (TGI, SGLang, TensorRT-LLM) and other fine-tuning tools (Axolotl, LLaMA-Factory, raw `transformers.Trainer` scripts) aren't yet supported.
 
 **Quantization from model name**: regex patterns match common quantization markers in the model name/path (e.g. `AWQ`, `GPTQ`, `INT4`/`INT8`, `FP4`/`FP8`, `bitsandbytes`/`NF4`, `Marlin`, `GGUF`, `AQLM`, `EXL2`, and others), extracting both the method and bit width. For example, `drawais/Granite-3.3-8B-Instruct-AWQ-INT4` detects `awq` at 4 bits.
 
@@ -270,6 +272,21 @@ For vLLM workloads, `postprocess.py` parses the serving container's command/args
 | `--override-generation-config` (JSON or `key=value` list) | `inference.temperature`, `inference.top_p`, `inference.top_k` |
 
 Sampling parameters set per-request by a benchmark client (e.g. temperature passed in an HTTP request body) aren't visible here — this only sees what's baked into the server's own startup command.
+
+**trl CLI arguments**: flags on a `trl sft`/`trl dpo`-style invocation are parsed the same way:
+
+| Flag | AIBOM Field |
+|------|-------------|
+| `--model_name_or_path` | `model.name` |
+| `--use_peft` (combined with presence of `--lora_r`) | `fine_tuning.adaptation_method` (`lora` or `peft`) |
+| `--lora_r` | `fine_tuning.lora_rank` |
+| `--lora_alpha` | `fine_tuning.lora_alpha` |
+| `--learning_rate` | `training.learning_rate` |
+| `--per_device_train_batch_size` | `training.batch_size` |
+| `--num_train_epochs` | `training.epochs` |
+| `--seed` | `training.random_seed` |
+
+**Parallelization strategy** (`training.parallelization_strategy`): detected independently of the training tool being launched, from the launcher wrapping the command — `accelerate launch` (`--multi_gpu` or `--num_processes` > 1 → `data_parallel`; `--use_fsdp`/`--fsdp` → `fsdp`; `--use_deepspeed` → `deepspeed`), a bare `deepspeed` launcher or `--deepspeed <config>` flag → `deepspeed`, `torchrun`/`mpirun` → `data_parallel`, or a bare `--fsdp` flag on the training command itself → `fsdp`. This only sees launcher-level parallelism baked into the command; in-script sharding (e.g. `device_map="auto"` set directly in Python code, common in QLoRA scripts) isn't visible to command parsing and isn't detected.
 
 **Precedence**: auto-detected values are used as defaults; any corresponding `aibom.io/*` annotation always overrides them.
 
@@ -344,7 +361,7 @@ oc apply -f examples/vllm-inference-rhoai.yaml
 
 The `examples/granite-lora-finetune.yaml` file fine-tunes a small Granite base model with a LoRA adapter over the `tatsu-lab/alpaca` dataset, using HuggingFace's `trl sft` CLI — no custom training script needed, same spirit as the vLLM examples invoking a CLI directly. LoRA freezes the base model and only trains a small adapter, so it fits comfortably on a single GPU. The run is capped with `--max_steps 50` to stay a short, testable example rather than a full training pass.
 
-It's a plain `batch/v1` Job (no JobSet needed, since there's no separate client/server split), so it qualifies for postprocessing today via its GPU resources and `aibom.io/*` annotations and triggers normally on `JobComplete`. The dataset load (`datasets.load_dataset("tatsu-lab/alpaca")`) is picked up automatically by the existing HuggingFace hook in `dataset_detector.py` — the `aibom.io/dataset-*` annotations just record the declared dataset for comparison against what's auto-detected.
+It's a plain `batch/v1` Job (no JobSet needed, since there's no separate client/server split), so it qualifies for postprocessing today via its GPU resources and `aibom.io/*` annotations and triggers normally on `JobComplete`. The dataset load (`datasets.load_dataset("tatsu-lab/alpaca")`) is picked up automatically by the existing HuggingFace hook in `dataset_detector.py` — the `aibom.io/dataset-*` annotations just record the declared dataset for comparison against what's auto-detected. The `model`, `fine_tuning`, and `training` fields (model name, LoRA rank/alpha, adaptation method, learning rate, batch size, epochs) are all auto-detected from the `trl sft` command itself (see Model Auto-Detection) — no annotations needed for those either.
 
 ```bash
 # Deploy the example (namespace must be set up first)
