@@ -23,6 +23,7 @@ import os
 import sys
 import threading
 import traceback
+import weakref
 
 _OUTPUT_PATH = os.environ.get(
     "AIBOM_DATASET_OUTPUT", "/results/dataset_detected.json"
@@ -44,6 +45,10 @@ _detected_datasets = []
 _runtime_info = {}
 _lock = threading.Lock()
 _hooks_installed = {}
+# Maps a live dataset object (e.g. one returned by datasets.load_dataset) to
+# its already-recorded entry, so a later DataLoader wrapping the same object
+# updates that entry in place instead of recording it as a second dataset.
+_dataset_registry = weakref.WeakKeyDictionary()
 
 
 def _record(entry):
@@ -184,9 +189,19 @@ def _install_dataloader_hook():
     def _patched_init(self, dataset=None, *args, **kwargs):
         _orig_init(self, dataset, *args, **kwargs)
         try:
+            batch_size = getattr(self, "batch_size", None)
+            with _lock:
+                existing = _dataset_registry.get(dataset) if dataset is not None else None
+            if existing is not None:
+                _dbg(f"DataLoader hook: dataset already recorded via {existing.get('source', '?')}, merging")
+                if batch_size is not None:
+                    existing["batch_size"] = batch_size
+                existing.setdefault("seen_via", []).append("torch.utils.data.DataLoader")
+                return
+
             entry = _inspect_torch_dataset(dataset)
-            if hasattr(self, "batch_size") and self.batch_size is not None:
-                entry["batch_size"] = self.batch_size
+            if batch_size is not None:
+                entry["batch_size"] = batch_size
             _record(entry)
         except Exception:
             _dbg_exc("DataLoader._patched_init")
@@ -311,6 +326,11 @@ def _install_hf_datasets_hook():
                     entry["description"] = info.description[:200]
 
             _record(entry)
+            try:
+                with _lock:
+                    _dataset_registry[ds] = entry
+            except TypeError:
+                _dbg("HF datasets hook: dataset object doesn't support weak references, skipping registry")
         except Exception:
             _dbg_exc("HF datasets._patched_load")
         return result

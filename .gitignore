@@ -9,3 +9,4 @@ certs/
 *.swo
 *~
 /postprocess/__pycache__
+/scripts/aibom-scripts/__pycache__

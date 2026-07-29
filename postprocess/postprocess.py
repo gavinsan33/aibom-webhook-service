@@ -479,6 +479,58 @@ def detect_model_from_containers(containers):
     return result
 
 
+_DATASET_ARG_MAP = {
+    "--dataset_name": ("dataset_name", str),
+    "--dataset-name": ("dataset_name", str),
+    "--dataset_config_name": ("dataset_config", str),
+    "--dataset-config-name": ("dataset_config", str),
+    "--dataset_train_split": ("dataset_split", str),
+    "--dataset-train-split": ("dataset_split", str),
+}
+
+
+def detect_dataset_from_command(tokens):
+    """Detect the dataset requested on a training CLI invocation (e.g. `trl
+    sft --dataset_name ...`), independent of which training tool is used."""
+    if not tokens:
+        return None
+
+    result = {}
+    for i, tok in enumerate(tokens):
+        if tok.startswith("--") and "=" in tok:
+            key, _, val = tok.partition("=")
+        else:
+            key = tok
+            val = None
+
+        if key not in _DATASET_ARG_MAP:
+            continue
+
+        name, conv = _DATASET_ARG_MAP[key]
+
+        if val is None and i + 1 < len(tokens) and not tokens[i + 1].startswith("--"):
+            val = tokens[i + 1]
+
+        if val is None:
+            continue
+
+        try:
+            result[name] = conv(val)
+        except (ValueError, TypeError):
+            result[name] = val
+
+    return result if result.get("dataset_name") else None
+
+
+def detect_dataset_from_containers(containers):
+    for container in containers:
+        tokens = _flatten_container_command(container)
+        result = detect_dataset_from_command(tokens)
+        if result:
+            return result
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Phase 1: Telemetry collection
 # ---------------------------------------------------------------------------
@@ -732,7 +784,7 @@ def safe_get(data, *keys, default=None):
     return data if data != {} else default
 
 
-def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, telemetry, detected_model=None):
+def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, telemetry, detected_model=None, cli_dataset=None):
     print(f"  Discovery files: {len(discoveries)}")
     print(f"  Auto-detected datasets: {len(detected_datasets)}")
     if detected_model:
@@ -796,13 +848,18 @@ def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, tel
         aibom["model"]["speculative_decoding"] = dm["speculative_config"]
 
     # Dataset section
+    cli_ds = cli_dataset or {}
     declared_dataset = {
-        "name": annotations.get("dataset-name"),
+        "name": annotations.get("dataset-name") or cli_ds.get("dataset_name"),
         "version": annotations.get("dataset-version"),
         "source": annotations.get("dataset-source"),
         "license": annotations.get("dataset-license"),
     }
-    has_declared = any(declared_dataset.values())
+    if annotations.get("dataset-name"):
+        declared_dataset["declared_via"] = "annotation"
+    elif cli_ds.get("dataset_name"):
+        declared_dataset["declared_via"] = "cli_arg"
+    has_declared = bool(declared_dataset.get("name"))
     intent = aibom["experiment_intent"]
 
     if has_declared or detected_datasets or intent in ("training", "sft"):
@@ -810,14 +867,19 @@ def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, tel
         if detected_datasets:
             aibom["dataset"]["auto_detected"] = detected_datasets
             print(f"  Merged {len(detected_datasets)} auto-detected dataset(s)")
-            if not declared_dataset.get("name") and detected_datasets:
+            if not declared_dataset.get("name"):
                 first = detected_datasets[0]
                 aibom["dataset"]["declared"]["name"] = first.get("dataset_name")
                 aibom["dataset"]["declared"]["source"] = first.get("source")
+                aibom["dataset"]["declared"]["declared_via"] = "inferred_from_runtime"
                 if first.get("version"):
                     aibom["dataset"]["declared"]["version"] = first["version"]
                 if first.get("license"):
                     aibom["dataset"]["declared"]["license"] = first["license"]
+
+            declared_name = aibom["dataset"]["declared"].get("name")
+            for entry in detected_datasets:
+                entry["matches_declared"] = entry.get("dataset_name") == declared_name
 
     # Training config
     if intent in ("training", "sft"):
@@ -1013,6 +1075,7 @@ def main():
 
     # Model detection from container commands
     detected_model = detect_model_from_containers(containers)
+    cli_dataset = detect_dataset_from_containers(containers)
     if detected_model:
         print(f"--- Model Detection ---")
         print(f"  Engine: {detected_model.get('serving_engine', 'unknown')}")
@@ -1044,7 +1107,7 @@ def main():
     try:
         aibom = compile_aibom(
             discoveries, detected_datasets, runtime_info, annotations, telemetry,
-            detected_model=detected_model,
+            detected_model=detected_model, cli_dataset=cli_dataset,
         )
     except Exception as e:
         print(f"ERROR: AIBOM compilation failed: {e}", file=sys.stderr)

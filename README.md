@@ -243,6 +243,8 @@ Users can optionally annotate their Jobs with `aibom.io/*` keys to provide exper
 | `aibom.io/model-framework` | `model.framework` |
 | `aibom.io/dataset-name` | `dataset.declared.name` |
 | `aibom.io/dataset-source` | `dataset.declared.source` |
+| `aibom.io/dataset-version` | `dataset.declared.version` |
+| `aibom.io/dataset-license` | `dataset.declared.license` |
 | `aibom.io/optimizer` | `training.optimizer` |
 | `aibom.io/batch-size` | `training.batch_size` |
 | `aibom.io/epochs` | `training.epochs` |
@@ -296,6 +298,20 @@ Sampling parameters set per-request by a benchmark client (e.g. temperature pass
 This only sees parallelism baked into the command (directly or via one of these launcher-passthrough conventions); in-script sharding (e.g. `device_map="auto"` set directly in Python code, common in QLoRA scripts) isn't visible to command parsing and isn't detected.
 
 **Precedence**: auto-detected values are used as defaults; any corresponding `aibom.io/*` annotation always overrides them.
+
+### Dataset Declaration and Reconciliation
+
+`dataset.declared` is filled in from three sources, in order of precedence:
+
+1. **Annotation** — `aibom.io/dataset-name` (and `dataset-version`/`dataset-source`/`dataset-license`), if set.
+2. **CLI arg** — parsed from the training command's `--dataset_name`/`--dataset_config_name`/`--dataset_train_split` flags (e.g. a `trl sft --dataset_name ...` invocation), if no annotation is set.
+3. **Inferred from runtime** — copied from the first `dataset.auto_detected` entry, only if neither of the above produced a name.
+
+Whichever source wins is recorded in `dataset.declared.declared_via` (`"annotation"`, `"cli_arg"`, or `"inferred_from_runtime"`), so it's always possible to tell whether a dataset name reflects something the job author actually specified or a best-effort guess from what was observed at runtime.
+
+Every entry in `dataset.auto_detected` also carries a `matches_declared` boolean, comparing its `dataset_name` against the final `dataset.declared.name`. This is the actual reconciliation check: it flags the case where a job declares one dataset (via annotation or CLI arg) but the code loads something different at runtime.
+
+Within `dataset.auto_detected` itself, `dataset_detector.py` correlates hook detections that refer to the same underlying dataset object — e.g. a `datasets.load_dataset(...)` call followed by wrapping the result in a `torch.utils.data.DataLoader(...)` for batching — into a single entry (with a `seen_via` list noting every hook that touched it) rather than recording it twice.
 
 ### Grafana Credentials
 
@@ -368,7 +384,7 @@ oc apply -f examples/vllm-inference-rhoai.yaml
 
 The `examples/granite-lora-finetune.yaml` file fine-tunes a small Granite base model with a LoRA adapter over the `tatsu-lab/alpaca` dataset, using HuggingFace's `trl sft` CLI — no custom training script needed, same spirit as the vLLM examples invoking a CLI directly. LoRA freezes the base model and only trains a small adapter, so it fits comfortably on a single GPU. The run is capped with `--max_steps 50` to stay a short, testable example rather than a full training pass.
 
-It's a plain `batch/v1` Job (no JobSet needed, since there's no separate client/server split), so it qualifies for postprocessing today via its GPU resources and `aibom.io/*` annotations and triggers normally on `JobComplete`. The dataset load (`datasets.load_dataset("tatsu-lab/alpaca")`) is picked up automatically by the existing HuggingFace hook in `dataset_detector.py` — the `aibom.io/dataset-*` annotations just record the declared dataset for comparison against what's auto-detected. The `model`, `fine_tuning`, and `training` fields (model name, LoRA rank/alpha, adaptation method, learning rate, batch size, epochs) are all auto-detected from the `trl sft` command itself (see Model Auto-Detection) — no annotations needed for those either.
+It's a plain `batch/v1` Job (no JobSet needed, since there's no separate client/server split), so it qualifies for postprocessing today via its GPU resources and `aibom.io/*` annotations and triggers normally on `JobComplete`. The dataset load (`datasets.load_dataset("tatsu-lab/alpaca")`) is picked up automatically by the existing HuggingFace hook in `dataset_detector.py`, and since this example sets no `aibom.io/dataset-*` annotation, `dataset.declared` is instead parsed from the `trl sft` command's `--dataset_name` flag (`dataset.declared.declared_via: "cli_arg"`) — see [Dataset Declaration and Reconciliation](#dataset-declaration-and-reconciliation). The `model`, `fine_tuning`, and `training` fields (model name, LoRA rank/alpha, adaptation method, learning rate, batch size, epochs) are all auto-detected from the `trl sft` command itself (see Model Auto-Detection) — no annotations needed for those either.
 
 ```bash
 # Deploy the example (namespace must be set up first)
