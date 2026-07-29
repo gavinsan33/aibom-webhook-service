@@ -147,6 +147,7 @@ examples/
   vllm-inference.yaml               # Example JobSet: vLLM server + guidellm benchmark
   vllm-inference-rhoai.yaml         # Same model via a RHOAI/KServe InferenceService
   granite-lora-finetune.yaml        # Example Job: single-GPU LoRA fine-tuning via trl sft
+  granite-lora-finetune-multigpu.yaml  # Same, but 2 GPUs via trl's --num_processes passthrough
 Dockerfile                          # Multi-stage build (distroless)
 Makefile                            # Build, test, deploy targets
 ```
@@ -286,7 +287,13 @@ Sampling parameters set per-request by a benchmark client (e.g. temperature pass
 | `--num_train_epochs` | `training.epochs` |
 | `--seed` | `training.random_seed` |
 
-**Parallelization strategy** (`training.parallelization_strategy`): detected independently of the training tool being launched, from the launcher wrapping the command — `accelerate launch` (`--multi_gpu` or `--num_processes` > 1 → `data_parallel`; `--use_fsdp`/`--fsdp` → `fsdp`; `--use_deepspeed` → `deepspeed`), a bare `deepspeed` launcher or `--deepspeed <config>` flag → `deepspeed`, `torchrun`/`mpirun` → `data_parallel`, or a bare `--fsdp` flag on the training command itself → `fsdp`. This only sees launcher-level parallelism baked into the command; in-script sharding (e.g. `device_map="auto"` set directly in Python code, common in QLoRA scripts) isn't visible to command parsing and isn't detected.
+**Parallelization strategy** (`training.parallelization_strategy`): detected independently of the training tool being launched, covering three shapes:
+
+- An explicit launcher binary: `accelerate launch --multi_gpu` → `data_parallel`; a bare `deepspeed` launcher or `--deepspeed <config>` flag → `deepspeed`; `torchrun`/`mpirun` → `data_parallel`.
+- A bare `--fsdp` flag on the training command itself → `fsdp`.
+- Accelerate-launch arguments passed *directly* to a CLI that spawns `accelerate launch` internally — no separate launcher token ever appears in the container's command. `trl`'s CLI supports this: `trl sft ... --num_processes 4` → `data_parallel`, and `trl sft ... --accelerate_config <name>` maps known profile names (`fsdp1`/`fsdp2` → `fsdp`, `zero1`/`zero2`/`zero3` → `deepspeed`, `multi_gpu` → `data_parallel`, `single_gpu` → none). This is the harder, easy-to-miss case — see `examples/granite-lora-finetune-multigpu.yaml`.
+
+This only sees parallelism baked into the command (directly or via one of these launcher-passthrough conventions); in-script sharding (e.g. `device_map="auto"` set directly in Python code, common in QLoRA scripts) isn't visible to command parsing and isn't detected.
 
 **Precedence**: auto-detected values are used as defaults; any corresponding `aibom.io/*` annotation always overrides them.
 
@@ -366,6 +373,18 @@ It's a plain `batch/v1` Job (no JobSet needed, since there's no separate client/
 ```bash
 # Deploy the example (namespace must be set up first)
 oc apply -f examples/granite-lora-finetune.yaml
+```
+
+## Example: Multi-GPU LoRA Fine-Tuning
+
+The `examples/granite-lora-finetune-multigpu.yaml` file is identical to the single-GPU example above, except it requests 2 GPUs and adds `--num_processes 2` to the `trl sft` invocation, exercising the parallelization-strategy auto-detection described in [Model Auto-Detection](#model-auto-detection).
+
+It deliberately uses `trl`'s own `accelerate launch` passthrough (`--num_processes`) rather than invoking `accelerate launch` as a separate command — the more common way people actually run multi-GPU `trl` jobs, and the harder case for detection, since no `accelerate`/`torchrun`/`deepspeed` launcher binary ever appears in the container's command for `postprocess.py` to key off of.
+
+```bash
+# Deploy the example (namespace must be set up first, and the cluster/node
+# must have 2+ GPUs schedulable for this to actually run)
+oc apply -f examples/granite-lora-finetune-multigpu.yaml
 ```
 
 ## Roadmap

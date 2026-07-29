@@ -377,8 +377,14 @@ def _flatten_container_command(container):
         and os.path.basename(command[0]) in ("sh", "bash")
         and command[1] in ("-c", "-lc", "-ec", "-cx")
     ):
+        # Join shell line-continuations (`\` immediately followed by a
+        # newline) before tokenizing -- shlex doesn't do this on its own,
+        # and without it a backslash-newline survives as a spurious literal
+        # token that can land right after a bare boolean flag (e.g.
+        # `--use_peft \<newline>--lora_r`) and get misread as its value.
+        script = re.sub(r"\\\n", " ", " ".join(command[2:]))
         try:
-            return shlex.split(" ".join(command[2:]))
+            return shlex.split(script)
         except ValueError:
             return command
     return command
@@ -398,12 +404,30 @@ def _find_flag_value(tokens, flag_names):
     return None
 
 
+# trl's own CLI (and similar tools built on HF Accelerate) accept these
+# accelerate-launch arguments directly and spawn `accelerate launch`
+# internally -- so "accelerate" never appears as its own token in the
+# container's command, only these passthrough flags do.
+_ACCELERATE_CONFIG_STRATEGIES = {
+    "fsdp1": "fsdp",
+    "fsdp2": "fsdp",
+    "zero1": "deepspeed",
+    "zero2": "deepspeed",
+    "zero3": "deepspeed",
+    "multi_gpu": "data_parallel",
+    "single_gpu": None,
+}
+
+
 def detect_parallelization_from_command(tokens):
-    """Best-effort detection of a distributed-training launcher's
-    parallelization strategy (accelerate/deepspeed/torchrun/mpirun, or a bare
-    --fsdp/--deepspeed flag on the training command itself). This operates at
-    the launcher layer, independent of which training tool (trl, a custom
-    script, ...) is being launched.
+    """Best-effort detection of a distributed-training parallelization
+    strategy, independent of which training tool (trl, a custom script, ...)
+    is being launched. Covers three shapes:
+      - an explicit launcher binary (accelerate/deepspeed/torchrun/mpirun)
+      - a bare --fsdp/--deepspeed flag on the training command itself
+      - accelerate-launch args (--num_processes, --accelerate_config)
+        passed straight through to a CLI like `trl` that spawns
+        `accelerate launch` internally, with no launcher token visible
     """
     if not tokens:
         return None
@@ -415,16 +439,22 @@ def detect_parallelization_from_command(tokens):
     has_fsdp = any(t == "--fsdp" or t.startswith("--fsdp=") for t in tokens)
     has_deepspeed_flag = any(t == "--deepspeed" or t.startswith("--deepspeed=") for t in tokens)
     has_multi_gpu = "--multi_gpu" in tokens or "--multi-gpu" in tokens
+    num_processes = _try_int(_find_flag_value(tokens, ("--num_processes", "--num-processes")))
+    accelerate_config = _find_flag_value(tokens, ("--accelerate_config", "--accelerate-config"))
+    accelerate_config_name = (
+        os.path.splitext(os.path.basename(accelerate_config))[0] if accelerate_config else None
+    )
 
     if has_fsdp:
         strategy = "fsdp"
     elif has_deepspeed_flag or launcher == "deepspeed":
         strategy = "deepspeed"
+    elif accelerate_config_name in _ACCELERATE_CONFIG_STRATEGIES:
+        strategy = _ACCELERATE_CONFIG_STRATEGIES[accelerate_config_name]
     elif has_multi_gpu or launcher in ("torchrun", "mpirun"):
         strategy = "data_parallel"
-    elif launcher == "accelerate":
-        num_processes = _try_int(_find_flag_value(tokens, ("--num_processes", "--num-processes")))
-        strategy = "data_parallel" if num_processes and num_processes > 1 else None
+    elif num_processes and num_processes > 1:
+        strategy = "data_parallel"
     else:
         strategy = None
 

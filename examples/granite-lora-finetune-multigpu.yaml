@@ -1,0 +1,68 @@
+# Multi-GPU LoRA fine-tuning example (supervised fine-tuning / SFT),
+# exercising postprocess.py's parallelization-strategy auto-detection.
+#
+# Same model/dataset/LoRA config as examples/granite-lora-finetune.yaml, but
+# requests 2 GPUs and adds `--num_processes 2` to the `trl sft` invocation.
+#
+# Per TRL's docs (https://huggingface.co/docs/trl/en/clis#scaling-up-with-accelerate),
+# `trl sft` accepts `accelerate launch` arguments -- like --num_processes,
+# --multi_gpu, or --accelerate_config <fsdp1|fsdp2|zero1|zero2|zero3|...> --
+# directly, and spawns `accelerate launch` internally. That means "accelerate"
+# never appears as its own token in this container's command -- only these
+# passthrough flags do. This is the realistic, minimal-diff way most people
+# actually run multi-GPU trl jobs, and it's deliberately the harder case for
+# detect_parallelization_from_command() in postprocess.py: it has to infer
+# `data_parallel` from --num_processes alone, with no "accelerate"/"torchrun"/
+# "deepspeed" launcher binary visible anywhere in the command.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: aibom-granite-lora-finetune-multigpu
+  namespace: gavin-test
+  annotations:
+    aibom.io/experiment-intent: sft
+    aibom.io/experiment-name: granite-lora-sft-multigpu-benchmark
+
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: finetune
+          image: nvcr.io/nvidia/pytorch:26.03-py3
+          command:
+            - sh
+            - -c
+            - |
+              pip install --no-cache-dir -U trl peft datasets accelerate && \
+              export PATH="$HOME/.local/bin:$PATH" && \
+              trl sft \
+                --model_name_or_path ibm-granite/granite-3.3-2b-instruct \
+                --dataset_name tatsu-lab/alpaca \
+                --dataset_text_field text \
+                --output_dir /tmp/output \
+                --use_peft true \
+                --lora_r 16 \
+                --lora_alpha 32 \
+                --lora_dropout 0.05 \
+                --lora_target_modules q_proj k_proj v_proj o_proj \
+                --per_device_train_batch_size 4 \
+                --gradient_accumulation_steps 4 \
+                --learning_rate 2e-4 \
+                --num_train_epochs 1 \
+                --max_steps 50 \
+                --logging_steps 5 \
+                --bf16 true \
+                --num_processes 2 \
+                --report_to none
+          env:
+            - name: HOME
+              value: /tmp
+          resources:
+            requests:
+              nvidia.com/gpu: "2"
+            limits:
+              nvidia.com/gpu: "2"
