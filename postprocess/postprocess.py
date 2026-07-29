@@ -9,6 +9,7 @@ queries Grafana for telemetry, and produces an AIBOM JSON document.
 import json
 import os
 import re
+import shlex
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -300,10 +301,93 @@ def detect_vllm_from_command(command):
     return result if len(result) > 1 else None
 
 
+def _to_bool(val):
+    if isinstance(val, bool):
+        return val
+    return str(val).strip().lower() in ("1", "true", "yes")
+
+
+_TRL_ARG_MAP = {
+    "--model_name_or_path": ("model_name", str),
+    "--model-name-or-path": ("model_name", str),
+    "--use_peft": ("use_peft", _to_bool),
+    "--use-peft": ("use_peft", _to_bool),
+    "--lora_r": ("lora_rank", int),
+    "--lora-r": ("lora_rank", int),
+    "--lora_alpha": ("lora_alpha", int),
+    "--lora-alpha": ("lora_alpha", int),
+    "--learning_rate": ("learning_rate", float),
+    "--learning-rate": ("learning_rate", float),
+    "--per_device_train_batch_size": ("batch_size", int),
+    "--per-device-train-batch-size": ("batch_size", int),
+    "--num_train_epochs": ("epochs", int),
+    "--num-train-epochs": ("epochs", int),
+    "--seed": ("random_seed", int),
+}
+
+
+def detect_trl_from_command(command):
+    """Detect model/LoRA config from a `trl sft`/`trl dpo`-style CLI invocation."""
+    if not command or not re.search(r"\btrl\b", " ".join(command)):
+        return None
+
+    result = {"training_framework": "trl"}
+
+    for i, arg in enumerate(command):
+        if arg.startswith("--") and "=" in arg:
+            key, _, val = arg.partition("=")
+        else:
+            key = arg
+            val = None
+
+        if key not in _TRL_ARG_MAP:
+            continue
+
+        name, conv = _TRL_ARG_MAP[key]
+
+        if val is None and i + 1 < len(command) and not command[i + 1].startswith("--"):
+            val = command[i + 1]
+
+        if val is None:
+            continue
+
+        try:
+            converted = conv(val)
+        except (ValueError, TypeError):
+            converted = val
+
+        result[name] = converted
+
+    if result.pop("use_peft", False):
+        result["adaptation_method"] = "lora" if "lora_rank" in result else "peft"
+
+    return result if len(result) > 1 else None
+
+
+def _flatten_container_command(container):
+    """Expand `sh -c "..."`/`bash -c "..."` wrappers into a flat token list.
+
+    Jobs that need to `pip install` before running a training CLI (e.g. trl)
+    wrap everything in a single shell string, which would otherwise hide the
+    CLI flags from the per-token detectors below.
+    """
+    command = (container.get("command") or []) + (container.get("args") or [])
+    if (
+        len(command) >= 3
+        and os.path.basename(command[0]) in ("sh", "bash")
+        and command[1] in ("-c", "-lc", "-ec", "-cx")
+    ):
+        try:
+            return shlex.split(" ".join(command[2:]))
+        except ValueError:
+            return command
+    return command
+
+
 def detect_model_from_containers(containers):
     for container in containers:
-        command = (container.get("command") or []) + (container.get("args") or [])
-        result = detect_vllm_from_command(command)
+        tokens = _flatten_container_command(container)
+        result = detect_vllm_from_command(tokens) or detect_trl_from_command(tokens)
         if result:
             return result
     return {}
@@ -617,7 +701,7 @@ def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, tel
         "name": model_name,
         "version": annotations.get("model-version"),
         "architecture": annotations.get("model-architecture"),
-        "framework": annotations.get("model-framework") or dm.get("serving_engine"),
+        "framework": annotations.get("model-framework") or dm.get("serving_engine") or dm.get("training_framework"),
         "quantization": quantization,
         "quantization_bits": quantization_bits,
         "dtype": annotations.get("dtype") or dm.get("dtype"),
@@ -653,25 +737,33 @@ def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, tel
     if intent in ("training", "sft"):
         aibom["training"] = {
             "optimizer": annotations.get("optimizer"),
-            "learning_rate": runtime_info.get(
-                "learning_rate", _try_float(annotations.get("learning-rate"))
+            "learning_rate": _first_not_none(
+                runtime_info.get("learning_rate"),
+                dm.get("learning_rate"),
+                _try_float(annotations.get("learning-rate")),
             ),
-            "batch_size": runtime_info.get(
-                "batch_size", _try_int(annotations.get("batch-size"))
+            "batch_size": _first_not_none(
+                runtime_info.get("batch_size"),
+                dm.get("batch_size"),
+                _try_int(annotations.get("batch-size")),
             ),
-            "epochs": runtime_info.get(
-                "epochs", _try_int(annotations.get("epochs"))
+            "epochs": _first_not_none(
+                runtime_info.get("epochs"),
+                dm.get("epochs"),
+                _try_int(annotations.get("epochs")),
             ),
-            "random_seed": _try_int(annotations.get("random-seed")),
+            "random_seed": _first_not_none(
+                dm.get("random_seed"), _try_int(annotations.get("random-seed"))
+            ),
             "parallelization_strategy": annotations.get("parallelization-strategy"),
         }
 
     # Fine-tuning config
     if intent == "sft":
         aibom["fine_tuning"] = {
-            "adaptation_method": annotations.get("adaptation-method"),
-            "lora_rank": _try_int(annotations.get("lora-rank")),
-            "lora_alpha": _try_int(annotations.get("lora-alpha")),
+            "adaptation_method": annotations.get("adaptation-method") or dm.get("adaptation_method"),
+            "lora_rank": _try_int(annotations.get("lora-rank")) or dm.get("lora_rank"),
+            "lora_alpha": _try_int(annotations.get("lora-alpha")) or dm.get("lora_alpha"),
         }
 
     # Inference config: auto-detected from container commands, then annotations override
@@ -799,6 +891,13 @@ def _try_float(value):
         return float(value)
     except (ValueError, TypeError):
         return None
+
+
+def _first_not_none(*values):
+    for v in values:
+        if v is not None:
+            return v
+    return None
 
 
 # ---------------------------------------------------------------------------

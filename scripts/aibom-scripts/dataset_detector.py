@@ -85,6 +85,8 @@ def _capture_training_args():
         "--epochs": ("epochs", int),
         "--num-epochs": ("epochs", int),
         "--num_epochs": ("epochs", int),
+        "--num-train-epochs": ("epochs", int),
+        "--num_train_epochs": ("epochs", int),
         "--batch-size": ("batch_size", int),
         "--batch_size": ("batch_size", int),
         "--per-device-train-batch-size": ("batch_size", int),
