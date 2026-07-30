@@ -136,8 +136,7 @@ deploy/
   build.yaml                        # OpenShift BuildConfig + ImageStream
   webhook-config.yaml               # MutatingWebhookConfiguration
   aibom-scripts-configmap.yaml      # Reference manifest for the scripts ConfigMap
-  aibom-storage-pvc.yaml            # PVC for collected AIBOM files
-  aibom-storage-browser.yaml        # nginx sidecar config + Service for browsing AIBOMs
+  aibom-crd.yaml                    # AIBOM CustomResourceDefinition
 scripts/
   generate-certs.sh                 # Self-signed TLS cert generation
   aibom-scripts/
@@ -165,8 +164,6 @@ The webhook server accepts these flags:
 | `--dataset-detection` | `true` | Inject dataset detection hooks into application containers |
 | `--enable-watcher` | `true` | Start the Job completion watcher |
 | `--postprocess-image` | `busybox:latest` | Image for AIBOM postprocess Jobs (set to the aibom-postprocess image) |
-| `--aibom-storage-path` | `/data/aiboms` | Path to store collected AIBOM files (empty to disable) |
-| `--aibom-storage-mode` | `pvc` | Where to persist collected AIBOMs: `pvc`, `crd`, or `both` |
 
 ## What Gets Injected
 
@@ -197,7 +194,7 @@ When a Job completes or is being deleted (held by the finalizer), the watcher cr
    - Optionally queries Grafana/Prometheus for telemetry (GPU utilization, memory, power, CPU, network)
    - Compiles everything into an AIBOM JSON document
    - Outputs the AIBOM to stdout (readable via `kubectl logs`)
-5. **AIBOM collection**: When the postprocess Job completes, the watcher reads its logs, extracts the AIBOM JSON, and writes it to the storage PVC at `{namespace}/{job-name}_{timestamp}.json`
+5. **AIBOM collection**: When the postprocess Job completes, the watcher reads its logs, extracts the AIBOM JSON, and creates a namespaced `AIBOM` custom resource in the workload's namespace
 
 ### Workload Selection and Grouping
 
@@ -327,46 +324,7 @@ oc create secret generic aibom-config \
 
 ### AIBOM Storage
 
-By default, the watcher collects completed AIBOMs and writes them to a PVC mounted at `/data/aiboms`. Files are organized as `{namespace}/{job-name}_{timestamp}.json`, preserving history across re-runs.
-
-To set up storage:
-
-```bash
-# Create the PVC in aibom-system
-oc apply -f deploy/aibom-storage-pvc.yaml
-
-# The deployment already mounts it — just redeploy
-make redeploy
-```
-
-**Browsing AIBOMs**
-
-The `aibom-webhook` pod runs an `aibom-storage-browser` sidecar (nginx) that serves the same PVC read-only over HTTP with directory listing enabled, fronted by a ClusterIP `aibom-storage` Service (`deploy/aibom-storage-browser.yaml`). It's cluster-internal only — no public URL — so access it via port-forward:
-
-```bash
-oc port-forward -n aibom-system svc/aibom-storage 8080:80
-```
-
-Then open `http://localhost:8080` in a browser to navigate namespaces and download individual AIBOM `.json` files, or fetch one directly:
-
-```bash
-curl http://localhost:8080/gavin-test/my-job_20260727T153000Z.json
-```
-
-To disable collection entirely, set `--aibom-storage-path=""` in the deployment args.
-
-**AIBOM CRD (namespace-scoped storage)**
-
-The PVC + nginx browser above has no per-tenant access control — anyone who can reach the `aibom-storage` Service sees every namespace's AIBOMs. Setting `--aibom-storage-mode=crd` (or `both`, to keep writing the PVC too) instead has the watcher create one namespaced `AIBOM` custom resource (`aiboms.aibom.io`, `deploy/aibom-crd.yaml`) per completed workload, in the same namespace the workload ran in:
-
-```bash
-# Register the CRD (already applied by `make deploy`)
-oc apply -f deploy/aibom-crd.yaml
-
-# Redeploy the watcher with CRD storage enabled — edit deploy/deployment.yaml to add
-# --aibom-storage-mode=crd (or "both") to the container args, then:
-make redeploy
-```
+Completed AIBOMs are stored as namespaced `AIBOM` custom resources (`aiboms.aibom.io`, `deploy/aibom-crd.yaml`) — one per completed workload, created in the same namespace the workload ran in. The CRD is registered by `make deploy`; nothing further needs to be set up per namespace to enable collection.
 
 Because `AIBOM` is a namespaced resource, it inherits ordinary Kubernetes RBAC: a user granted `get`/`list` on `aiboms` in namespace `team-a` cannot see `team-b`'s AIBOMs, without any extra code in this project — the same Role/RoleBinding mechanism admins already use for Pods and Jobs applies here.
 

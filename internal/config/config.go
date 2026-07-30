@@ -8,6 +8,4 @@ type Config struct {
 	DatasetDetection bool
 	EnableWatcher    bool
 	PostprocessImage string
-	AIBOMStoragePath string
-	AIBOMStorageMode string
 }

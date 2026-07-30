@@ -31,14 +31,10 @@ spec:
             - --port=8443
             - --postprocess-image=image-registry.openshift-image-registry.svc:5000/aibom-system/aibom-postprocess:latest
             - --enable-watcher=true
-            - --aibom-storage-path=/data/aiboms
-            - --aibom-storage-mode=both
           volumeMounts:
             - name: certs
               mountPath: /certs
               readOnly: true
-            - name: aibom-storage
-              mountPath: /data/aiboms
           livenessProbe:
             httpGet:
               path: /healthz
@@ -60,46 +56,10 @@ spec:
             limits:
               cpu: 200m
               memory: 128Mi
-        - name: aibom-storage-browser
-          image: nginxinc/nginx-unprivileged:stable
-          ports:
-            - containerPort: 8080
-              name: aibom-http
-          volumeMounts:
-            - name: aibom-storage
-              mountPath: /data/aiboms
-              readOnly: true
-            - name: aibom-nginx-conf
-              mountPath: /etc/nginx/conf.d/default.conf
-              subPath: default.conf
-              readOnly: true
-            - name: aibom-nginx-conf
-              mountPath: /etc/nginx/nginx.conf
-              subPath: nginx.conf
-              readOnly: true
-          readinessProbe:
-            httpGet:
-              path: /
-              port: 8080
-            initialDelaySeconds: 5
-            periodSeconds: 10
-          resources:
-            requests:
-              cpu: 10m
-              memory: 16Mi
-            limits:
-              cpu: 100m
-              memory: 64Mi
       volumes:
         - name: certs
           secret:
             secretName: aibom-webhook-certs
-        - name: aibom-storage
-          persistentVolumeClaim:
-            claimName: aibom-storage
-        - name: aibom-nginx-conf
-          configMap:
-            name: aibom-storage-nginx-conf
 ---
 apiVersion: v1
 kind: Service

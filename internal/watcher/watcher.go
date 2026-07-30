@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -57,10 +55,6 @@ const (
 	maxJobNameLength  = 63
 	postprocessSuffix = "-aibom-postprocess"
 	configMapSuffix   = "-data"
-
-	storageModePVC  = "pvc"
-	storageModeCRD  = "crd"
-	storageModeBoth = "both"
 )
 
 var aibomGVR = schema.GroupVersionResource{Group: "aibom.io", Version: "v1alpha1", Resource: "aiboms"}
@@ -87,8 +81,6 @@ type Watcher struct {
 	dynamicClient    dynamic.Interface
 	logReader        LogReader
 	postprocessImage string
-	storagePath      string
-	storageMode      string
 	factory          informers.SharedInformerFactory
 	// podFactory is a separate, server-side label-selector-scoped factory for the Pod
 	// informer. Unlike Jobs (which have no label capturing "qualifies for
@@ -99,14 +91,12 @@ type Watcher struct {
 	podFactory informers.SharedInformerFactory
 }
 
-func New(clientset kubernetes.Interface, dynamicClient dynamic.Interface, postprocessImage, storagePath, storageMode string) *Watcher {
+func New(clientset kubernetes.Interface, dynamicClient dynamic.Interface, postprocessImage string) *Watcher {
 	w := &Watcher{
 		clientset:        clientset,
 		dynamicClient:    dynamicClient,
 		logReader:        &kubeLogReader{clientset: clientset},
 		postprocessImage: postprocessImage,
-		storagePath:      storagePath,
-		storageMode:      storageMode,
 		factory:          informers.NewSharedInformerFactory(clientset, resyncPeriod),
 		podFactory: informers.NewSharedInformerFactoryWithOptions(
 			clientset, resyncPeriod,
@@ -177,7 +167,7 @@ func (w *Watcher) onJobEvent(obj interface{}) {
 
 	if job.Labels[LabelPostprocessFor] != "" {
 		alreadyCollected := job.Annotations != nil && job.Annotations[AnnotationAIBOMCollected] != ""
-		if w.aibomStorageEnabled() && w.isJobComplete(job) && !alreadyCollected {
+		if w.isJobComplete(job) && !alreadyCollected {
 			w.collectAIBOM(context.TODO(), job)
 		}
 		return
@@ -832,26 +822,6 @@ func postprocessJobName(jobName string) string {
 	return jobName + postprocessSuffix
 }
 
-// aibomStorageEnabled reports whether any AIBOM persistence path is active. An
-// empty storageMode (e.g. a Watcher built without New, as in some tests) is
-// treated as "pvc" for backward compatibility.
-func (w *Watcher) aibomStorageEnabled() bool {
-	switch w.storageMode {
-	case storageModeCRD, storageModeBoth:
-		return true
-	default:
-		return w.storagePath != ""
-	}
-}
-
-func (w *Watcher) wantsPVCStorage() bool {
-	return w.storagePath != "" && w.storageMode != storageModeCRD
-}
-
-func (w *Watcher) wantsCRDStorage() bool {
-	return w.storageMode == storageModeCRD || w.storageMode == storageModeBoth
-}
-
 func (w *Watcher) collectAIBOM(ctx context.Context, job *batchv1.Job) {
 	originalJobName := job.Labels[LabelPostprocessFor]
 	if originalJobName == "" {
@@ -884,42 +854,20 @@ func (w *Watcher) collectAIBOM(ctx context.Context, job *batchv1.Job) {
 		return
 	}
 
-	var collectedRef string
-
-	if w.wantsPVCStorage() {
-		path, err := w.writeAIBOMFile(job, originalJobName, aibomJSON)
-		if err != nil {
-			log.Printf("warning: %v", err)
-		} else {
-			log.Printf("collected AIBOM for %s/%s -> %s", job.Namespace, originalJobName, path)
-			collectedRef = path
-		}
-	}
-
-	if w.wantsCRDStorage() {
-		name, err := w.writeAIBOMCRD(ctx, job, originalJobName, aibomJSON)
-		if err != nil {
-			log.Printf("warning: %v", err)
-		} else {
-			log.Printf("collected AIBOM for %s/%s -> AIBOM/%s/%s", job.Namespace, originalJobName, job.Namespace, name)
-			if collectedRef == "" {
-				collectedRef = fmt.Sprintf("crd:%s/%s", job.Namespace, name)
-			}
-		}
-	}
-
-	if collectedRef == "" {
-		log.Printf("warning: could not persist AIBOM for %s/%s via any configured storage mode", job.Namespace, originalJobName)
+	name, err := w.writeAIBOMCRD(ctx, job, originalJobName, aibomJSON)
+	if err != nil {
+		log.Printf("warning: %v", err)
 		return
 	}
+	log.Printf("collected AIBOM for %s/%s -> AIBOM/%s/%s", job.Namespace, originalJobName, job.Namespace, name)
 
-	patch := fmt.Sprintf(`{"metadata":{"annotations":{"%s":"%s"}}}`, AnnotationAIBOMCollected, collectedRef)
+	patch := fmt.Sprintf(`{"metadata":{"annotations":{"%s":"%s"}}}`, AnnotationAIBOMCollected, fmt.Sprintf("%s/%s", job.Namespace, name))
 	if _, err := w.clientset.BatchV1().Jobs(job.Namespace).Patch(ctx, job.Name, types.MergePatchType, []byte(patch), metav1.PatchOptions{}); err != nil {
 		log.Printf("warning: could not annotate postprocess job %s/%s as collected: %v", job.Namespace, job.Name, err)
 	}
 
 	// The postprocess Job and its data ConfigMap have served their purpose now that
-	// the AIBOM JSON is durably on the storage PVC. Deleting them frees up their
+	// the AIBOM is durably stored as a custom resource. Deleting them frees up their
 	// deterministic names so a same-named rerun of the original workload (e.g. after
 	// fixing a bug and reapplying the same manifest) doesn't silently collide with
 	// this run's leftover artifacts on its next postprocess Job/ConfigMap creation —
@@ -934,29 +882,9 @@ func (w *Watcher) collectAIBOM(ctx context.Context, job *batchv1.Job) {
 	}
 }
 
-// writeAIBOMFile writes the compiled AIBOM JSON to the storage PVC, returning the
-// path it was written to.
-func (w *Watcher) writeAIBOMFile(job *batchv1.Job, originalJobName, aibomJSON string) (string, error) {
-	dir := filepath.Join(w.storagePath, job.Namespace)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", fmt.Errorf("could not create AIBOM storage directory %s: %w", dir, err)
-	}
-
-	timestamp := time.Now().UTC().Format("20060102T150405Z")
-	filename := fmt.Sprintf("%s_%s.json", originalJobName, timestamp)
-	path := filepath.Join(dir, filename)
-
-	if err := os.WriteFile(path, []byte(aibomJSON), 0o644); err != nil {
-		return "", fmt.Errorf("could not write AIBOM to %s: %w", path, err)
-	}
-
-	return path, nil
-}
-
 // writeAIBOMCRD creates a namespaced AIBOM custom resource holding the compiled
 // AIBOM JSON, returning the created object's name. Being namespaced, normal
-// Kubernetes RBAC scopes who can read it to the workload's own namespace,
-// unlike the shared PVC (browsable cluster-wide via the storage-browser sidecar).
+// Kubernetes RBAC scopes who can read it to the workload's own namespace.
 func (w *Watcher) writeAIBOMCRD(ctx context.Context, job *batchv1.Job, originalJobName, aibomJSON string) (string, error) {
 	if w.dynamicClient == nil {
 		return "", fmt.Errorf("AIBOM CRD storage requested but no dynamic client is configured")
