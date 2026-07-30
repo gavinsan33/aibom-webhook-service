@@ -166,6 +166,7 @@ The webhook server accepts these flags:
 | `--enable-watcher` | `true` | Start the Job completion watcher |
 | `--postprocess-image` | `busybox:latest` | Image for AIBOM postprocess Jobs (set to the aibom-postprocess image) |
 | `--aibom-storage-path` | `/data/aiboms` | Path to store collected AIBOM files (empty to disable) |
+| `--aibom-storage-mode` | `pvc` | Where to persist collected AIBOMs: `pvc`, `crd`, or `both` |
 
 ## What Gets Injected
 
@@ -353,6 +354,31 @@ curl http://localhost:8080/gavin-test/my-job_20260727T153000Z.json
 ```
 
 To disable collection entirely, set `--aibom-storage-path=""` in the deployment args.
+
+**AIBOM CRD (namespace-scoped storage)**
+
+The PVC + nginx browser above has no per-tenant access control — anyone who can reach the `aibom-storage` Service sees every namespace's AIBOMs. Setting `--aibom-storage-mode=crd` (or `both`, to keep writing the PVC too) instead has the watcher create one namespaced `AIBOM` custom resource (`aiboms.aibom.io`, `deploy/aibom-crd.yaml`) per completed workload, in the same namespace the workload ran in:
+
+```bash
+# Register the CRD (already applied by `make deploy`)
+oc apply -f deploy/aibom-crd.yaml
+
+# Redeploy the watcher with CRD storage enabled — edit deploy/deployment.yaml to add
+# --aibom-storage-mode=crd (or "both") to the container args, then:
+make redeploy
+```
+
+Because `AIBOM` is a namespaced resource, it inherits ordinary Kubernetes RBAC: a user granted `get`/`list` on `aiboms` in namespace `team-a` cannot see `team-b`'s AIBOMs, without any extra code in this project — the same Role/RoleBinding mechanism admins already use for Pods and Jobs applies here.
+
+```bash
+# List AIBOMs in a namespace (only visible to users with RBAC on aiboms.aibom.io there)
+kubectl get aiboms -n gavin-test
+
+# Inspect one, including the full compiled AIBOM under spec.data
+kubectl get aibom train-job-abc123 -n gavin-test -o yaml
+```
+
+`spec.jobName`, `spec.modelName`, `spec.experimentIntent`, and `spec.collectedAt` are pulled out as printer-friendly summary fields; `spec.data` holds the complete AIBOM JSON exactly as `postprocess.py` produced it.
 
 ## Example: vLLM Inference Benchmark
 

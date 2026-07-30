@@ -37,6 +37,7 @@ generate-certs:
 
 deploy: generate-certs
 	oc apply -f deploy/namespace.yaml
+	oc apply -f deploy/aibom-crd.yaml
 	oc apply -f deploy/rbac.yaml
 	oc apply -f deploy/aibom-storage-pvc.yaml
 	oc apply -f deploy/aibom-storage-browser.yaml
@@ -44,6 +45,7 @@ deploy: generate-certs
 	oc apply -f deploy/webhook-config.yaml
 
 redeploy:
+	oc apply -f deploy/aibom-crd.yaml
 	oc apply -f deploy/rbac.yaml
 	oc apply -f deploy/aibom-storage-browser.yaml
 	oc apply -f deploy/build.yaml

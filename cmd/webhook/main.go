@@ -15,6 +15,7 @@ import (
 	"github.com/gavinsan33/aibom-webhook-service/internal/config"
 	"github.com/gavinsan33/aibom-webhook-service/internal/watcher"
 	"github.com/gavinsan33/aibom-webhook-service/internal/webhook"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -31,6 +32,7 @@ func main() {
 	flag.BoolVar(&cfg.EnableWatcher, "enable-watcher", true, "start the Job completion watcher")
 	flag.StringVar(&cfg.PostprocessImage, "postprocess-image", "busybox:latest", "image for postprocess Jobs")
 	flag.StringVar(&cfg.AIBOMStoragePath, "aibom-storage-path", "/data/aiboms", "path to store collected AIBOM files (empty to disable)")
+	flag.StringVar(&cfg.AIBOMStorageMode, "aibom-storage-mode", "pvc", "where to persist collected AIBOMs: pvc, crd, or both")
 	flag.Parse()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -64,16 +66,28 @@ func main() {
 	}()
 
 	if cfg.EnableWatcher {
-		clientset, err := buildClientset()
+		restConfig, err := buildRestConfig()
 		if err != nil {
 			log.Printf("WARNING: failed to create Kubernetes client, watcher disabled: %v", err)
 		} else {
-			w := watcher.New(clientset, cfg.PostprocessImage, cfg.AIBOMStoragePath)
-			go func() {
-				if err := w.Start(ctx); err != nil {
-					log.Printf("watcher error: %v", err)
+			clientset, err := kubernetes.NewForConfig(restConfig)
+			if err != nil {
+				log.Printf("WARNING: failed to create Kubernetes clientset, watcher disabled: %v", err)
+			} else {
+				var dynamicClient dynamic.Interface
+				if cfg.AIBOMStorageMode == "crd" || cfg.AIBOMStorageMode == "both" {
+					dynamicClient, err = dynamic.NewForConfig(restConfig)
+					if err != nil {
+						log.Printf("WARNING: failed to create dynamic client, AIBOM CRD storage disabled: %v", err)
+					}
 				}
-			}()
+				w := watcher.New(clientset, dynamicClient, cfg.PostprocessImage, cfg.AIBOMStoragePath, cfg.AIBOMStorageMode)
+				go func() {
+					if err := w.Start(ctx); err != nil {
+						log.Printf("watcher error: %v", err)
+					}
+				}()
+			}
 		}
 	}
 
@@ -90,7 +104,7 @@ func main() {
 	log.Println("server stopped")
 }
 
-func buildClientset() (kubernetes.Interface, error) {
+func buildRestConfig() (*rest.Config, error) {
 	cfg, err := rest.InClusterConfig()
 	if err != nil {
 		kubeconfig := os.Getenv("KUBECONFIG")
@@ -103,5 +117,5 @@ func buildClientset() (kubernetes.Interface, error) {
 			return nil, fmt.Errorf("no in-cluster config and no kubeconfig found: %w", err)
 		}
 	}
-	return kubernetes.NewForConfig(cfg)
+	return cfg, nil
 }

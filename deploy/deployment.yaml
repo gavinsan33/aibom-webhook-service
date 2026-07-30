@@ -32,6 +32,7 @@ spec:
             - --postprocess-image=image-registry.openshift-image-registry.svc:5000/aibom-system/aibom-postprocess:latest
             - --enable-watcher=true
             - --aibom-storage-path=/data/aiboms
+            - --aibom-storage-mode=both
           volumeMounts:
             - name: certs
               mountPath: /certs

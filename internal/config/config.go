@@ -9,4 +9,5 @@ type Config struct {
 	EnableWatcher    bool
 	PostprocessImage string
 	AIBOMStoragePath string
+	AIBOMStorageMode string
 }

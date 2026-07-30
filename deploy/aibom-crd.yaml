@@ -1,0 +1,57 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: aiboms.aibom.io
+spec:
+  group: aibom.io
+  scope: Namespaced
+  names:
+    plural: aiboms
+    singular: aibom
+    kind: AIBOM
+    shortNames:
+      - aibom
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required:
+                - jobName
+                - collectedAt
+                - data
+              properties:
+                jobName:
+                  type: string
+                  description: Name of the original workload Job this AIBOM was collected for.
+                modelName:
+                  type: string
+                  description: Model name, if present in the compiled AIBOM data.
+                experimentIntent:
+                  type: string
+                  description: Experiment intent (training, sft, inference), if present in the compiled AIBOM data.
+                collectedAt:
+                  type: string
+                  description: RFC3339 timestamp of when this AIBOM was collected.
+                data:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                  description: The full AIBOM JSON document produced by postprocess.py.
+      additionalPrinterColumns:
+        - name: Job
+          type: string
+          jsonPath: .spec.jobName
+        - name: Model
+          type: string
+          jsonPath: .spec.modelName
+        - name: Intent
+          type: string
+          jsonPath: .spec.experimentIntent
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
