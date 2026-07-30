@@ -43,11 +43,10 @@ spec:
     git:
       uri: https://github.com/gavinsan33/aibom-webhook-service.git
       ref: master
-    contextDir: postprocess
   strategy:
     type: Docker
     dockerStrategy:
-      dockerfilePath: Dockerfile
+      dockerfilePath: postprocess/Dockerfile
   output:
     to:
       kind: ImageStreamTag

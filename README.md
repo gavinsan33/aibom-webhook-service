@@ -9,16 +9,15 @@ A Kubernetes mutating admission webhook that automatically instruments AI worklo
 3. A user submits a Job, JobSet, PyTorchJob, or RayJob in that namespace
 4. The Kubernetes API server calls the webhook before creating the pod
 5. The webhook injects:
-   - An **init container** (`aibom-discovery`) that runs a hardware snapshot script capturing CPU, GPU, memory, network, storage info, and performance benchmarks
-   - **Dataset detection hooks** (`usercustomize.py`) that automatically capture which ML datasets are loaded at runtime (PyTorch, HuggingFace, torchvision, webdataset)
-   - An **emptyDir volume** (`aibom-data`) for discovery and detection output
+   - An **init container** (`aibom-discovery`) that runs a hardware snapshot script capturing CPU, GPU, memory, network, storage info, and performance benchmarks, and writes the result directly into a per-workload data ConfigMap via the Kubernetes API
+   - **Dataset detection hooks** (`usercustomize.py`) that automatically capture which ML datasets are loaded at runtime (PyTorch, HuggingFace, torchvision, webdataset) and write them into that same ConfigMap
    - A label `aibom.io/instrumented: "true"` to prevent double-injection
 6. The pod is created with the injections — the user's original YAML is untouched
 7. When the Job completes (or is being deleted in a JobSet workflow), the **watcher** detects it and creates a postprocess Job to compile the AIBOM. For long-running pods with no Job owner (e.g. KServe `InferenceService` predictor pods, which are owned by a ReplicaSet and never "complete"), the watcher instead triggers on the pod's deletion via a separate pod-level finalizer.
 
 Pods are matched if they are owned by a Job, JobSet, PyTorchJob, or RayJob, **or** if any container requests `nvidia.com/gpu` resources. When GPU resources are present, the webhook copies the GPU resource request to the discovery init container so `nvidia-smi` can detect the hardware. The webhook always fails open (`failurePolicy: Ignore`) — if the service is down, pods are created normally.
 
-Postprocessing is triggered for Jobs whose pods request GPUs or whose Job has `aibom.io/*` annotations. For JobSet workflows where a server pod is killed rather than completing (e.g., vLLM + client benchmarks), the watcher adds a Kubernetes **finalizer** (`aibom.io/log-extraction`) to hold the Job alive until logs are extracted and the postprocess Job is created.
+Postprocessing is triggered for Jobs whose pods request GPUs or whose Job has `aibom.io/*` annotations. For JobSet workflows where a server pod is killed rather than completing (e.g., vLLM + client benchmarks), the watcher adds a Kubernetes **finalizer** (`aibom.io/log-extraction`) to hold the Job alive until the postprocess Job is created — the finalizer's name predates the current data path but is kept as-is to avoid breaking finalizers already held on live objects.
 
 Bare/ReplicaSet-owned pods (no `batch.kubernetes.io/job-name` label) that carry `aibom.io/instrumented=true` are postprocessed independently, following the same GPU/annotation qualifying criteria but read directly off the pod (since there's no owning Job/JobSet to read them from — KServe, for instance, propagates `spec.predictor.annotations` onto the pod itself). The watcher adds a distinct **pod-level finalizer** (`aibom.io/log-extraction-pod`) while the pod is running, and since these pods never "complete," postprocessing triggers purely on deletion (`DeletionTimestamp` set). There's no JobSet-style sibling merging for this path — each qualifying pod gets its own postprocess Job independently.
 
@@ -46,7 +45,7 @@ make run
 
 ## Workload Namespace Setup
 
-Each namespace that runs instrumented workloads needs three things: the `aibom.io/enabled` label, image pull access to `aibom-system`, and the `aibom-scripts` ConfigMap. A single command handles all of it:
+Each namespace that runs instrumented workloads needs the `aibom.io/enabled` label, image pull access to `aibom-system`, the `aibom-scripts` ConfigMap, and RBAC letting workload pods and the postprocess Job write their own data directly via the Kubernetes API. A single command handles all of it:
 
 ```bash
 make setup-namespace NAMESPACE=my-ai-workloads
@@ -55,7 +54,11 @@ make setup-namespace NAMESPACE=my-ai-workloads
 This runs:
 1. `oc label namespace ... aibom.io/enabled=true` — opts the namespace into webhook instrumentation
 2. `oc policy add-role-to-group system:image-puller ...` — allows pods to pull the postprocess image from `aibom-system`
-3. Creates the `aibom-scripts` ConfigMap with the discovery and dataset detector scripts
+3. Creates the `aibom-scripts` ConfigMap with the discovery script, dataset detector, and the shared `k8s_api.py` in-cluster REST helper both of them use
+4. Creates the `aibom-postprocess` ServiceAccount + Role/RoleBinding, granting `create`/`get` on `aiboms.aibom.io` scoped to this namespace — the postprocess Job uses this to create the AIBOM custom resource directly
+5. Creates the `aibom-workload-data` Role/RoleBinding, granting `create`/`get`/`patch` on `configmaps` (scoped to this namespace) to every ServiceAccount in the namespace — instrumented workload pods use this to write their discovery/dataset data directly into the per-workload data ConfigMap
+
+**Upgrading an existing namespace**: if you set up a namespace before this RBAC/direct-write model existed, re-run `make setup-namespace NAMESPACE=<ns>` — it's idempotent. This matters more than it sounds: the dataset detector hook mounts `k8s_api.py` via a `subPath` volume mount, so a stale `aibom-scripts` ConfigMap missing that key will fail *pod startup* for every instrumented workload in that namespace, not just silently skip dataset detection.
 
 ## Cluster Deployment
 
@@ -126,9 +129,10 @@ internal/
     watcher.go                      # Job completion watcher + postprocess Job creation
     watcher_test.go                 # Unit tests
   config/config.go                  # Configuration struct
+  aibomdata/aibomdata.go            # Shared postprocess Job/ConfigMap naming convention
 postprocess/
-  postprocess.py                    # AIBOM compiler (runs in postprocess Job)
-  Dockerfile                        # Postprocess container image
+  postprocess.py                    # AIBOM compiler; creates the AIBOM CR directly (runs in postprocess Job)
+  Dockerfile                        # Postprocess container image; also COPYs in scripts/aibom-scripts/k8s_api.py
 deploy/
   namespace.yaml                    # aibom-system namespace
   rbac.yaml                         # ServiceAccount, ClusterRole, ClusterRoleBinding
@@ -142,6 +146,7 @@ scripts/
   aibom-scripts/
     generate_snapshot.py             # Hardware discovery script (from coldpress)
     dataset_detector.py              # Dataset detection hooks (from coldpress)
+    k8s_api.py                       # Stdlib-only in-cluster REST client shared by both scripts
 examples/
   vllm-inference.yaml               # Example JobSet: vLLM server + guidellm benchmark
   vllm-inference-rhoai.yaml         # Same model via a RHOAI/KServe InferenceService
@@ -173,28 +178,27 @@ When the webhook mutates a pod, it adds:
 - Runs `generate_snapshot.py` from the `aibom-scripts` ConfigMap
 - Captures: CPU model/cores/cache, GPU model/count/VRAM/CUDA version, memory, network (RDMA), storage, kernel config, cgroup limits
 - Runs benchmarks: CPU compute (MFLOPS), memory bandwidth, disk I/O throughput, context switch latency
-- Writes `discovery.json` to the `aibom-data` volume
+- Writes the result directly into the workload's data ConfigMap (key `discovery-<pod-name>.json`) via `k8s_api.py`, an in-cluster REST helper using only the Python stdlib — no `kubernetes` pip dependency needed even though this runs inside a third-party pinned image
 
 **Dataset detector (into each application container):**
-- Mounts `dataset_detector.py` as `usercustomize.py` on `PYTHONPATH`
+- Mounts `dataset_detector.py` as `usercustomize.py` on `PYTHONPATH`, plus `k8s_api.py` alongside it (also `subPath`-mounted, since `usercustomize.py` needs to `import k8s_api`)
 - Python auto-imports it at startup — no code changes needed
 - Hooks into PyTorch DataLoader, HuggingFace `datasets.load_dataset`, torchvision datasets, and webdataset
 - Captures dataset name, version, split, fingerprint, license, and training args
-- Writes `dataset_detected.json` to the `aibom-data` volume at process exit
+- Writes the result directly into the same data ConfigMap (key `dataset-<pod-name>.json`) at process exit, via the same `k8s_api.py` helper — since this runs inside the user's own application container, the `k8s_api` import is wrapped in a soft `try/except ImportError` so a missing/stale mount degrades to "no dataset detection" instead of crashing the user's training process at Python startup
 
 ## Postprocess Flow
 
 When a Job completes or is being deleted (held by the finalizer), the watcher creates an AIBOM postprocess Job:
 
-1. **Data extraction**: The watcher reads pod logs from the Job's pods (and sibling pods in a JobSet), extracting discovery JSON (from the `aibom-discovery` init container) and dataset JSON (from application containers) via delimited markers
-2. **ConfigMap creation**: Extracted data plus `aibom.io/*` annotations are stored in a ConfigMap (`{job-name}-aibom-postprocess-data`) in the workload namespace
-3. **Finalizer removal**: If the Job has the `aibom.io/log-extraction` finalizer, it is removed after data extraction, allowing Kubernetes to complete the deletion
-4. **Postprocess Job**: A Job is created running `postprocess.py`, which:
+1. **Data ConfigMap read/merge**: The Job's pods (and sibling pods in a JobSet) have already written their own discovery/dataset data directly into the per-workload data ConfigMap (`{job-name}-aibom-postprocess-data`) via the Kubernetes API — see [What Gets Injected](#what-gets-injected). The watcher reads that ConfigMap (creating it if the pods never got to write anything) and merges in `annotations.json`/`containers.json`/aggregated `discovery.json`/`dataset.json` keys that `postprocess.py` expects
+2. **Finalizer removal**: If the Job has the `aibom.io/log-extraction` finalizer, it is removed after this step, allowing Kubernetes to complete the deletion
+3. **Postprocess Job**: A Job is created running `postprocess.py` under a dedicated `aibom-postprocess` ServiceAccount (RBAC scoped to `aiboms.aibom.io` create/get in this namespace only), which:
    - Loads discovery and dataset data from the ConfigMap mount
    - Optionally queries Grafana/Prometheus for telemetry (GPU utilization, memory, power, CPU, network)
    - Compiles everything into an AIBOM JSON document
-   - Outputs the AIBOM to stdout (readable via `kubectl logs`)
-5. **AIBOM collection**: When the postprocess Job completes, the watcher reads its logs, extracts the AIBOM JSON, and creates a namespaced `AIBOM` custom resource in the workload's namespace
+   - Creates the `AIBOM` custom resource directly via the Kubernetes API (no watcher involvement) — a failed create exits the process non-zero, so Kubernetes' own Job retry/failure handling (`backoffLimit`) becomes the visible signal instead of a silently-dropped log line
+4. **Cleanup**: Once the postprocess Job succeeds, the watcher (which only needed to notice the Job's success, not read anything from it) deletes the postprocess Job and its data ConfigMap so a same-named rerun of the workload doesn't collide with leftovers
 
 ### Workload Selection and Grouping
 
@@ -218,7 +222,7 @@ Each job is postprocessed at most once. After the postprocess job is created, th
 
 Each qualifying job gets its own postprocess job — there is no cross-job merging. However, if a job belongs to a **JobSet** (has the `jobset.sigs.k8s.io/jobset-name` label), its postprocess job pulls in additional data from siblings:
 
-- **Sibling pod logs**: Discovery and dataset data is extracted from all instrumented pods across the JobSet, not just the triggering job's pods
+- **Sibling pod data**: Discovery and dataset data is read from all instrumented pods across the JobSet (each already wrote its own ConfigMap keys directly), not just the triggering job's pods
 - **Sibling annotations**: If the triggering job has no `aibom.io/*` annotations, annotations are inherited from other jobs in the same JobSet
 
 In a typical vLLM inference setup (server + client JobSet), only the server job qualifies for postprocessing (it has GPU resources and annotations). The client job has neither, so it's skipped — but the server's postprocess job still includes discovery data from client pods since they share the same JobSet.
@@ -340,7 +344,7 @@ kubectl get aibom train-job-abc123 -n gavin-test -o yaml
 
 ## Example: vLLM Inference Benchmark
 
-The `examples/vllm-inference.yaml` file shows a JobSet with a vLLM server and a guidellm benchmark client. The server has `aibom.io/*` annotations and GPU resources; the client depends on the server being ready. When the client finishes, the JobSet kills the server — but the finalizer holds it until the watcher extracts discovery logs and creates the postprocess Job.
+The `examples/vllm-inference.yaml` file shows a JobSet with a vLLM server and a guidellm benchmark client. The server has `aibom.io/*` annotations and GPU resources; the client depends on the server being ready. When the client finishes, the JobSet kills the server — but the finalizer holds it until the watcher reads the pods' data ConfigMap and creates the postprocess Job.
 
 ```bash
 # Deploy the example (namespace must be set up first)
@@ -357,7 +361,7 @@ oc logs -n gavin-test job/aibom-vllm-benchmark-server-0-aibom-postprocess
 
 The `examples/vllm-inference-rhoai.yaml` file deploys the same model as a KServe `InferenceService` — the route Red Hat OpenShift AI's Model Serving UI uses — instead of a raw JobSet. It uses a fully custom predictor container (`spec.predictor.containers`) so vLLM pulls the model directly from Hugging Face Hub, avoiding any dependency on a pre-provisioned S3/PVC model store.
 
-KServe predictor pods are owned by a ReplicaSet, not a Job/JobSet/PyTorchJob/RayJob, so the webhook instruments them via the `requestsGPU` fallback match (`internal/webhook/mutator.go`), same as any other GPU pod. Postprocessing is handled by the watcher's pod-level finalizer path (see [Which pods get postprocessed?](#workload-selection-and-grouping)): since the predictor pod never "completes," the watcher holds it open with a distinct finalizer (`aibom.io/log-extraction-pod`) on deletion (e.g. `oc delete pod`, a rollout, or scale-down), extracts its discovery/dataset logs and `aibom.io/*` annotations (propagated onto the pod by KServe from `spec.predictor.annotations`), and creates a postprocess Job directly from that single pod — there's no JobSet to pull sibling data from here. The client Job below still doesn't itself qualify for postprocessing (no GPU resources or `aibom.io/*` annotations, and it isn't part of a JobSet to inherit any) — it only exercises the predictor endpoint.
+KServe predictor pods are owned by a ReplicaSet, not a Job/JobSet/PyTorchJob/RayJob, so the webhook instruments them via the `requestsGPU` fallback match (`internal/webhook/mutator.go`), same as any other GPU pod. Postprocessing is handled by the watcher's pod-level finalizer path (see [Which pods get postprocessed?](#workload-selection-and-grouping)): since the predictor pod never "completes," the watcher holds it open with a distinct finalizer (`aibom.io/log-extraction-pod`) on deletion (e.g. `oc delete pod`, a rollout, or scale-down), reads its discovery/dataset data ConfigMap and `aibom.io/*` annotations (propagated onto the pod by KServe from `spec.predictor.annotations`), and creates a postprocess Job directly from that single pod — there's no JobSet to pull sibling data from here. The client Job below still doesn't itself qualify for postprocessing (no GPU resources or `aibom.io/*` annotations, and it isn't part of a JobSet to inherit any) — it only exercises the predictor endpoint.
 
 ```bash
 # Deploy the example (namespace must be set up first)

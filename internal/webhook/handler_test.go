@@ -200,8 +200,8 @@ func TestMutate_InjectsInitContainer(t *testing.T) {
 			if containers[0].Name != "aibom-discovery" {
 				t.Errorf("expected init container name 'aibom-discovery', got %q", containers[0].Name)
 			}
-			if len(containers[0].Env) != 5 {
-				t.Errorf("expected 5 env vars, got %d", len(containers[0].Env))
+			if len(containers[0].Env) != 6 {
+				t.Errorf("expected 6 env vars, got %d", len(containers[0].Env))
 			}
 			if len(containers[0].VolumeMounts) != 2 {
 				t.Errorf("expected 2 volume mounts (aibom-data + aibom-scripts), got %d", len(containers[0].VolumeMounts))

@@ -3,6 +3,7 @@ package webhook
 import (
 	"fmt"
 
+	"github.com/gavinsan33/aibom-webhook-service/internal/aibomdata"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
@@ -128,6 +129,20 @@ func hasMatchingOwner(pod *corev1.Pod) bool {
 	return false
 }
 
+// triggerName returns the identity the watcher will later use to name the
+// postprocess Job/data ConfigMap for this pod: the owning Job's name for
+// Job/JobSet/PyTorchJob/RayJob-owned pods, or the pod's own name for bare
+// GPU pods (e.g. KServe predictors) — mirroring watcher.go's onJobEvent
+// (Job path) and onPodEvent (bare pod path).
+func triggerName(pod *corev1.Pod) string {
+	for _, ref := range pod.OwnerReferences {
+		if matchedOwnerKinds[ref.Kind] {
+			return ref.Name
+		}
+	}
+	return pod.Name
+}
+
 func requestsGPU(pod *corev1.Pod) bool {
 	gpuResource := corev1.ResourceName("nvidia.com/gpu")
 	for i := range pod.Spec.Containers {
@@ -154,6 +169,7 @@ func (m *Mutator) buildDiscoveryInitContainer(pod *corev1.Pod) corev1.Container 
 			downwardAPIEnv("POD_NAMESPACE", "metadata.namespace"),
 			downwardAPIEnv("POD_IP", "status.podIP"),
 			downwardAPIEnv("NODE_NAME", "spec.nodeName"),
+			{Name: "AIBOM_DATA_CONFIGMAP", Value: aibomdata.ConfigMapName(triggerName(pod))},
 		},
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: "aibom-data", MountPath: "/tmp/result"},
@@ -203,6 +219,9 @@ func (m *Mutator) buildDatasetDetectorPatches(pod *corev1.Pod, containerIdx int)
 		{Name: "AIBOM_DATASET_DETECT", Value: "1"},
 		{Name: "AIBOM_DEBUG", Value: "1"},
 		{Name: "AIBOM_DATASET_OUTPUT", Value: "/tmp/aibom/dataset_detected.json"},
+		{Name: "AIBOM_DATA_CONFIGMAP", Value: aibomdata.ConfigMapName(triggerName(pod))},
+		downwardAPIEnv("POD_NAME", "metadata.name"),
+		downwardAPIEnv("POD_NAMESPACE", "metadata.namespace"),
 		{Name: "PYTHONPATH", Value: pythonPath},
 	}
 
@@ -239,12 +258,19 @@ func (m *Mutator) buildDatasetDetectorPatches(pod *corev1.Pod, containerIdx int)
 		}
 	}
 
-	// Mount usercustomize.py (dataset detector) and aibom-data volume
+	// Mount usercustomize.py (dataset detector), its k8s_api.py import
+	// dependency, and the aibom-data volume
 	mounts := []corev1.VolumeMount{
 		{
 			Name:      "aibom-scripts",
 			MountPath: "/aibom-hooks/usercustomize.py",
 			SubPath:   "dataset_detector.py",
+			ReadOnly:  true,
+		},
+		{
+			Name:      "aibom-scripts",
+			MountPath: "/aibom-hooks/k8s_api.py",
+			SubPath:   "k8s_api.py",
 			ReadOnly:  true,
 		},
 		{

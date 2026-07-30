@@ -27,7 +27,7 @@ docker-push:
 	docker push $(IMG)
 
 docker-build-postprocess:
-	docker build -t $(POSTPROCESS_IMG) postprocess/
+	docker build -t $(POSTPROCESS_IMG) -f postprocess/Dockerfile .
 
 docker-push-postprocess:
 	docker push $(POSTPROCESS_IMG)
@@ -65,6 +65,20 @@ setup-namespace:
 	oc create configmap aibom-scripts \
 		--from-file=generate_snapshot.py=scripts/aibom-scripts/generate_snapshot.py \
 		--from-file=dataset_detector.py=scripts/aibom-scripts/dataset_detector.py \
+		--from-file=k8s_api.py=scripts/aibom-scripts/k8s_api.py \
+		-n $(NAMESPACE) --dry-run=client -o yaml | oc apply -f -
+	oc create serviceaccount aibom-postprocess -n $(NAMESPACE) --dry-run=client -o yaml | oc apply -f -
+	oc create role aibom-postprocess \
+		--verb=create,get --resource=aiboms.aibom.io \
+		-n $(NAMESPACE) --dry-run=client -o yaml | oc apply -f -
+	oc create rolebinding aibom-postprocess \
+		--role=aibom-postprocess --serviceaccount=$(NAMESPACE):aibom-postprocess \
+		-n $(NAMESPACE) --dry-run=client -o yaml | oc apply -f -
+	oc create role aibom-workload-data \
+		--verb=create,get,patch --resource=configmaps \
+		-n $(NAMESPACE) --dry-run=client -o yaml | oc apply -f -
+	oc create rolebinding aibom-workload-data \
+		--role=aibom-workload-data --group=system:serviceaccounts:$(NAMESPACE) \
 		-n $(NAMESPACE) --dry-run=client -o yaml | oc apply -f -
 
 clean:

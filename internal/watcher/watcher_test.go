@@ -2,36 +2,17 @@ package watcher
 
 import (
 	"context"
-	"encoding/json"
-	"io"
 	"strings"
 	"testing"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
 )
-
-// mockLogReader returns pre-canned log content for each container.
-type mockLogReader struct {
-	logs map[string]string // key: "namespace/pod/container"
-}
-
-func (m *mockLogReader) GetLogs(_ context.Context, namespace, podName, containerName string) (io.ReadCloser, error) {
-	key := namespace + "/" + podName + "/" + containerName
-	content, ok := m.logs[key]
-	if !ok {
-		return io.NopCloser(strings.NewReader("")), nil
-	}
-	return io.NopCloser(strings.NewReader(content)), nil
-}
 
 func enabledNamespace(name string) *corev1.Namespace {
 	return &corev1.Namespace{
@@ -131,122 +112,6 @@ func startWatcher(t *testing.T, w *Watcher) {
 	w.podFactory.Start(ctx.Done())
 	w.podFactory.WaitForCacheSync(ctx.Done())
 	time.Sleep(50 * time.Millisecond)
-}
-
-// ---------------------------------------------------------------------------
-// extractDelimitedJSON tests
-// ---------------------------------------------------------------------------
-
-func TestExtractDelimitedJSON_Discovery(t *testing.T) {
-	logs := "Collecting info...\n===AIBOM_DISCOVERY_START===\n{\"gpu\":{\"count\":4}}\n===AIBOM_DISCOVERY_END===\nDone!\n"
-	result := extractDelimitedJSON(strings.NewReader(logs), discoveryStartMarker, discoveryEndMarker)
-	if result != `{"gpu":{"count":4}}` {
-		t.Errorf("got %q, want %q", result, `{"gpu":{"count":4}}`)
-	}
-}
-
-func TestExtractDelimitedJSON_Dataset(t *testing.T) {
-	logs := "Training epoch 1...\n===AIBOM_DATASET_START===\n{\"datasets\":[{\"name\":\"cifar10\"}]}\n===AIBOM_DATASET_END===\n"
-	result := extractDelimitedJSON(strings.NewReader(logs), datasetStartMarker, datasetEndMarker)
-	if result != `{"datasets":[{"name":"cifar10"}]}` {
-		t.Errorf("got %q, want %q", result, `{"datasets":[{"name":"cifar10"}]}`)
-	}
-}
-
-func TestExtractDelimitedJSON_NoMarkers(t *testing.T) {
-	logs := "Just some regular output\nnothing special here\n"
-	result := extractDelimitedJSON(strings.NewReader(logs), discoveryStartMarker, discoveryEndMarker)
-	if result != "" {
-		t.Errorf("expected empty string, got %q", result)
-	}
-}
-
-func TestExtractDelimitedJSON_InvalidJSON(t *testing.T) {
-	logs := "===AIBOM_DISCOVERY_START===\nnot-valid-json\n===AIBOM_DISCOVERY_END===\n"
-	result := extractDelimitedJSON(strings.NewReader(logs), discoveryStartMarker, discoveryEndMarker)
-	if result != "" {
-		t.Errorf("expected empty string for invalid JSON, got %q", result)
-	}
-}
-
-// TestExtractDelimitedJSON_InterleavedStderrLine reproduces a real interleaving seen
-// in production: dataset_detector.py's debug logging goes to stderr while the markers
-// and JSON payload go to stdout, both flushed immediately — but a container runtime
-// merging the two streams into one combined log doesn't guarantee their relative
-// order, so a debug line can land between the start marker and the JSON payload even
-// though the script itself never interleaves them.
-func TestExtractDelimitedJSON_InterleavedStderrLine(t *testing.T) {
-	logs := "===AIBOM_DATASET_START===\n" +
-		"[AIBOM-DEBUG] Flush succeeded: /tmp/aibom/dataset_detected.json (2 datasets)\n" +
-		`{"datasets":[{"dataset_name":"tatsu-lab/alpaca"}]}` + "\n" +
-		"===AIBOM_DATASET_END===\n"
-	result := extractDelimitedJSON(strings.NewReader(logs), datasetStartMarker, datasetEndMarker)
-	want := `{"datasets":[{"dataset_name":"tatsu-lab/alpaca"}]}`
-	if result != want {
-		t.Errorf("got %q, want %q", result, want)
-	}
-}
-
-// TestExtractDelimitedJSON_MultilinePrettyPrinted reproduces postprocess.py's own
-// RESULT block, which (unlike generate_snapshot.py/dataset_detector.py) is pretty-
-// printed via json.dumps(aibom, indent=2) — the payload spans many lines, so no single
-// captured line is independently valid JSON on its own.
-func TestExtractDelimitedJSON_MultilinePrettyPrinted(t *testing.T) {
-	logs := "===AIBOM_RESULT_START===\n" +
-		"{\n" +
-		`  "experiment_intent": "sft",` + "\n" +
-		`  "model": {` + "\n" +
-		`    "name": "granite"` + "\n" +
-		"  }\n" +
-		"}\n" +
-		"===AIBOM_RESULT_END===\n"
-	result := extractDelimitedJSON(strings.NewReader(logs), resultStartMarker, resultEndMarker)
-	if !json.Valid([]byte(result)) {
-		t.Fatalf("expected valid JSON, got %q", result)
-	}
-	var parsed map[string]interface{}
-	if err := json.Unmarshal([]byte(result), &parsed); err != nil {
-		t.Fatalf("could not unmarshal result: %v", err)
-	}
-	if parsed["experiment_intent"] != "sft" {
-		t.Errorf("experiment_intent = %v, want sft", parsed["experiment_intent"])
-	}
-	model, ok := parsed["model"].(map[string]interface{})
-	if !ok || model["name"] != "granite" {
-		t.Errorf("model.name not correctly parsed, got %v", parsed["model"])
-	}
-}
-
-// TestExtractDelimitedJSON_SpuriousShortJSONToken reproduces a false positive found in
-// production: a short, unrelated line that happens to independently parse as valid JSON
-// (e.g. a bare quoted string naming a dataset split) landed between the markers before
-// the real payload line. Matching "any valid JSON line" picked that fragment over the
-// real object; matching must require the JSON-object shape the scripts actually emit.
-func TestExtractDelimitedJSON_SpuriousShortJSONToken(t *testing.T) {
-	logs := "===AIBOM_DATASET_START===\n" +
-		`"train"` + "\n" +
-		`{"datasets":[{"dataset_name":"tatsu-lab/alpaca"}]}` + "\n" +
-		"===AIBOM_DATASET_END===\n"
-	result := extractDelimitedJSON(strings.NewReader(logs), datasetStartMarker, datasetEndMarker)
-	want := `{"datasets":[{"dataset_name":"tatsu-lab/alpaca"}]}`
-	if result != want {
-		t.Errorf("got %q, want %q", result, want)
-	}
-}
-
-func TestExtractDelimitedJSON_StartOnly(t *testing.T) {
-	logs := "===AIBOM_DISCOVERY_START===\n{\"partial\":true}\n"
-	result := extractDelimitedJSON(strings.NewReader(logs), discoveryStartMarker, discoveryEndMarker)
-	if result != `{"partial":true}` {
-		t.Errorf("got %q, want %q", result, `{"partial":true}`)
-	}
-}
-
-func TestExtractDelimitedJSON_EmptyLogs(t *testing.T) {
-	result := extractDelimitedJSON(strings.NewReader(""), discoveryStartMarker, discoveryEndMarker)
-	if result != "" {
-		t.Errorf("expected empty string for empty logs, got %q", result)
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -369,7 +234,7 @@ func TestIsJobComplete(t *testing.T) {
 
 func TestIsNamespaceEnabled(t *testing.T) {
 	client := fake.NewSimpleClientset(enabledNamespace("enabled-ns"), disabledNamespace("disabled-ns"))
-	w := New(client, nil, "busybox:latest")
+	w := New(client, "busybox:latest")
 	startWatcher(t, w)
 
 	if !w.isNamespaceEnabled("enabled-ns") {
@@ -388,16 +253,21 @@ func TestOnJobEvent_CreatesPostprocessJob(t *testing.T) {
 	job := completedJob("train-job", "test-ns")
 	pod := instrumentedPod("train-job", "test-ns")
 
-	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, nil, "aibom-postprocess:latest")
-
+	// The aibom-discovery init container writes its own data directly into the
+	// data ConfigMap (see extractDataFromPod) before the workload completes.
 	discoveryJSON := `{"pod_metadata":{"name":"train-job-pod","uid":"abc123"},"gpu":{"gpu_count":"2"}}`
-	w.logReader = &mockLogReader{
-		logs: map[string]string{
-			"test-ns/train-job-pod/aibom-discovery": "Starting...\n===AIBOM_DISCOVERY_START===\n" + discoveryJSON + "\n===AIBOM_DISCOVERY_END===\nDone\n",
-			"test-ns/train-job-pod/training":        "Training...\n",
+	dataConfigMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "train-job-aibom-postprocess-data",
+			Namespace: "test-ns",
+		},
+		Data: map[string]string{
+			"discovery-train-job-pod.json": discoveryJSON,
 		},
 	}
+
+	client := fake.NewSimpleClientset(ns, job, pod, dataConfigMap)
+	w := New(client, "aibom-postprocess:latest")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -472,8 +342,7 @@ func TestOnJobEvent_WithAnnotations(t *testing.T) {
 	pod := instrumentedPod("train-job", "test-ns")
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, nil, "aibom-postprocess:latest")
-	w.logReader = &mockLogReader{logs: map[string]string{}}
+	w := New(client, "aibom-postprocess:latest")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -496,7 +365,7 @@ func TestOnJobEvent_NonEnabledNamespace_Skips(t *testing.T) {
 	pod := instrumentedPod("train-job", "disabled-ns")
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, nil, "busybox:latest")
+	w := New(client, "busybox:latest")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -514,7 +383,7 @@ func TestOnJobEvent_IncompleteJob_Skips(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, job)
-	w := New(client, nil, "busybox:latest")
+	w := New(client, "busybox:latest")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -532,7 +401,7 @@ func TestOnJobEvent_AlreadyPostprocessed_Skips(t *testing.T) {
 	pod := instrumentedPod("train-job", "test-ns")
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, nil, "busybox:latest")
+	w := New(client, "busybox:latest")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -561,7 +430,7 @@ func TestOnJobEvent_NoInstrumentedPods_Skips(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, nil, "busybox:latest")
+	w := New(client, "busybox:latest")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -591,7 +460,7 @@ func TestOnJobEvent_NoGPU_Skips(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, nil, "busybox:latest")
+	w := New(client, "busybox:latest")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -609,7 +478,7 @@ func TestOnJobEvent_PostprocessJob_Skips(t *testing.T) {
 	pod := instrumentedPod("train-job-aibom-postprocess", "test-ns")
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, nil, "busybox:latest")
+	w := New(client, "busybox:latest")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -630,7 +499,7 @@ func TestFinalizerAddedToGPUJob(t *testing.T) {
 	pod := instrumentedPod("gpu-job", "test-ns")
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, nil, "busybox:latest")
+	w := New(client, "busybox:latest")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -670,7 +539,7 @@ func TestFinalizerNotAddedToNonGPUJob(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, nil, "busybox:latest")
+	w := New(client, "busybox:latest")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -699,10 +568,7 @@ func TestPostprocessOnDeletion(t *testing.T) {
 	pod := instrumentedPod("server-job", "test-ns")
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, nil, "aibom-postprocess:latest")
-	w.logReader = &mockLogReader{logs: map[string]string{
-		"test-ns/server-job-pod/aibom-discovery": "===AIBOM_DISCOVERY_START===\n{\"gpu\":{\"gpu_count\":\"1\"}}\n===AIBOM_DISCOVERY_END===\n",
-	}}
+	w := New(client, "aibom-postprocess:latest")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -751,7 +617,7 @@ func TestFinalizerAddedToAnnotatedJob(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, nil, "busybox:latest")
+	w := New(client, "busybox:latest")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -771,7 +637,7 @@ func TestPodFinalizerAddedToGPUPod(t *testing.T) {
 	pod := instrumentedBarePod("predictor-pod", "test-ns")
 
 	client := fake.NewSimpleClientset(ns, pod)
-	w := New(client, nil, "busybox:latest")
+	w := New(client, "busybox:latest")
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
@@ -805,7 +671,7 @@ func TestPodFinalizerNotAddedToNonGPUPod(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, pod)
-	w := New(client, nil, "busybox:latest")
+	w := New(client, "busybox:latest")
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
@@ -834,7 +700,7 @@ func TestPodFinalizerAddedToAnnotatedPod(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, pod)
-	w := New(client, nil, "busybox:latest")
+	w := New(client, "busybox:latest")
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
@@ -857,10 +723,7 @@ func TestPostprocessOnPodDeletion(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, pod)
-	w := New(client, nil, "aibom-postprocess:latest")
-	w.logReader = &mockLogReader{logs: map[string]string{
-		"test-ns/predictor-pod/aibom-discovery": "===AIBOM_DISCOVERY_START===\n{\"gpu\":{\"gpu_count\":\"1\"}}\n===AIBOM_DISCOVERY_END===\n",
-	}}
+	w := New(client, "aibom-postprocess:latest")
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
@@ -902,7 +765,7 @@ func TestOnPodEvent_JobOwnedPod_Skipped(t *testing.T) {
 	pod.Finalizers = []string{podFinalizerName}
 
 	client := fake.NewSimpleClientset(ns, pod)
-	w := New(client, nil, "busybox:latest")
+	w := New(client, "busybox:latest")
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
@@ -938,7 +801,7 @@ func TestOnPodEvent_NotInstrumented_Skipped(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, pod)
-	w := New(client, nil, "busybox:latest")
+	w := New(client, "busybox:latest")
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
@@ -975,79 +838,45 @@ func newAIBOMPostprocessFixtures(jobName, namespace string) (*batchv1.Job, *core
 	return ppJob, ppPod, dataConfigMap
 }
 
+// TestCollectAIBOM verifies the post-success bookkeeping: the AIBOM custom
+// resource itself is created directly by postprocess.py via the Kubernetes
+// API (not exercised here, see postprocess/), so collectAIBOM's only job is
+// to mark the postprocess Job collected and clean up the Job/ConfigMap.
 func TestCollectAIBOM(t *testing.T) {
 	ns := enabledNamespace("test-ns")
 	ppJob, ppPod, dataConfigMap := newAIBOMPostprocessFixtures("train-job", "test-ns")
 
 	client := fake.NewSimpleClientset(ns, ppJob, ppPod, dataConfigMap)
-	dynClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{aibomGVR: "AIBOMList"})
-	w := New(client, dynClient, "aibom-postprocess:latest")
-
-	aibomContent := `{"experiment_intent":"training","model":{"name":"llama-3"}}`
-	w.logReader = &mockLogReader{
-		logs: map[string]string{
-			"test-ns/train-job-aibom-postprocess-pod/aibom-postprocess": "===AIBOM_RESULT_START===\n" + aibomContent + "\n===AIBOM_RESULT_END===\n",
-		},
-	}
+	w := New(client, "aibom-postprocess:latest")
 	startWatcher(t, w)
 
 	w.onJobEvent(ppJob)
 
-	list, err := dynClient.Resource(aibomGVR).Namespace("test-ns").List(context.TODO(), metav1.ListOptions{})
+	_, err := client.BatchV1().Jobs("test-ns").Get(context.TODO(), "train-job-aibom-postprocess", metav1.GetOptions{})
+	if !apierrors.IsNotFound(err) {
+		t.Errorf("expected postprocess job to be deleted after collection, got err=%v", err)
+	}
+	_, err = client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), "train-job-aibom-postprocess-data", metav1.GetOptions{})
+	if !apierrors.IsNotFound(err) {
+		t.Errorf("expected postprocess data configmap to be deleted after collection, got err=%v", err)
+	}
+
+	// Guard against double-collection: if a postprocess job somehow still exists
+	// with AnnotationAIBOMCollected already set (e.g. deletion failed), onJobEvent
+	// must not run collectAIBOM a second time.
+	alreadyCollected := completedJob("train-job-aibom-postprocess", "test-ns")
+	alreadyCollected.Labels = map[string]string{LabelPostprocessFor: "train-job"}
+	alreadyCollected.Annotations = map[string]string{AnnotationAIBOMCollected: "2026-01-01T00:00:00Z"}
+
+	// Recreate so the second onJobEvent has something to (not) act on.
+	if _, err := client.BatchV1().Jobs("test-ns").Create(context.TODO(), alreadyCollected, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("could not recreate postprocess job: %v", err)
+	}
+	w.onJobEvent(alreadyCollected)
+
+	_, err = client.BatchV1().Jobs("test-ns").Get(context.TODO(), "train-job-aibom-postprocess", metav1.GetOptions{})
 	if err != nil {
-		t.Fatalf("could not list AIBOM custom resources: %v", err)
-	}
-	if len(list.Items) != 1 {
-		t.Fatalf("expected 1 AIBOM custom resource, got %d", len(list.Items))
-	}
-
-	obj := list.Items[0]
-	jobName, _, _ := unstructured.NestedString(obj.Object, "spec", "jobName")
-	if jobName != "train-job" {
-		t.Errorf("spec.jobName = %q, want %q", jobName, "train-job")
-	}
-	modelName, _, _ := unstructured.NestedString(obj.Object, "spec", "modelName")
-	if modelName != "llama-3" {
-		t.Errorf("spec.modelName = %q, want %q", modelName, "llama-3")
-	}
-	dataName, _, _ := unstructured.NestedString(obj.Object, "spec", "data", "model", "name")
-	if dataName != "llama-3" {
-		t.Errorf("spec.data.model.name = %q, want %q", dataName, "llama-3")
-	}
-}
-
-func TestWriteAIBOMCRD_MissingFields(t *testing.T) {
-	ns := enabledNamespace("test-ns")
-	job := completedJob("train-job-aibom-postprocess", "test-ns")
-	dynClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{aibomGVR: "AIBOMList"})
-	w := New(fake.NewSimpleClientset(ns, job), dynClient, "aibom-postprocess:latest")
-
-	name, err := w.writeAIBOMCRD(context.TODO(), job, "train-job", `{"hardware":{"cpu":"x86"}}`)
-	if err != nil {
-		t.Fatalf("writeAIBOMCRD returned error: %v", err)
-	}
-
-	obj, err := dynClient.Resource(aibomGVR).Namespace("test-ns").Get(context.TODO(), name, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("could not get created AIBOM: %v", err)
-	}
-	modelName, found, _ := unstructured.NestedString(obj.Object, "spec", "modelName")
-	if found && modelName != "" {
-		t.Errorf("expected empty modelName when absent from data, got %q", modelName)
-	}
-	intent, found, _ := unstructured.NestedString(obj.Object, "spec", "experimentIntent")
-	if found && intent != "" {
-		t.Errorf("expected empty experimentIntent when absent from data, got %q", intent)
-	}
-}
-
-func TestWriteAIBOMCRD_NoDynamicClient(t *testing.T) {
-	ns := enabledNamespace("test-ns")
-	job := completedJob("train-job-aibom-postprocess", "test-ns")
-	w := New(fake.NewSimpleClientset(ns, job), nil, "aibom-postprocess:latest")
-
-	if _, err := w.writeAIBOMCRD(context.TODO(), job, "train-job", `{}`); err == nil {
-		t.Error("expected error when no dynamic client is configured")
+		t.Errorf("expected already-collected postprocess job to be left alone, got err=%v", err)
 	}
 }
 

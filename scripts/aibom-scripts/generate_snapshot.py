@@ -6,6 +6,11 @@ import time
 import os
 from datetime import datetime
 
+try:
+    import k8s_api
+except ImportError:
+    k8s_api = None
+
 def run_cmd(command):
     try:
         out = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=10)
@@ -201,13 +206,23 @@ snapshot["benchmarks"]["disk_io"] = disk_io_benchmark()
 print("Running context switch benchmark...")
 snapshot["benchmarks"]["context_switch"] = context_switch_benchmark()
 
-# Write JSON
+# Write JSON locally for debugging/parity with prior behavior
 with open("/tmp/result/discovery.json", "w") as f:
     json.dump(snapshot, f, indent=2)
 
-# Print to stdout for log extraction by the watcher
-print("===AIBOM_DISCOVERY_START===")
-print(json.dumps(snapshot))
-print("===AIBOM_DISCOVERY_END===")
+# Write directly into the AIBOM data ConfigMap the webhook told us about,
+# rather than printing to stdout for the watcher to scrape from pod logs.
+pod_name = os.environ.get("POD_NAME", "")
+pod_namespace = os.environ.get("POD_NAMESPACE", "")
+configmap_name = os.environ.get("AIBOM_DATA_CONFIGMAP", "")
+if k8s_api and pod_name and pod_namespace and configmap_name:
+    try:
+        k8s_api.patch_configmap(
+            pod_namespace, configmap_name, {f"discovery-{pod_name}.json": json.dumps(snapshot)}
+        )
+    except Exception as e:
+        print(f"WARNING: could not write discovery data to ConfigMap {configmap_name}: {e}")
+else:
+    print("WARNING: k8s_api unavailable or POD_NAME/POD_NAMESPACE/AIBOM_DATA_CONFIGMAP not set, skipping ConfigMap write")
 
 print("Snapshot generation complete!")

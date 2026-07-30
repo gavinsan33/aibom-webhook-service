@@ -11,11 +11,13 @@ import os
 import re
 import shlex
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 import urllib.request
 import urllib.parse
 import urllib.error
+
+import k8s_api
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -1114,12 +1116,31 @@ def main():
         sys.exit(1)
     print()
 
-    # Output
-    aibom_json = json.dumps(aibom, indent=2)
-
-    print("===AIBOM_RESULT_START===")
-    print(aibom_json)
-    print("===AIBOM_RESULT_END===")
+    # Output: create the AIBOM directly as a namespaced custom resource, rather
+    # than printing to stdout for the watcher to scrape from pod logs.
+    print("--- Phase 3: AIBOM Custom Resource Creation ---")
+    aibom_cr = {
+        "apiVersion": "aibom.io/v1alpha1",
+        "kind": "AIBOM",
+        "metadata": {
+            "generateName": f"{JOB_NAME}-",
+            "namespace": JOB_NAMESPACE,
+            "labels": {"aibom.io/job-name": JOB_NAME},
+        },
+        "spec": {
+            "jobName": JOB_NAME,
+            "modelName": safe_get(aibom, "model", "name", default=""),
+            "experimentIntent": aibom.get("experiment_intent") or "",
+            "collectedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "data": aibom,
+        },
+    }
+    try:
+        created = k8s_api.create_custom_object(JOB_NAMESPACE, "aibom.io", "v1alpha1", "aiboms", aibom_cr)
+    except Exception as e:
+        print(f"ERROR: could not create AIBOM custom resource: {e}", file=sys.stderr)
+        sys.exit(1)
+    print(f"  Created AIBOM/{JOB_NAMESPACE}/{created.get('metadata', {}).get('name', '?')}")
     print()
 
     # Summary

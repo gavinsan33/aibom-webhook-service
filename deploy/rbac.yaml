@@ -13,20 +13,14 @@ rules:
     resources: ["pods"]
     verbs: ["get", "list", "watch", "patch", "update"]
   - apiGroups: [""]
-    resources: ["pods/log"]
-    verbs: ["get"]
-  - apiGroups: [""]
     resources: ["namespaces"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["configmaps"]
-    verbs: ["get", "create", "delete"]
+    verbs: ["get", "create", "update", "delete"]
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
-  - apiGroups: ["aibom.io"]
-    resources: ["aiboms"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
