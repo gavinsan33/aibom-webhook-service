@@ -23,7 +23,7 @@ import (
 const (
 	LabelEnabled             = "aibom.io/enabled"
 	LabelInstrumented        = "aibom.io/instrumented"
-	LabelPostprocessFor      = "aibom.io/postprocess-for"
+	LabelPostprocessFor      = aibomdata.LabelPostprocessFor
 	AnnotationPostprocess    = "aibom.io/postprocess-job"
 	AnnotationAIBOMCollected = "aibom.io/aibom-collected"
 
@@ -600,6 +600,11 @@ func (w *Watcher) createPostprocessJobCore(ctx context.Context, namespace, trigg
 		Spec: batchv1.JobSpec{
 			BackoffLimit: &backoffLimit,
 			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						LabelPostprocessFor: triggerName,
+					},
+				},
 				Spec: corev1.PodSpec{
 					RestartPolicy:      corev1.RestartPolicyNever,
 					ServiceAccountName: postprocessServiceAccountName,

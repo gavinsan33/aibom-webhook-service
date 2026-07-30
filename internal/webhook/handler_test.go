@@ -159,6 +159,15 @@ func TestShouldMutate_NoMatch(t *testing.T) {
 	}
 }
 
+func TestShouldMutate_PostprocessPod(t *testing.T) {
+	m := newTestMutator()
+	pod := podWithOwner("Job")
+	pod.Labels = map[string]string{"aibom.io/postprocess-for": "train-job"}
+	if m.shouldMutate(pod) {
+		t.Error("expected a postprocess Job's own pod to be skipped despite its Job owner")
+	}
+}
+
 // --- Discovery init container tests ---
 
 func TestMutate_DiscoveryScriptCommand(t *testing.T) {

@@ -107,10 +107,21 @@ func (m *Mutator) Mutate(pod *corev1.Pod) ([]PatchOperation, error) {
 }
 
 func (m *Mutator) shouldMutate(pod *corev1.Pod) bool {
-	if alreadyInstrumented(pod) {
+	if alreadyInstrumented(pod) || isPostprocessPod(pod) {
 		return false
 	}
 	return hasMatchingOwner(pod) || requestsGPU(pod)
+}
+
+// isPostprocessPod reports whether this pod belongs to a postprocess Job
+// itself (labeled by the watcher via its pod template, see watcher.go's
+// createPostprocessJobCore). Without this check, the postprocess Job's own
+// pod — owned by a plain batch/v1 Job like any other matched workload — would
+// get instrumented too, deriving a second-generation, truncated data
+// ConfigMap name from the postprocess Job's own name instead of the original
+// workload's.
+func isPostprocessPod(pod *corev1.Pod) bool {
+	return pod.Labels[aibomdata.LabelPostprocessFor] != ""
 }
 
 func alreadyInstrumented(pod *corev1.Pod) bool {

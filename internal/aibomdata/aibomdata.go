@@ -11,6 +11,13 @@ const (
 	MaxJobNameLength  = 63
 	PostprocessSuffix = "-aibom-postprocess"
 	ConfigMapSuffix   = "-data"
+
+	// LabelPostprocessFor is set on postprocess Jobs (and now their pods) to name
+	// the workload they were generated for. The webhook checks this on pods to
+	// avoid re-instrumenting a postprocess Job's own pod, which would otherwise
+	// derive a second-generation data ConfigMap name from the postprocess Job's
+	// own name (see mutator.go's shouldMutate).
+	LabelPostprocessFor = "aibom.io/postprocess-for"
 )
 
 // PostprocessJobName returns the deterministic postprocess Job name for a
