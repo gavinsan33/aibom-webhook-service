@@ -152,6 +152,7 @@ examples/
   vllm-inference-rhoai.yaml         # Same model via a RHOAI/KServe InferenceService
   granite-lora-finetune.yaml        # Example Job: single-GPU LoRA fine-tuning via trl sft
   granite-lora-finetune-multigpu.yaml  # Same, but 2 GPUs via trl's --num_processes passthrough
+  granite-lora-finetune-fsdp.yaml   # Same, but via a generated --accelerate_config file (tests content-based parallelization detection)
 Dockerfile                          # Multi-stage build (distroless)
 Makefile                            # Build, test, deploy targets
 ```
@@ -298,7 +299,7 @@ Sampling parameters set per-request by a benchmark client (e.g. temperature pass
 
 - An explicit launcher binary: `accelerate launch --multi_gpu` → `data_parallel`; a bare `deepspeed` launcher or `--deepspeed <config>` flag → `deepspeed`; `torchrun`/`mpirun` → `data_parallel`.
 - A bare `--fsdp` flag on the training command itself → `fsdp`.
-- Accelerate-launch arguments passed *directly* to a CLI that spawns `accelerate launch` internally — no separate launcher token ever appears in the container's command. `trl`'s CLI supports this: `trl sft ... --num_processes 4` → `data_parallel`, and `trl sft ... --accelerate_config <path>` is resolved from the file's actual `distributed_type` (`FSDP` → `fsdp`, `DEEPSPEED` → `deepspeed`, `MULTI_GPU`/`MULTI_CPU` → `data_parallel`) — this is the harder, easy-to-miss case — see `examples/granite-lora-finetune-multigpu.yaml`.
+- Accelerate-launch arguments passed *directly* to a CLI that spawns `accelerate launch` internally — no separate launcher token ever appears in the container's command. `trl`'s CLI supports this: `trl sft ... --num_processes 4` → `data_parallel` (see `examples/granite-lora-finetune-multigpu.yaml`), and `trl sft ... --accelerate_config <path>` is resolved from the file's actual `distributed_type` (`FSDP` → `fsdp`, `DEEPSPEED` → `deepspeed`, `MULTI_GPU`/`MULTI_CPU` → `data_parallel`) — this is the harder, easy-to-miss case — see `examples/granite-lora-finetune-fsdp.yaml`.
 
 The `--accelerate_config` file is read from inside the training container itself, by the same in-container hook (`runtime_detector.py`) that detects datasets — `postprocess.py` has no access to the training container's filesystem after the fact. This requires PyYAML to be present in the training image (a hard dependency of `accelerate` itself, so present whenever `--accelerate_config` is actually used); if it's unavailable, or the config file's `distributed_type` isn't one of the four listed above, detection falls back to guessing from the config filename against a small set of known preset names (`fsdp1`/`fsdp2`/`zero1`/`zero2`/`zero3`/`multi_gpu`/`single_gpu`) — a much weaker heuristic, since it only works if the file happens to be named exactly one of those.
 
@@ -394,6 +395,18 @@ It deliberately uses `trl`'s own `accelerate launch` passthrough (`--num_process
 # Deploy the example (namespace must be set up first, and the cluster/node
 # must have 2+ GPUs schedulable for this to actually run)
 oc apply -f examples/granite-lora-finetune-multigpu.yaml
+```
+
+## Example: FSDP via `--accelerate_config`
+
+The `examples/granite-lora-finetune-fsdp.yaml` file is identical to the single-GPU example above, except its command writes an accelerate config file (`/tmp/my_fsdp_config.yaml`, containing `distributed_type: FSDP`) at container startup and passes it to `trl sft` via `--accelerate_config`.
+
+The file is deliberately named `my_fsdp_config.yaml` — not one of the five preset names (`fsdp1`/`fsdp2`/`zero1`/`zero2`/`zero3`) the old filename-only heuristic recognized — to demonstrate that `parallelization_strategy` detection now comes from the in-container hook (`runtime_detector.py`) actually reading the file's `distributed_type` field, rather than guessing from its name.
+
+```bash
+# Deploy the example (namespace must be set up first, and the cluster/node
+# must have 2+ GPUs schedulable for this to actually run)
+oc apply -f examples/granite-lora-finetune-fsdp.yaml
 ```
 
 ## Roadmap

@@ -1,0 +1,72 @@
+# Multi-GPU LoRA fine-tuning example (supervised fine-tuning / SFT),
+# exercising the accelerate-config *content* parsing added to
+# runtime_detector.py's `_capture_accelerate_config()`, rather than the
+# filename-convention fallback in postprocess.py's
+# `_ACCELERATE_CONFIG_STRATEGIES`.
+#
+# Same model/dataset/LoRA config as examples/granite-lora-finetune.yaml, but
+# writes an accelerate config file at runtime and passes it to `trl sft` via
+# `--accelerate_config`. The file is deliberately named `my_fsdp_config.yaml`
+# -- NOT one of the five preset names (fsdp1/fsdp2/zero1/zero2/zero3) that the
+# old filename-only heuristic recognized -- to demonstrate that detection now
+# comes from actually reading the file's `distributed_type: FSDP` field
+# in-container (where the file exists), rather than guessing from its name.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: aibom-granite-lora-finetune-fsdp
+  namespace: gavin-test
+  annotations:
+    aibom.io/experiment-intent: sft
+    aibom.io/experiment-name: granite-lora-sft-fsdp-benchmark
+
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: finetune
+          image: nvcr.io/nvidia/pytorch:26.03-py3
+          command:
+            - sh
+            - -c
+            - |
+              pip install --no-cache-dir -U trl peft datasets accelerate && \
+              export PATH="$HOME/.local/bin:$PATH" && \
+              cat > /tmp/my_fsdp_config.yaml <<'EOF'
+              distributed_type: FSDP
+              fsdp_config:
+                fsdp_sharding_strategy: FULL_SHARD
+                fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP
+              num_processes: 2
+              EOF
+              trl sft \
+                --model_name_or_path ibm-granite/granite-3.3-2b-instruct \
+                --dataset_name tatsu-lab/alpaca \
+                --dataset_text_field text \
+                --output_dir /tmp/output \
+                --use_peft true \
+                --lora_r 16 \
+                --lora_alpha 32 \
+                --lora_dropout 0.05 \
+                --lora_target_modules q_proj k_proj v_proj o_proj \
+                --per_device_train_batch_size 4 \
+                --gradient_accumulation_steps 4 \
+                --learning_rate 2e-4 \
+                --num_train_epochs 1 \
+                --max_steps 50 \
+                --logging_steps 5 \
+                --bf16 true \
+                --accelerate_config /tmp/my_fsdp_config.yaml \
+                --report_to none
+          env:
+            - name: HOME
+              value: /tmp
+          resources:
+            requests:
+              nvidia.com/gpu: "2"
+            limits:
+              nvidia.com/gpu: "2"
