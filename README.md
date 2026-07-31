@@ -145,7 +145,7 @@ scripts/
   generate-certs.sh                 # Self-signed TLS cert generation
   aibom-scripts/
     generate_snapshot.py             # Hardware discovery script (from coldpress)
-    dataset_detector.py              # Dataset detection hooks (from coldpress)
+    runtime_detector.py               # Dataset detection + training runtime hooks (from coldpress)
     k8s_api.py                       # Stdlib-only in-cluster REST client shared by both scripts
 examples/
   vllm-inference.yaml               # Example JobSet: vLLM server + guidellm benchmark
@@ -181,7 +181,7 @@ When the webhook mutates a pod, it adds:
 - Writes the result directly into the workload's data ConfigMap (key `discovery-<pod-name>.json`) via `k8s_api.py`, an in-cluster REST helper using only the Python stdlib — no `kubernetes` pip dependency needed even though this runs inside a third-party pinned image
 
 **Dataset detector (into each application container):**
-- Mounts `dataset_detector.py` as `usercustomize.py` on `PYTHONPATH`, plus `k8s_api.py` alongside it (also `subPath`-mounted, since `usercustomize.py` needs to `import k8s_api`)
+- Mounts `runtime_detector.py` as `usercustomize.py` on `PYTHONPATH`, plus `k8s_api.py` alongside it (also `subPath`-mounted, since `usercustomize.py` needs to `import k8s_api`)
 - Python auto-imports it at startup — no code changes needed
 - Hooks into PyTorch DataLoader, HuggingFace `datasets.load_dataset`, torchvision datasets, and webdataset
 - Captures dataset name, version, split, fingerprint, license, and training args
@@ -300,7 +300,7 @@ Sampling parameters set per-request by a benchmark client (e.g. temperature pass
 - A bare `--fsdp` flag on the training command itself → `fsdp`.
 - Accelerate-launch arguments passed *directly* to a CLI that spawns `accelerate launch` internally — no separate launcher token ever appears in the container's command. `trl`'s CLI supports this: `trl sft ... --num_processes 4` → `data_parallel`, and `trl sft ... --accelerate_config <path>` is resolved from the file's actual `distributed_type` (`FSDP` → `fsdp`, `DEEPSPEED` → `deepspeed`, `MULTI_GPU`/`MULTI_CPU` → `data_parallel`) — this is the harder, easy-to-miss case — see `examples/granite-lora-finetune-multigpu.yaml`.
 
-The `--accelerate_config` file is read from inside the training container itself, by the same in-container hook (`dataset_detector.py`) that detects datasets — `postprocess.py` has no access to the training container's filesystem after the fact. This requires PyYAML to be present in the training image (a hard dependency of `accelerate` itself, so present whenever `--accelerate_config` is actually used); if it's unavailable, or the config file's `distributed_type` isn't one of the four listed above, detection falls back to guessing from the config filename against a small set of known preset names (`fsdp1`/`fsdp2`/`zero1`/`zero2`/`zero3`/`multi_gpu`/`single_gpu`) — a much weaker heuristic, since it only works if the file happens to be named exactly one of those.
+The `--accelerate_config` file is read from inside the training container itself, by the same in-container hook (`runtime_detector.py`) that detects datasets — `postprocess.py` has no access to the training container's filesystem after the fact. This requires PyYAML to be present in the training image (a hard dependency of `accelerate` itself, so present whenever `--accelerate_config` is actually used); if it's unavailable, or the config file's `distributed_type` isn't one of the four listed above, detection falls back to guessing from the config filename against a small set of known preset names (`fsdp1`/`fsdp2`/`zero1`/`zero2`/`zero3`/`multi_gpu`/`single_gpu`) — a much weaker heuristic, since it only works if the file happens to be named exactly one of those.
 
 This only sees parallelism baked into the command (directly or via one of these launcher-passthrough conventions) or in the referenced accelerate config's content; in-script sharding (e.g. `device_map="auto"` set directly in Python code, common in QLoRA scripts) isn't visible and isn't detected.
 
@@ -318,7 +318,7 @@ Whichever source wins is recorded in `dataset.declared.declared_via` (`"annotati
 
 Every entry in `dataset.auto_detected` also carries a `matches_declared` boolean, comparing its `dataset_name` against the final `dataset.declared.name`. This is the actual reconciliation check: it flags the case where a job declares one dataset (via annotation or CLI arg) but the code loads something different at runtime.
 
-Within `dataset.auto_detected` itself, `dataset_detector.py` correlates hook detections that refer to the same underlying dataset object — e.g. a `datasets.load_dataset(...)` call followed by wrapping the result in a `torch.utils.data.DataLoader(...)` for batching — into a single entry (with a `seen_via` list noting every hook that touched it) rather than recording it twice.
+Within `dataset.auto_detected` itself, `runtime_detector.py` correlates hook detections that refer to the same underlying dataset object — e.g. a `datasets.load_dataset(...)` call followed by wrapping the result in a `torch.utils.data.DataLoader(...)` for batching — into a single entry (with a `seen_via` list noting every hook that touched it) rather than recording it twice.
 
 ### Grafana Credentials
 
@@ -377,7 +377,7 @@ oc apply -f examples/vllm-inference-rhoai.yaml
 
 The `examples/granite-lora-finetune.yaml` file fine-tunes a small Granite base model with a LoRA adapter over the `tatsu-lab/alpaca` dataset, using HuggingFace's `trl sft` CLI — no custom training script needed, same spirit as the vLLM examples invoking a CLI directly. LoRA freezes the base model and only trains a small adapter, so it fits comfortably on a single GPU. The run is capped with `--max_steps 50` to stay a short, testable example rather than a full training pass.
 
-It's a plain `batch/v1` Job (no JobSet needed, since there's no separate client/server split), so it qualifies for postprocessing today via its GPU resources and `aibom.io/*` annotations and triggers normally on `JobComplete`. The dataset load (`datasets.load_dataset("tatsu-lab/alpaca")`) is picked up automatically by the existing HuggingFace hook in `dataset_detector.py`, and since this example sets no `aibom.io/dataset-*` annotation, `dataset.declared` is instead parsed from the `trl sft` command's `--dataset_name` flag (`dataset.declared.declared_via: "cli_arg"`) — see [Dataset Declaration and Reconciliation](#dataset-declaration-and-reconciliation). The `model`, `fine_tuning`, and `training` fields (model name, LoRA rank/alpha, adaptation method, learning rate, batch size, epochs) are all auto-detected from the `trl sft` command itself (see Model Auto-Detection) — no annotations needed for those either.
+It's a plain `batch/v1` Job (no JobSet needed, since there's no separate client/server split), so it qualifies for postprocessing today via its GPU resources and `aibom.io/*` annotations and triggers normally on `JobComplete`. The dataset load (`datasets.load_dataset("tatsu-lab/alpaca")`) is picked up automatically by the existing HuggingFace hook in `runtime_detector.py`, and since this example sets no `aibom.io/dataset-*` annotation, `dataset.declared` is instead parsed from the `trl sft` command's `--dataset_name` flag (`dataset.declared.declared_via: "cli_arg"`) — see [Dataset Declaration and Reconciliation](#dataset-declaration-and-reconciliation). The `model`, `fine_tuning`, and `training` fields (model name, LoRA rank/alpha, adaptation method, learning rate, batch size, epochs) are all auto-detected from the `trl sft` command itself (see Model Auto-Detection) — no annotations needed for those either.
 
 ```bash
 # Deploy the example (namespace must be set up first)

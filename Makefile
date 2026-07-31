@@ -64,7 +64,7 @@ setup-namespace:
 	oc policy add-role-to-group system:image-puller system:serviceaccounts:$(NAMESPACE) -n aibom-system
 	oc create configmap aibom-scripts \
 		--from-file=generate_snapshot.py=scripts/aibom-scripts/generate_snapshot.py \
-		--from-file=dataset_detector.py=scripts/aibom-scripts/dataset_detector.py \
+		--from-file=runtime_detector.py=scripts/aibom-scripts/runtime_detector.py \
 		--from-file=k8s_api.py=scripts/aibom-scripts/k8s_api.py \
 		-n $(NAMESPACE) --dry-run=client -o yaml | oc apply -f -
 	oc create serviceaccount aibom-postprocess -n $(NAMESPACE) --dry-run=client -o yaml | oc apply -f -

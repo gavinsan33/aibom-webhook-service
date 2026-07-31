@@ -1,11 +1,12 @@
 """
-AIBOM Dataset Detector - Runtime shim for automatic dataset metadata collection.
+AIBOM Runtime Detector - Runtime shim for automatic training metadata collection.
 
 Activated via PYTHONSTARTUP or explicit import. Monkey-patches common ML dataset
 entry points to capture dataset name, source, and configuration without requiring
-manual specification in intent.yaml.
+manual specification in intent.yaml, and inspects the training process's own
+argv/config files to capture training args and parallelization strategy.
 
-Supported frameworks:
+Supported dataset frameworks:
   - PyTorch DataLoader / Dataset
   - HuggingFace datasets.load_dataset
   - torchvision.datasets

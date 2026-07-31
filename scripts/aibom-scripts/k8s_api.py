@@ -1,7 +1,7 @@
 # Minimal, dependency-free in-cluster Kubernetes REST client.
 #
 # Uses only the Python stdlib so it can run inside arbitrary user application
-# images (dataset_detector.py runs as usercustomize.py in the workload's own
+# images (runtime_detector.py runs as usercustomize.py in the workload's own
 # container) as well as the pinned discovery image, without requiring the
 # `kubernetes` pip package to be installed anywhere it's imported.
 

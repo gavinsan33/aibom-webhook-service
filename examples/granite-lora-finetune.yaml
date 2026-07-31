@@ -8,7 +8,7 @@
 # examples elsewhere in this repo use a larger 8B model for serving.
 #
 # The dataset is loaded via `datasets.load_dataset(...)`, which the webhook's
-# dataset_detector.py already auto-detects at runtime (no annotation needed
+# runtime_detector.py already auto-detects at runtime (no annotation needed
 # for dataset composition — aibom.io/dataset-* annotations below just record
 # the declared/intended dataset for comparison against what's auto-detected).
 #

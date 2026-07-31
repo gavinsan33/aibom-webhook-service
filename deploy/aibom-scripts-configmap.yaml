@@ -2,7 +2,7 @@
 #
 #   kubectl create configmap aibom-scripts \
 #     --from-file=generate_snapshot.py=scripts/aibom-scripts/generate_snapshot.py \
-#     --from-file=dataset_detector.py=scripts/aibom-scripts/dataset_detector.py \
+#     --from-file=runtime_detector.py=scripts/aibom-scripts/runtime_detector.py \
 #     -n <workload-namespace>
 #
 # Or use: make create-scripts-configmap NAMESPACE=<workload-namespace>
@@ -20,7 +20,7 @@ data:
     # Source: coldpress/discovery/user_snapshot.yaml (extracted inline Python)
     # See scripts/aibom-scripts/generate_snapshot.py for the full script
     # Use 'kubectl create configmap --from-file' to create this ConfigMap
-  dataset_detector.py: |
+  runtime_detector.py: |
     # Source: coldpress/dataset_detector.py
-    # See scripts/aibom-scripts/dataset_detector.py for the full script
+    # See scripts/aibom-scripts/runtime_detector.py for the full script
     # Use 'kubectl create configmap --from-file' to create this ConfigMap

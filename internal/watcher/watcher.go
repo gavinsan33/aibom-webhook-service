@@ -393,7 +393,7 @@ func (w *Watcher) getInstrumentedPods(job *batchv1.Job) ([]corev1.Pod, error) {
 
 // extractDataFromPod reads a pod's contribution to the AIBOM data ConfigMap.
 // Both discovery and dataset data are written directly into dataCM by the
-// aibom-discovery init container and the app container's dataset-detector
+// aibom-discovery init container and the app container's runtime-detector
 // hook respectively (keyed "discovery-<pod-name>.json"/"dataset-<pod-name>.json")
 // rather than scraped from logs — dataCM is nil if the ConfigMap doesn't exist
 // yet (e.g. neither has run/flushed yet).

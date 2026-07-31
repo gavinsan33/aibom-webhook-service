@@ -269,13 +269,13 @@ func (m *Mutator) buildDatasetDetectorPatches(pod *corev1.Pod, containerIdx int)
 		}
 	}
 
-	// Mount usercustomize.py (dataset detector), its k8s_api.py import
+	// Mount usercustomize.py (runtime detector), its k8s_api.py import
 	// dependency, and the aibom-data volume
 	mounts := []corev1.VolumeMount{
 		{
 			Name:      "aibom-scripts",
 			MountPath: "/aibom-hooks/usercustomize.py",
-			SubPath:   "dataset_detector.py",
+			SubPath:   "runtime_detector.py",
 			ReadOnly:  true,
 		},
 		{

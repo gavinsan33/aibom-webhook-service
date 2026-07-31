@@ -397,12 +397,12 @@ func TestMutate_DatasetDetectorVolumeMount(t *testing.T) {
 			}
 			foundDetector := false
 			for _, mount := range mounts {
-				if mount.MountPath == "/aibom-hooks/usercustomize.py" && mount.SubPath == "dataset_detector.py" {
+				if mount.MountPath == "/aibom-hooks/usercustomize.py" && mount.SubPath == "runtime_detector.py" {
 					foundDetector = true
 				}
 			}
 			if !foundDetector {
-				t.Error("expected usercustomize.py mount with subPath dataset_detector.py")
+				t.Error("expected usercustomize.py mount with subPath runtime_detector.py")
 			}
 			return
 		}
