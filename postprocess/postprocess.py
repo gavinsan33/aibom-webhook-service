@@ -929,7 +929,11 @@ def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, tel
             "random_seed": _first_not_none(
                 dm.get("random_seed"), _try_int(annotations.get("random-seed"))
             ),
-            "parallelization_strategy": annotations.get("parallelization-strategy") or dm.get("parallelization_strategy"),
+            "parallelization_strategy": (
+                annotations.get("parallelization-strategy")
+                or runtime_info.get("parallelization_strategy")
+                or dm.get("parallelization_strategy")
+            ),
         }
 
     # Fine-tuning config

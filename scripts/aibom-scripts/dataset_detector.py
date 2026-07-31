@@ -123,8 +123,49 @@ def _capture_training_args():
         _dbg_exc("_capture_training_args")
 
 
+_ACCELERATE_DISTRIBUTED_TYPE_STRATEGIES = {
+    "fsdp": "fsdp",
+    "deepspeed": "deepspeed",
+    "multi_gpu": "data_parallel",
+    "multi_cpu": "data_parallel",
+}
+
+
+def _capture_accelerate_config():
+    """Resolve the real parallelization strategy from an --accelerate_config
+    YAML file's actual content -- running here, inside the training
+    container, is the only place this file is readable."""
+    try:
+        argv = sys.argv[:]
+        path = None
+        for i, arg in enumerate(argv):
+            key, _, val = arg.partition("=")
+            if key in ("--accelerate_config", "--accelerate-config"):
+                if not val and i + 1 < len(argv):
+                    val = argv[i + 1]
+                path = val or None
+                break
+        if not path or not os.path.isfile(path):
+            return
+        try:
+            import yaml
+        except ImportError:
+            _dbg("Accelerate config detection: PyYAML not available, skipping")
+            return
+        with open(path) as f:
+            config = yaml.safe_load(f) or {}
+        distributed_type = str(config.get("distributed_type", "")).lower()
+        strategy = _ACCELERATE_DISTRIBUTED_TYPE_STRATEGIES.get(distributed_type)
+        if strategy:
+            _runtime_info["parallelization_strategy"] = strategy
+            _dbg(f"Captured parallelization_strategy={strategy} from {path}")
+    except Exception:
+        _dbg_exc("_capture_accelerate_config")
+
+
 def _flush():
     _capture_training_args()
+    _capture_accelerate_config()
     with _lock:
         if not _detected_datasets and not _runtime_info:
             _dbg("Flush: nothing detected, skipping write")
