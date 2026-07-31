@@ -272,6 +272,9 @@ Two serving/training tools are currently recognized this way: **vLLM** (serving)
 | `--quantization` / `-q` | `model.quantization` |
 | `--max-model-len` | `inference.max_model_len` |
 | `--tensor-parallel-size` / `-tp` | `inference.tensor_parallel_size` |
+| `--pipeline-parallel-size` / `-pp` | `inference.pipeline_parallel_size` |
+| `--enable-expert-parallel` | `inference.enable_expert_parallel` |
+| `--data-parallel-size` / `-dp` | `inference.data_parallel_size` |
 | `--gpu-memory-utilization` | `inference.gpu_memory_utilization` |
 | `--speculative-model` + `--num-speculative-tokens` (legacy), or `--speculative-config` (modern, JSON or `key=value` list) | `model.speculative_decoding` |
 | `--override-generation-config` (JSON or `key=value` list) | `inference.temperature`, `inference.top_p`, `inference.top_k` |
