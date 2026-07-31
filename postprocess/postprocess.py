@@ -11,6 +11,7 @@ import os
 import re
 import shlex
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 import urllib.request
@@ -29,6 +30,14 @@ JOB_NAMESPACE = os.environ.get("AIBOM_JOB_NAMESPACE", "")
 GRAFANA_URL = os.environ.get("GRAFANA_URL", "")
 GRAFANA_API_TOKEN = os.environ.get("GRAFANA_API_TOKEN", "")
 GRAFANA_DATASOURCE_UID = os.environ.get("GRAFANA_DATASOURCE_UID", "")
+
+# The observability backend can lag behind real time before freshly-scraped
+# samples become queryable, so a summary query fired immediately after the
+# workload's pod completes can race that ingestion delay and come back empty
+# even though the same query succeeds moments later. Retry missing summary
+# metrics with a delay rather than accepting the first empty result.
+TELEMETRY_RETRY_ATTEMPTS = int(os.environ.get("AIBOM_TELEMETRY_RETRY_ATTEMPTS", "3"))
+TELEMETRY_RETRY_DELAY_S = int(os.environ.get("AIBOM_TELEMETRY_RETRY_DELAY_S", "45"))
 
 TELEMETRY_QUERIES = {
     "gpu_utilization": 'nerc:dcgm_gpu_util:avg5m{exported_pod="{pod_name}"}',
@@ -768,25 +777,40 @@ def collect_telemetry(discoveries):
                 f"excludes_cold_start={not includes_cold_start})..."
             )
             aggregated = {}
-            for sq_name, sq_info in SUMMARY_QUERIES.items():
-                promql = (
-                    sq_info["query"]
-                    .replace("{pod_name}", pod_name)
-                    .replace("{duration}", duration)
-                )
-                response = query_grafana(
-                    grafana_url, api_token, datasource_uid, promql,
-                    summary_start_ms, end_ms, instant=True,
-                )
-                value = parse_instant_value(response)
-                if value is not None:
-                    aggregated[sq_name] = {
-                        "value": round(value, 2),
-                        "unit": sq_info.get("unit", ""),
-                    }
-                    print(f"      {sq_name}: {round(value, 2)} {sq_info.get('unit', '')}")
-                else:
-                    print(f"      {sq_name}: no data")
+            for attempt in range(1, TELEMETRY_RETRY_ATTEMPTS + 1):
+                pending = {
+                    name: info for name, info in SUMMARY_QUERIES.items() if name not in aggregated
+                }
+                if not pending:
+                    break
+                if attempt > 1:
+                    print(
+                        f"      Retrying {len(pending)} summary quer"
+                        f"{'y' if len(pending) == 1 else 'ies'} after possible ingestion "
+                        f"delay (attempt {attempt}/{TELEMETRY_RETRY_ATTEMPTS}, "
+                        f"waited {TELEMETRY_RETRY_DELAY_S}s)..."
+                    )
+                for sq_name, sq_info in pending.items():
+                    promql = (
+                        sq_info["query"]
+                        .replace("{pod_name}", pod_name)
+                        .replace("{duration}", duration)
+                    )
+                    response = query_grafana(
+                        grafana_url, api_token, datasource_uid, promql,
+                        summary_start_ms, end_ms, instant=True,
+                    )
+                    value = parse_instant_value(response)
+                    if value is not None:
+                        aggregated[sq_name] = {
+                            "value": round(value, 2),
+                            "unit": sq_info.get("unit", ""),
+                        }
+                        print(f"      {sq_name}: {round(value, 2)} {sq_info.get('unit', '')}")
+                    else:
+                        print(f"      {sq_name}: no data (attempt {attempt}/{TELEMETRY_RETRY_ATTEMPTS})")
+                if len(aggregated) < len(SUMMARY_QUERIES) and attempt < TELEMETRY_RETRY_ATTEMPTS:
+                    time.sleep(TELEMETRY_RETRY_DELAY_S)
             pod_telemetry["aggregated"] = aggregated
             pod_telemetry["summary_includes_cold_start"] = includes_cold_start
 
