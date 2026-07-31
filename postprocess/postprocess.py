@@ -321,6 +321,14 @@ _TRL_ARG_MAP = {
     "--lora-r": ("lora_rank", int),
     "--lora_alpha": ("lora_alpha", int),
     "--lora-alpha": ("lora_alpha", int),
+    "--use_dora": ("use_dora", _to_bool),
+    "--use-dora": ("use_dora", _to_bool),
+    "--use_rslora": ("use_rslora", _to_bool),
+    "--use-rslora": ("use_rslora", _to_bool),
+    "--load_in_4bit": ("load_in_4bit", _to_bool),
+    "--load-in-4bit": ("load_in_4bit", _to_bool),
+    "--load_in_8bit": ("load_in_8bit", _to_bool),
+    "--load-in-8bit": ("load_in_8bit", _to_bool),
     "--learning_rate": ("learning_rate", float),
     "--learning-rate": ("learning_rate", float),
     "--per_device_train_batch_size": ("batch_size", int),
@@ -363,8 +371,21 @@ def detect_trl_from_command(command):
 
         result[name] = converted
 
+    use_dora = result.pop("use_dora", False)
+    use_rslora = result.pop("use_rslora", False)
+    quantized = result.pop("load_in_4bit", False) or result.pop("load_in_8bit", False)
+
     if result.pop("use_peft", False):
-        result["adaptation_method"] = "lora" if "lora_rank" in result else "peft"
+        if "lora_rank" not in result:
+            result["adaptation_method"] = "peft"
+        elif use_dora:
+            result["adaptation_method"] = "dora"
+        elif use_rslora:
+            result["adaptation_method"] = "rslora"
+        elif quantized:
+            result["adaptation_method"] = "qlora"
+        else:
+            result["adaptation_method"] = "lora"
 
     return result if len(result) > 1 else None
 

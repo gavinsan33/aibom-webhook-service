@@ -286,7 +286,7 @@ Sampling parameters set per-request by a benchmark client (e.g. temperature pass
 | Flag | AIBOM Field |
 |------|-------------|
 | `--model_name_or_path` | `model.name` |
-| `--use_peft` (combined with presence of `--lora_r`) | `fine_tuning.adaptation_method` (`lora` or `peft`) |
+| `--use_peft` (combined with presence of `--lora_r`, `--use_dora`, `--use_rslora`, `--load_in_4bit`/`--load_in_8bit`) | `fine_tuning.adaptation_method` (`lora`, `qlora`, `dora`, `rslora`, or `peft`) |
 | `--lora_r` | `fine_tuning.lora_rank` |
 | `--lora_alpha` | `fine_tuning.lora_alpha` |
 | `--learning_rate` | `training.learning_rate` |
