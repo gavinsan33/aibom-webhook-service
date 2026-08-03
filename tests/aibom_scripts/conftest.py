@@ -1,3 +1,4 @@
+import enum
 import sys
 import types
 
@@ -135,6 +136,15 @@ class FakePreTrainedModel:
         return cls(config=kwargs.get("config"), dtype=kwargs.get("torch_dtype"))
 
 
+class FakeOptimizerNames(str, enum.Enum):
+    """Mirrors transformers.trainer_utils.OptimizerNames -- a str+Enum mixin
+    whose default str() is "ClassName.MEMBER", not the plain value."""
+
+    ADAMW_TORCH = "adamw_torch"
+    ADAMW_TORCH_FUSED = "adamw_torch_fused"
+    ADAMW_BNB_8BIT = "adamw_bnb_8bit"
+
+
 class FakeTrainingArguments:
     def __init__(
         self, output_dir=None, learning_rate=5e-5, per_device_train_batch_size=8,
@@ -144,7 +154,9 @@ class FakeTrainingArguments:
         self.learning_rate = learning_rate
         self.per_device_train_batch_size = per_device_train_batch_size
         self.num_train_epochs = num_train_epochs
-        self.optim = optim
+        # Real TrainingArguments.__post_init__ normalizes a plain string optim
+        # into an OptimizerNames enum member -- mirror that here.
+        self.optim = FakeOptimizerNames(optim)
         self.seed = seed
         self.bf16 = bf16
         self.fp16 = fp16

@@ -578,7 +578,11 @@ def _install_transformers_hook():
             if getattr(self, "num_train_epochs", None) is not None:
                 info["epochs"] = self.num_train_epochs
             if getattr(self, "optim", None) is not None:
-                info["optimizer"] = str(self.optim)
+                # TrainingArguments.__post_init__ normalizes a plain string like
+                # "adamw_torch_fused" into an OptimizerNames enum member, whose
+                # default str() is "OptimizerNames.ADAMW_TORCH_FUSED" rather than
+                # the plain value.
+                info["optimizer"] = getattr(self.optim, "value", None) or str(self.optim)
             if getattr(self, "seed", None) is not None:
                 info["random_seed"] = self.seed
             if getattr(self, "bf16", False):
