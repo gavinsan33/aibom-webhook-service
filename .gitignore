@@ -1,5 +1,6 @@
 bin/
 certs/
+.venv-test/
 *.exe
 *.test
 *.out
@@ -8,5 +9,4 @@ certs/
 *.swp
 *.swo
 *~
-/postprocess/__pycache__
-/scripts/aibom-scripts/__pycache__
+**/__pycache__/

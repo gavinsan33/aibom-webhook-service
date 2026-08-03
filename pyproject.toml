@@ -1,0 +1,9 @@
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+# postprocess.py and the aibom-scripts live as flat, dependency-light modules
+# with no package (__init__.py) -- this mirrors how they're laid out at
+# runtime (COPY'd side-by-side into a single container directory), so tests
+# import them the same way production code does: `import postprocess`,
+# `import runtime_detector`, `import k8s_api`.
+pythonpath = ["postprocess", "scripts/aibom-scripts"]

@@ -1,0 +1,244 @@
+import json
+
+import pytest
+
+import runtime_detector as rd
+
+
+# ---------------------------------------------------------------------------
+# HF datasets + DataLoader dedup
+# ---------------------------------------------------------------------------
+
+
+def test_hf_dataset_wrapped_directly_merges_via_identity(fake_datasets_module, fake_torch_module):
+    """Baseline: the untransformed object returned by load_dataset is passed
+    straight to DataLoader -- dedup via the identity-keyed weak registry."""
+    rd.install_hooks()
+    import datasets
+    import torch.utils.data as tud
+
+    ds = datasets.load_dataset("tatsu-lab/alpaca")
+    tud.DataLoader(ds, batch_size=4)
+
+    entries = rd.get_detected_datasets()
+    assert len(entries) == 1
+    assert entries[0]["dataset_name"] == "tatsu-lab/alpaca"
+    assert entries[0]["batch_size"] == 4
+    assert entries[0]["seen_via"] == ["torch.utils.data.DataLoader"]
+
+
+def test_transformed_dataset_still_merges_into_hf_entry(fake_datasets_module, fake_torch_module):
+    """Regression test: a script that calls dataset.map(...) before handing
+    the *new* object to DataLoader used to defeat identity-based dedup and
+    produce a spurious second entry (dataset_name="Dataset",
+    matches_declared=False) for what is really one dataset."""
+    rd.install_hooks()
+    import datasets
+    import torch.utils.data as tud
+
+    ds = datasets.load_dataset("tatsu-lab/alpaca")
+    tokenized = ds.map(lambda x: x)
+    tud.DataLoader(tokenized, batch_size=4)
+
+    entries = rd.get_detected_datasets()
+    assert len(entries) == 1
+    assert entries[0]["dataset_name"] == "tatsu-lab/alpaca"
+    assert entries[0]["source"] == "datasets.load_dataset"
+    assert entries[0]["batch_size"] == 4
+    assert entries[0]["seen_via"] == ["torch.utils.data.DataLoader"]
+
+
+def test_distinct_datasets_are_not_merged(fake_datasets_module, fake_torch_module):
+    """The key-based fallback must not over-match: two genuinely different
+    HF datasets stay as two entries."""
+    rd.install_hooks()
+    import datasets
+    import torch.utils.data as tud
+
+    alpaca = datasets.load_dataset("tatsu-lab/alpaca").map(lambda x: x)
+    dolly = datasets.load_dataset("databricks/dolly-15k").map(lambda x: x)
+    tud.DataLoader(alpaca, batch_size=4)
+    tud.DataLoader(dolly, batch_size=8)
+
+    entries = rd.get_detected_datasets()
+    assert {e["dataset_name"] for e in entries} == {
+        "tatsu-lab/alpaca",
+        "databricks/dolly-15k",
+    }
+
+
+def test_different_config_name_same_builder_not_merged(fake_datasets_module, fake_torch_module):
+    """Same underlying builder but a different config (e.g. a dataset with
+    multiple subsets) is a different dataset for dedup purposes."""
+    rd.install_hooks()
+    import datasets
+    import torch.utils.data as tud
+
+    en = datasets.load_dataset("wikitext", name="wikitext-2-raw-v1").map(lambda x: x)
+    fr = datasets.load_dataset("wikitext", name="wikitext-103-raw-v1").map(lambda x: x)
+    tud.DataLoader(en, batch_size=4)
+    tud.DataLoader(fr, batch_size=4)
+
+    entries = rd.get_detected_datasets()
+    assert len(entries) == 2
+
+
+def test_dataloader_without_prior_hf_hook_records_generic_entry(fake_torch_module):
+    """No datasets library involved at all: DataLoader hook falls back to
+    inspecting the raw torch Dataset object, as before."""
+    rd.install_hooks()
+    import torch.utils.data as tud
+
+    class PlainDataset:
+        name = "my-custom-dataset"
+
+    tud.DataLoader(PlainDataset(), batch_size=2)
+
+    entries = rd.get_detected_datasets()
+    assert len(entries) == 1
+    assert entries[0]["dataset_name"] == "my-custom-dataset"
+    assert entries[0]["source"] == "torch.utils.data.DataLoader"
+
+
+# ---------------------------------------------------------------------------
+# torchvision / webdataset hooks
+# ---------------------------------------------------------------------------
+
+
+def test_torchvision_hook_records_entry(fake_torchvision_module):
+    rd.install_hooks()
+    import torchvision.datasets as tvd
+
+    tvd.MNIST(root="/data/mnist", train=True, download=True)
+
+    entries = rd.get_detected_datasets()
+    assert len(entries) == 1
+    assert entries[0]["source"] == "torchvision.datasets.MNIST"
+    assert entries[0]["split"] == "train"
+    assert entries[0]["root"] == "/data/mnist"
+
+
+def test_webdataset_hook_records_entry(fake_webdataset_module):
+    rd.install_hooks()
+    import webdataset as wds
+
+    wds.WebDataset(["s3://bucket/shard-{000..010}.tar"])
+
+    entries = rd.get_detected_datasets()
+    assert len(entries) == 1
+    assert entries[0]["source"] == "webdataset.WebDataset"
+    assert entries[0]["urls"] == ["s3://bucket/shard-{000..010}.tar"]
+
+
+# ---------------------------------------------------------------------------
+# Path fingerprinting
+# ---------------------------------------------------------------------------
+
+
+def test_path_fingerprint_stable_for_unchanged_file(tmp_path):
+    f = tmp_path / "data.bin"
+    f.write_bytes(b"hello")
+    first = rd._path_fingerprint(str(f))
+    second = rd._path_fingerprint(str(f))
+    assert first is not None
+    assert first == second
+
+
+def test_path_fingerprint_changes_when_file_size_changes(tmp_path):
+    f = tmp_path / "data.bin"
+    f.write_bytes(b"hello")
+    before = rd._path_fingerprint(str(f))
+    f.write_bytes(b"hello world, now longer")
+    after = rd._path_fingerprint(str(f))
+    assert before != after
+
+
+def test_path_fingerprint_missing_path_returns_none(tmp_path):
+    assert rd._path_fingerprint(str(tmp_path / "does-not-exist")) is None
+
+
+# ---------------------------------------------------------------------------
+# Training-arg / accelerate-config capture
+# ---------------------------------------------------------------------------
+
+
+def test_capture_training_args_from_argv(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        ["train.py", "--num_train_epochs", "3", "--learning_rate=0.0002", "--batch_size", "8"],
+    )
+    rd._capture_training_args()
+    assert rd._runtime_info["epochs"] == 3
+    assert rd._runtime_info["learning_rate"] == 0.0002
+    assert rd._runtime_info["batch_size"] == 8
+
+
+def test_capture_accelerate_config_resolves_strategy_from_yaml(tmp_path, monkeypatch):
+    pytest.importorskip("yaml")
+    config_path = tmp_path / "fsdp_config.yaml"
+    config_path.write_text("distributed_type: FSDP\nnum_processes: 4\n")
+    monkeypatch.setattr("sys.argv", ["train.py", "--accelerate_config", str(config_path)])
+
+    rd._capture_accelerate_config()
+
+    assert rd._runtime_info["parallelization_strategy"] == "fsdp"
+
+
+def test_capture_accelerate_config_missing_file_is_a_noop(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["train.py", "--accelerate_config", "/nope/missing.yaml"])
+    rd._capture_accelerate_config()
+    assert "parallelization_strategy" not in rd._runtime_info
+
+
+def test_capture_accelerate_config_no_flag_is_a_noop(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["train.py"])
+    rd._capture_accelerate_config()
+    assert "parallelization_strategy" not in rd._runtime_info
+
+
+# ---------------------------------------------------------------------------
+# flush()
+# ---------------------------------------------------------------------------
+
+
+def test_flush_writes_datasets_and_runtime_info(tmp_path, monkeypatch):
+    monkeypatch.setattr(rd, "_OUTPUT_PATH", str(tmp_path / "dataset_detected.json"))
+    monkeypatch.setattr("sys.argv", ["train.py"])
+    rd._record({"dataset_name": "tatsu-lab/alpaca", "source": "datasets.load_dataset"})
+
+    rd.flush()
+
+    with open(tmp_path / "dataset_detected.json") as f:
+        output = json.load(f)
+    assert output["datasets"] == [
+        {"dataset_name": "tatsu-lab/alpaca", "source": "datasets.load_dataset"}
+    ]
+
+
+def test_flush_merges_with_existing_file_without_duplicating(tmp_path, monkeypatch):
+    output_path = tmp_path / "dataset_detected.json"
+    output_path.write_text(json.dumps({
+        "datasets": [{"dataset_name": "tatsu-lab/alpaca", "source": "datasets.load_dataset"}]
+    }))
+    monkeypatch.setattr(rd, "_OUTPUT_PATH", str(output_path))
+    monkeypatch.setattr("sys.argv", ["train.py"])
+    rd._record({"dataset_name": "tatsu-lab/alpaca", "source": "datasets.load_dataset"})
+    rd._record({"dataset_name": "some-other-dataset", "source": "torchvision.datasets.MNIST"})
+
+    rd.flush()
+
+    with open(output_path) as f:
+        output = json.load(f)
+    assert len(output["datasets"]) == 2
+    names = {d["dataset_name"] for d in output["datasets"]}
+    assert names == {"tatsu-lab/alpaca", "some-other-dataset"}
+
+
+def test_flush_with_nothing_detected_does_not_write(tmp_path, monkeypatch):
+    output_path = tmp_path / "dataset_detected.json"
+    monkeypatch.setattr(rd, "_OUTPUT_PATH", str(output_path))
+    monkeypatch.setattr("sys.argv", ["train.py"])
+
+    rd.flush()
+
+    assert not output_path.exists()

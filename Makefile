@@ -3,13 +3,18 @@ IMG ?= aibom-webhook-service:latest
 POSTPROCESS_IMG ?= aibom-postprocess:latest
 NAMESPACE ?= default
 
-.PHONY: build test run docker-build docker-push docker-build-postprocess docker-push-postprocess deploy undeploy generate-certs create-scripts-configmap clean fmt vet
+.PHONY: build test test-python run docker-build docker-push docker-build-postprocess docker-push-postprocess deploy undeploy generate-certs create-scripts-configmap clean fmt vet
 
 build:
 	go build -v -o bin/$(BINARY_NAME) ./cmd/webhook/
 
 test:
 	go test ./internal/... -v -count=1
+
+test-python:
+	python3 -m venv .venv-test
+	.venv-test/bin/pip install -q -r requirements-dev.txt
+	.venv-test/bin/python -m pytest
 
 run: build
 	./bin/$(BINARY_NAME) --tls-cert=certs/tls.crt --tls-key=certs/tls.key --port=8443
@@ -84,3 +89,4 @@ setup-namespace:
 clean:
 	rm -rf bin/
 	rm -rf certs/
+	rm -rf .venv-test/
