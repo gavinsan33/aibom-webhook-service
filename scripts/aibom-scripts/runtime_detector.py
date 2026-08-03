@@ -280,7 +280,9 @@ def _install_dataloader_hook():
                 _dbg(f"DataLoader hook: dataset already recorded via {existing.get('source', '?')}, merging")
                 if batch_size is not None:
                     existing["batch_size"] = batch_size
-                existing.setdefault("seen_via", []).append("torch.utils.data.DataLoader")
+                seen_via = existing.setdefault("seen_via", [])
+                if "torch.utils.data.DataLoader" not in seen_via:
+                    seen_via.append("torch.utils.data.DataLoader")
                 return
 
             entry = _inspect_torch_dataset(dataset)

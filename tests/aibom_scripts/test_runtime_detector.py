@@ -49,6 +49,24 @@ def test_transformed_dataset_still_merges_into_hf_entry(fake_datasets_module, fa
     assert entries[0]["seen_via"] == ["torch.utils.data.DataLoader"]
 
 
+def test_dataset_wrapped_in_dataloader_twice_records_seen_via_once(fake_datasets_module, fake_torch_module):
+    """Regression test: Trainer/accelerate commonly re-wrap the same dataset
+    in a second DataLoader internally (e.g. via accelerator.prepare()) --
+    each merge used to unconditionally append, producing a seen_via list
+    with the same hook name duplicated instead of noting it once."""
+    rd.install_hooks()
+    import datasets
+    import torch.utils.data as tud
+
+    ds = datasets.load_dataset("tatsu-lab/alpaca")
+    tud.DataLoader(ds, batch_size=4)
+    tud.DataLoader(ds, batch_size=4)
+
+    entries = rd.get_detected_datasets()
+    assert len(entries) == 1
+    assert entries[0]["seen_via"] == ["torch.utils.data.DataLoader"]
+
+
 def test_distinct_datasets_are_not_merged(fake_datasets_module, fake_torch_module):
     """The key-based fallback must not over-match: two genuinely different
     HF datasets stay as two entries."""
