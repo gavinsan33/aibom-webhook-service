@@ -58,6 +58,21 @@ _hooks_installed = {}
 # its already-recorded entry, so a later DataLoader wrapping the same object
 # updates that entry in place instead of recording it as a second dataset.
 _dataset_registry = weakref.WeakKeyDictionary()
+# Maps a HF dataset's (builder_name, config_name) to its already-recorded
+# entry. Identity-based lookup above misses the very common case where a
+# script transforms the loaded dataset (.map/.filter/.select/.shuffle, or
+# re-fetching a split from a DatasetDict) before handing it to a DataLoader --
+# each of those returns a *new* Dataset object, but builder_name/config_name
+# survive the transform, so this catches it as the same underlying dataset.
+_hf_dataset_key_registry = {}
+
+
+def _hf_dataset_key(dataset):
+    info = getattr(dataset, "info", None)
+    builder_name = getattr(info, "builder_name", None) if info else None
+    if not builder_name:
+        return None
+    return (builder_name, getattr(info, "config_name", None))
 
 
 def _record(entry):
@@ -252,6 +267,10 @@ def _install_dataloader_hook():
             batch_size = getattr(self, "batch_size", None)
             with _lock:
                 existing = _dataset_registry.get(dataset) if dataset is not None else None
+                if existing is None and dataset is not None:
+                    key = _hf_dataset_key(dataset)
+                    if key is not None:
+                        existing = _hf_dataset_key_registry.get(key)
             if existing is not None:
                 _dbg(f"DataLoader hook: dataset already recorded via {existing.get('source', '?')}, merging")
                 if batch_size is not None:
@@ -391,6 +410,10 @@ def _install_hf_datasets_hook():
                     _dataset_registry[ds] = entry
             except TypeError:
                 _dbg("HF datasets hook: dataset object doesn't support weak references, skipping registry")
+            key = _hf_dataset_key(ds)
+            if key is not None:
+                with _lock:
+                    _hf_dataset_key_registry[key] = entry
         except Exception:
             _dbg_exc("HF datasets._patched_load")
         return result
@@ -592,6 +615,7 @@ def reset():
     """Clear detected datasets (for testing)."""
     with _lock:
         _detected_datasets.clear()
+        _hf_dataset_key_registry.clear()
 
 
 # Auto-install when loaded via PYTHONSTARTUP or env var activation.
