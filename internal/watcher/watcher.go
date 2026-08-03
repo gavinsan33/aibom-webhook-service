@@ -588,6 +588,9 @@ func (w *Watcher) createPostprocessJobCore(ctx context.Context, namespace, trigg
 
 	backoffLimit := int32(3)
 	optional := true
+	runAsNonRoot := true
+	allowPrivilegeEscalation := false
+	readOnlyRootFilesystem := true
 
 	postprocessJob := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -608,11 +611,34 @@ func (w *Watcher) createPostprocessJobCore(ctx context.Context, namespace, trigg
 				Spec: corev1.PodSpec{
 					RestartPolicy:      corev1.RestartPolicyNever,
 					ServiceAccountName: postprocessServiceAccountName,
+					SecurityContext: &corev1.PodSecurityContext{
+						RunAsNonRoot: &runAsNonRoot,
+						SeccompProfile: &corev1.SeccompProfile{
+							Type: corev1.SeccompProfileTypeRuntimeDefault,
+						},
+					},
 					Containers: []corev1.Container{
 						{
 							Name:    postprocessContainerName,
 							Image:   w.postprocessImage,
 							Command: []string{"python3", "/app/postprocess.py"},
+							SecurityContext: &corev1.SecurityContext{
+								AllowPrivilegeEscalation: &allowPrivilegeEscalation,
+								ReadOnlyRootFilesystem:   &readOnlyRootFilesystem,
+								Capabilities: &corev1.Capabilities{
+									Drop: []corev1.Capability{"ALL"},
+								},
+							},
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("100m"),
+									corev1.ResourceMemory: resource.MustParse("128Mi"),
+								},
+								Limits: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("500m"),
+									corev1.ResourceMemory: resource.MustParse("512Mi"),
+								},
+							},
 							Env: []corev1.EnvVar{
 								{Name: "AIBOM_JOB_NAME", Value: triggerName},
 								{Name: "AIBOM_JOB_NAMESPACE", Value: namespace},

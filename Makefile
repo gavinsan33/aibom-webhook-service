@@ -3,7 +3,7 @@ IMG ?= aibom-webhook-service:latest
 POSTPROCESS_IMG ?= aibom-postprocess:latest
 NAMESPACE ?= default
 
-.PHONY: build test test-python run docker-build docker-push docker-build-postprocess docker-push-postprocess deploy undeploy generate-certs create-scripts-configmap clean fmt vet
+.PHONY: build test test-python run docker-build docker-push docker-build-postprocess docker-push-postprocess deploy undeploy create-scripts-configmap clean fmt vet
 
 build:
 	go build -v -o bin/$(BINARY_NAME) ./cmd/webhook/
@@ -37,17 +37,17 @@ docker-build-postprocess:
 docker-push-postprocess:
 	docker push $(POSTPROCESS_IMG)
 
-generate-certs:
-	./scripts/generate-certs.sh
-
-deploy: generate-certs
+# Requires cert-manager installed in the cluster (see deploy/certificates.yaml).
+deploy:
 	oc apply -f deploy/namespace.yaml
 	oc apply -f deploy/aibom-crd.yaml
+	oc apply -f deploy/certificates.yaml
 	oc apply -f deploy/rbac.yaml
 	oc apply -f deploy/deployment.yaml
 	oc apply -f deploy/webhook-config.yaml
 
 redeploy:
+	oc apply -f deploy/certificates.yaml
 	oc apply -f deploy/rbac.yaml
 	oc apply -f deploy/build.yaml
 	oc apply -f deploy/deployment.yaml

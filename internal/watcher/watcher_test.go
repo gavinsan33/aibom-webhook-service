@@ -303,6 +303,29 @@ func TestOnJobEvent_CreatesPostprocessJob(t *testing.T) {
 		t.Errorf("command = %v, want [python3 /app/postprocess.py]", container.Command)
 	}
 
+	if container.SecurityContext == nil {
+		t.Fatal("container.SecurityContext = nil, want hardened SecurityContext")
+	}
+	if container.SecurityContext.AllowPrivilegeEscalation == nil || *container.SecurityContext.AllowPrivilegeEscalation {
+		t.Error("AllowPrivilegeEscalation should be false")
+	}
+	if container.SecurityContext.ReadOnlyRootFilesystem == nil || !*container.SecurityContext.ReadOnlyRootFilesystem {
+		t.Error("ReadOnlyRootFilesystem should be true")
+	}
+	if container.SecurityContext.Capabilities == nil || len(container.SecurityContext.Capabilities.Drop) != 1 || container.SecurityContext.Capabilities.Drop[0] != "ALL" {
+		t.Errorf("Capabilities.Drop = %v, want [ALL]", container.SecurityContext.Capabilities)
+	}
+	podSC := ppJob.Spec.Template.Spec.SecurityContext
+	if podSC == nil || podSC.RunAsNonRoot == nil || !*podSC.RunAsNonRoot {
+		t.Error("pod SecurityContext.RunAsNonRoot should be true")
+	}
+	if container.Resources.Requests.Cpu().IsZero() || container.Resources.Limits.Cpu().IsZero() {
+		t.Errorf("Resources = %+v, want non-zero CPU requests/limits", container.Resources)
+	}
+	if container.Resources.Requests.Memory().IsZero() || container.Resources.Limits.Memory().IsZero() {
+		t.Errorf("Resources = %+v, want non-zero memory requests/limits", container.Resources)
+	}
+
 	envNames := make(map[string]string)
 	for _, e := range container.Env {
 		envNames[e.Name] = e.Value

@@ -25,7 +25,8 @@ Bare/ReplicaSet-owned pods (no `batch.kubernetes.io/job-name` label) that carry 
 
 - Go 1.22+
 - An OpenShift cluster (for deployment)
-- `openssl` (for TLS cert generation)
+- [cert-manager](https://cert-manager.io/) installed in the cluster (for deployment — issues and auto-renews the webhook's TLS certificate; see `deploy/certificates.yaml`)
+- `openssl` (for local-dev TLS cert generation only — see `scripts/generate-certs.sh`)
 
 ## Quick Start
 
@@ -64,6 +65,8 @@ This runs:
 **Upgrading an existing namespace**: if you set up a namespace before this RBAC/direct-write model existed, re-run `make setup-namespace NAMESPACE=<ns>` — it's idempotent. This matters more than it sounds: the dataset detector hook mounts `k8s_api.py` via a `subPath` volume mount, so a stale `aibom-scripts` ConfigMap missing that key will fail *pod startup* for every instrumented workload in that namespace, not just silently skip dataset detection.
 
 ## Cluster Deployment
+
+`make deploy` applies `deploy/certificates.yaml`, which requires cert-manager to already be installed in the cluster — it issues the webhook's TLS certificate into the `aibom-webhook-certs` Secret and keeps it renewed automatically (no more manually re-running a script before a 365-day cert expires). `deploy/webhook-config.yaml`'s CA bundle is kept in sync by cert-manager's cainjector via its `cert-manager.io/inject-ca-from` annotation, rather than being pasted in by hand.
 
 ```bash
 # Build and push the container image
@@ -142,10 +145,11 @@ deploy/
   deployment.yaml                   # Deployment + Service
   build.yaml                        # OpenShift BuildConfig + ImageStream
   webhook-config.yaml               # MutatingWebhookConfiguration
+  certificates.yaml                 # cert-manager Issuer + Certificate for the webhook's TLS cert
   aibom-scripts-configmap.yaml      # Reference manifest for the scripts ConfigMap
   aibom-crd.yaml                    # AIBOM CustomResourceDefinition
 scripts/
-  generate-certs.sh                 # Self-signed TLS cert generation
+  generate-certs.sh                 # Self-signed TLS cert generation for local dev only (cluster deploy uses cert-manager)
   aibom-scripts/
     generate_snapshot.py             # Hardware discovery script (from coldpress)
     runtime_detector.py               # Dataset detection + training runtime hooks (from coldpress)
@@ -367,4 +371,4 @@ oc get aibom train-job-abc123 -n gavin-test -o yaml
 - **Phase 1** (complete): Webhook with placeholder discovery init container
 - **Phase 2** (complete): Real hardware discovery + dataset detector injection
 - **Phase 3** (complete): Job watcher + real postprocess container for AIBOM compilation
-- **Phase 4** (in progress): Production hardening — AIBOM storage (complete), cert-manager TLS, Helm chart, metrics endpoint
+- **Phase 4** (in progress): Production hardening — AIBOM storage (complete), cert-manager TLS (complete), securityContext + RBAC least-privilege (complete), Helm chart, metrics endpoint

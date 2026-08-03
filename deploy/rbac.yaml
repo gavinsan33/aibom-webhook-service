@@ -9,18 +9,25 @@ kind: ClusterRole
 metadata:
   name: aibom-webhook
 rules:
+  # pods: list/watch back the cluster-wide Pod informer; patch is used to add/remove
+  # the aibom.io/instrumented label and finalizer. No direct Get/Update call exists.
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "list", "watch", "patch", "update"]
+    verbs: ["list", "watch", "patch"]
+  # namespaces: list/watch back the Namespace informer (used to check the
+  # aibom.io/enabled label). The only read is Lister().Get(), which hits the
+  # informer's local cache, not the API server, so the "get" verb isn't needed.
   - apiGroups: [""]
     resources: ["namespaces"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["list", "watch"]
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["get", "create", "update", "delete"]
+  # jobs: list/watch back the Job informer; create/patch/delete are used directly
+  # for postprocess Job lifecycle and finalizer management. No direct Get/Update call exists.
   - apiGroups: ["batch"]
     resources: ["jobs"]
-    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+    verbs: ["list", "watch", "create", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
