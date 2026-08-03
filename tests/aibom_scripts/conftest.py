@@ -109,3 +109,67 @@ def fake_webdataset_module(monkeypatch):
     module.WebDataset = FakeWebDataset
     monkeypatch.setitem(sys.modules, "webdataset", module)
     return module
+
+
+class FakeQuantizationConfig:
+    def __init__(self, quant_method=None, load_in_4bit=False, load_in_8bit=False, bits=None):
+        self.quant_method = quant_method
+        self.load_in_4bit = load_in_4bit
+        self.load_in_8bit = load_in_8bit
+        self.bits = bits
+
+
+class FakeModelConfig:
+    def __init__(self, architectures=None, quantization_config=None):
+        self.architectures = architectures
+        self.quantization_config = quantization_config
+
+
+class FakePreTrainedModel:
+    def __init__(self, config=None, dtype=None):
+        self.config = config
+        self.dtype = dtype
+
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
+        return cls(config=kwargs.get("config"), dtype=kwargs.get("torch_dtype"))
+
+
+class FakeTrainingArguments:
+    def __init__(
+        self, output_dir=None, learning_rate=5e-5, per_device_train_batch_size=8,
+        num_train_epochs=3, optim="adamw_torch", seed=42, bf16=False, fp16=False, **kwargs,
+    ):
+        self.output_dir = output_dir
+        self.learning_rate = learning_rate
+        self.per_device_train_batch_size = per_device_train_batch_size
+        self.num_train_epochs = num_train_epochs
+        self.optim = optim
+        self.seed = seed
+        self.bf16 = bf16
+        self.fp16 = fp16
+
+
+@pytest.fixture
+def fake_transformers_module(monkeypatch):
+    module = types.ModuleType("transformers")
+    module.TrainingArguments = FakeTrainingArguments
+    module.PreTrainedModel = FakePreTrainedModel
+    monkeypatch.setitem(sys.modules, "transformers", module)
+    return module
+
+
+class FakeLoraConfig:
+    def __init__(self, r=16, lora_alpha=32, use_dora=False, use_rslora=False, **kwargs):
+        self.r = r
+        self.lora_alpha = lora_alpha
+        self.use_dora = use_dora
+        self.use_rslora = use_rslora
+
+
+@pytest.fixture
+def fake_peft_module(monkeypatch):
+    module = types.ModuleType("peft")
+    module.LoraConfig = FakeLoraConfig
+    monkeypatch.setitem(sys.modules, "peft", module)
+    return module

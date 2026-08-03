@@ -880,19 +880,35 @@ def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, tel
         "pods": pods,
     }
 
-    # Model info: auto-detected from container commands, then annotations override
+    # Model info: auto-detected (container commands, then runtime hooks for
+    # scripts that build TrainingArguments/from_pretrained directly in
+    # Python with no corresponding CLI flags), then annotations override
     dm = detected_model or {}
-    model_name = annotations.get("model-name") or dm.get("model_name")
-    quantization = annotations.get("quantization") or dm.get("quantization") or dm.get("quantization_method")
-    quantization_bits = _try_int(annotations.get("quantization-bits")) or dm.get("quantization_bits")
+    model_name = annotations.get("model-name") or dm.get("model_name") or runtime_info.get("model_name")
+    quantization = (
+        annotations.get("quantization")
+        or dm.get("quantization")
+        or dm.get("quantization_method")
+        or runtime_info.get("quantization_method")
+    )
+    quantization_bits = (
+        _try_int(annotations.get("quantization-bits"))
+        or dm.get("quantization_bits")
+        or runtime_info.get("quantization_bits")
+    )
     aibom["model"] = {
         "name": model_name,
         "version": annotations.get("model-version"),
-        "architecture": annotations.get("model-architecture"),
-        "framework": annotations.get("model-framework") or dm.get("serving_engine") or dm.get("training_framework"),
+        "architecture": annotations.get("model-architecture") or runtime_info.get("model_architecture"),
+        "framework": (
+            annotations.get("model-framework")
+            or dm.get("serving_engine")
+            or dm.get("training_framework")
+            or runtime_info.get("training_framework")
+        ),
         "quantization": quantization,
         "quantization_bits": quantization_bits,
-        "dtype": annotations.get("dtype") or dm.get("dtype"),
+        "dtype": annotations.get("dtype") or dm.get("dtype") or runtime_info.get("dtype"),
     }
     if dm.get("speculative_config"):
         aibom["model"]["speculative_decoding"] = dm["speculative_config"]
@@ -934,7 +950,7 @@ def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, tel
     # Training config
     if intent in ("training", "sft"):
         aibom["training"] = {
-            "optimizer": annotations.get("optimizer"),
+            "optimizer": annotations.get("optimizer") or runtime_info.get("optimizer"),
             "learning_rate": _first_not_none(
                 runtime_info.get("learning_rate"),
                 dm.get("learning_rate"),
@@ -951,7 +967,9 @@ def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, tel
                 _try_int(annotations.get("epochs")),
             ),
             "random_seed": _first_not_none(
-                dm.get("random_seed"), _try_int(annotations.get("random-seed"))
+                runtime_info.get("random_seed"),
+                dm.get("random_seed"),
+                _try_int(annotations.get("random-seed")),
             ),
             "parallelization_strategy": (
                 annotations.get("parallelization-strategy")
@@ -963,9 +981,17 @@ def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, tel
     # Fine-tuning config
     if intent == "sft":
         aibom["fine_tuning"] = {
-            "adaptation_method": annotations.get("adaptation-method") or dm.get("adaptation_method"),
-            "lora_rank": _try_int(annotations.get("lora-rank")) or dm.get("lora_rank"),
-            "lora_alpha": _try_int(annotations.get("lora-alpha")) or dm.get("lora_alpha"),
+            "adaptation_method": (
+                annotations.get("adaptation-method")
+                or dm.get("adaptation_method")
+                or runtime_info.get("adaptation_method")
+            ),
+            "lora_rank": (
+                _try_int(annotations.get("lora-rank")) or dm.get("lora_rank") or runtime_info.get("lora_rank")
+            ),
+            "lora_alpha": (
+                _try_int(annotations.get("lora-alpha")) or dm.get("lora_alpha") or runtime_info.get("lora_alpha")
+            ),
         }
 
     # Inference config: auto-detected from container commands, then annotations override

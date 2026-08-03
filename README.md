@@ -33,8 +33,11 @@ Bare/ReplicaSet-owned pods (no `batch.kubernetes.io/job-name` label) that carry 
 # Build
 make build
 
-# Run tests
+# Run Go tests
 make test
+
+# Run Python tests (postprocess.py, runtime_detector.py)
+make test-python
 
 # Generate self-signed TLS certs (for local dev, adds localhost to SAN)
 ./scripts/generate-certs.sh --local
@@ -152,8 +155,13 @@ examples/
   vllm-inference-rhoai.yaml         # Same model via a RHOAI/KServe InferenceService
   granite-lora-finetune.yaml        # Example Job: single-GPU LoRA fine-tuning via trl sft
   granite-lora-finetune-multigpu.yaml  # Same, but 2 GPUs via trl's --num_processes passthrough
+tests/
+  postprocess/test_postprocess.py   # Unit tests for postprocess.py's CLI-arg detectors and compile_aibom
+  aibom_scripts/                    # Unit tests for runtime_detector.py's hooks (fake torch/datasets/transformers/peft modules)
+pyproject.toml                      # pytest config (pythonpath into postprocess/ and scripts/aibom-scripts/)
+requirements-dev.txt                # Test-only deps (pytest, pyyaml) — production scripts stay dependency-free
 Dockerfile                          # Multi-stage build (distroless)
-Makefile                            # Build, test, deploy targets
+Makefile                            # Build, test, deploy targets (make test, make test-python)
 ```
 
 ## Configuration
@@ -184,6 +192,7 @@ When the webhook mutates a pod, it adds:
 - Mounts `runtime_detector.py` as `usercustomize.py` on `PYTHONPATH`, plus `k8s_api.py` alongside it (also `subPath`-mounted, since `usercustomize.py` needs to `import k8s_api`)
 - Python auto-imports it at startup — no code changes needed
 - Hooks into PyTorch DataLoader, HuggingFace `datasets.load_dataset`, torchvision datasets, and webdataset
+- Also hooks `transformers.TrainingArguments`, `transformers.PreTrainedModel.from_pretrained`, and `peft.LoraConfig` — this catches model/training config for scripts that build these objects directly in Python (e.g. a custom `transformers.Trainer` script), which expose nothing on the command line for `postprocess.py`'s CLI-arg detectors to see
 - Captures dataset name, version, split, fingerprint, license, and training args
 - Writes the result directly into the same data ConfigMap (key `dataset-<pod-name>.json`) at process exit, via the same `k8s_api.py` helper — since this runs inside the user's own application container, the `k8s_api` import is wrapped in a soft `try/except ImportError` so a missing/stale mount degrades to "no dataset detection" instead of crashing the user's training process at Python startup
 
@@ -257,9 +266,12 @@ Without annotations, the AIBOM is still generated from auto-detected data (hardw
 
 ### Model Auto-Detection
 
-`postprocess.py` parses each container's command/args to auto-populate model, fine-tuning, and inference fields without requiring annotations. Detection is command-based, so it also sees into `sh -c "... && trl sft ..."`-style wrapper scripts (common when a job needs to `pip install` before running its training CLI) by shell-splitting the script and scanning the resulting tokens the same way as a plain `command: [...]` list.
+Model/training config is auto-populated through two complementary detection layers:
 
-Two serving/training tools are currently recognized this way: **vLLM** (serving) and **trl** (fine-tuning). Other serving engines (TGI, SGLang, TensorRT-LLM) and other fine-tuning tools (Axolotl, LLaMA-Factory, raw `transformers.Trainer` scripts) aren't yet supported.
+- **CLI-arg parsing** (`postprocess.py`): parses each container's command/args to auto-populate model, fine-tuning, and inference fields without requiring annotations. Detection is command-based, so it also sees into `sh -c "... && trl sft ..."`-style wrapper scripts (common when a job needs to `pip install` before running its training CLI) by shell-splitting the script and scanning the resulting tokens the same way as a plain `command: [...]` list. Two serving/training tools are currently recognized this way: **vLLM** (serving) and **trl** (fine-tuning).
+- **Runtime object hooks** (`runtime_detector.py`, see [Dataset detector](#what-gets-injected) above): catches scripts that build their config directly in Python instead of via CLI flags — `transformers.TrainingArguments`, `transformers.PreTrainedModel.from_pretrained` (model name, architecture, dtype, quantization config), and `peft.LoraConfig` (LoRA rank/alpha, and `lora`/`dora`/`rslora`/`qlora` adaptation method). This is what covers plain `transformers.Trainer` scripts, which don't have a recognizable CLI shape at all.
+
+Other serving engines (TGI, SGLang, TensorRT-LLM) and other fine-tuning tools (Axolotl, LLaMA-Factory) aren't yet supported by either layer.
 
 **Quantization from model name**: regex patterns match common quantization markers in the model name/path (e.g. `AWQ`, `GPTQ`, `INT4`/`INT8`, `FP4`/`FP8`, `bitsandbytes`/`NF4`, `Marlin`, `GGUF`, `AQLM`, `EXL2`, and others), extracting both the method and bit width. For example, `drawais/Granite-3.3-8B-Instruct-AWQ-INT4` detects `awq` at 4 bits.
 
@@ -318,7 +330,7 @@ Whichever source wins is recorded in `dataset.declared.declared_via` (`"annotati
 
 Every entry in `dataset.auto_detected` also carries a `matches_declared` boolean, comparing its `dataset_name` against the final `dataset.declared.name`. This is the actual reconciliation check: it flags the case where a job declares one dataset (via annotation or CLI arg) but the code loads something different at runtime.
 
-Within `dataset.auto_detected` itself, `runtime_detector.py` correlates hook detections that refer to the same underlying dataset object — e.g. a `datasets.load_dataset(...)` call followed by wrapping the result in a `torch.utils.data.DataLoader(...)` for batching — into a single entry (with a `seen_via` list noting every hook that touched it) rather than recording it twice.
+Within `dataset.auto_detected` itself, `runtime_detector.py` correlates hook detections that refer to the same underlying dataset object into a single entry (with a `seen_via` list noting every hook that touched it) rather than recording it twice. The common case is a `datasets.load_dataset(...)` call followed by wrapping the result in a `torch.utils.data.DataLoader(...)` for batching, matched by object identity. Since scripts commonly transform the dataset first (`.map()`/`.filter()`/`.select()`/`.shuffle()`, or re-fetching a split from a `DatasetDict`) before handing it to `DataLoader` — which returns a *new* object each time — correlation falls back to matching on the dataset's stable `(builder_name, config_name)` identity when object identity doesn't match, so a transformed dataset still merges into its original entry instead of showing up as a second, generically-named (`"Dataset"`) one.
 
 ### Grafana Credentials
 

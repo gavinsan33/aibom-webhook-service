@@ -342,3 +342,59 @@ def test_compile_aibom_no_telemetry_notes_unavailable():
         annotations={"experiment-intent": "unknown"}, telemetry=None,
     )
     assert aibom["resource_utilization"] == {"note": "No telemetry data available."}
+
+
+# ---------------------------------------------------------------------------
+# compile_aibom: runtime_info fallbacks (transformers/peft runtime hooks,
+# for scripts with no CLI flags for detect_trl_from_command to see)
+# ---------------------------------------------------------------------------
+
+
+def test_compile_aibom_uses_runtime_info_for_model_identity_when_no_cli_detection():
+    runtime_info = {
+        "model_name": "ibm-granite/granite-3.3-2b-instruct",
+        "model_architecture": "GraniteForCausalLM",
+        "training_framework": "transformers.Trainer",
+        "quantization_method": "bitsandbytes",
+        "quantization_bits": 4,
+        "dtype": "bfloat16",
+    }
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info=runtime_info,
+        annotations={"experiment-intent": "sft"}, telemetry=None,
+    )
+    assert aibom["model"]["name"] == "ibm-granite/granite-3.3-2b-instruct"
+    assert aibom["model"]["architecture"] == "GraniteForCausalLM"
+    assert aibom["model"]["framework"] == "transformers.Trainer"
+    assert aibom["model"]["quantization"] == "bitsandbytes"
+    assert aibom["model"]["quantization_bits"] == 4
+    assert aibom["model"]["dtype"] == "bfloat16"
+
+
+def test_compile_aibom_annotation_still_overrides_runtime_info_model_identity():
+    runtime_info = {"model_name": "detected-via-hook"}
+    annotations = {"experiment-intent": "sft", "model-name": "annotated-model"}
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info=runtime_info,
+        annotations=annotations, telemetry=None,
+    )
+    assert aibom["model"]["name"] == "annotated-model"
+
+
+def test_compile_aibom_uses_runtime_info_for_training_and_fine_tuning():
+    runtime_info = {
+        "optimizer": "adamw_bnb_8bit",
+        "random_seed": 1234,
+        "adaptation_method": "qlora",
+        "lora_rank": 16,
+        "lora_alpha": 32,
+    }
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info=runtime_info,
+        annotations={"experiment-intent": "sft"}, telemetry=None,
+    )
+    assert aibom["training"]["optimizer"] == "adamw_bnb_8bit"
+    assert aibom["training"]["random_seed"] == 1234
+    assert aibom["fine_tuning"]["adaptation_method"] == "qlora"
+    assert aibom["fine_tuning"]["lora_rank"] == 16
+    assert aibom["fine_tuning"]["lora_alpha"] == 32

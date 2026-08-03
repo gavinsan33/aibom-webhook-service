@@ -3,6 +3,7 @@ import json
 import pytest
 
 import runtime_detector as rd
+from conftest import FakeModelConfig, FakeQuantizationConfig
 
 
 # ---------------------------------------------------------------------------
@@ -242,3 +243,131 @@ def test_flush_with_nothing_detected_does_not_write(tmp_path, monkeypatch):
     rd.flush()
 
     assert not output_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# transformers.TrainingArguments / PreTrainedModel.from_pretrained
+# ---------------------------------------------------------------------------
+
+
+def test_transformers_hook_captures_training_arguments(fake_transformers_module):
+    rd.install_hooks()
+    import transformers
+
+    transformers.TrainingArguments(
+        output_dir="/tmp/out",
+        learning_rate=2e-4,
+        per_device_train_batch_size=4,
+        num_train_epochs=3,
+        optim="adamw_bnb_8bit",
+        seed=1234,
+        bf16=True,
+    )
+
+    assert rd._runtime_info["training_framework"] == "transformers.Trainer"
+    assert rd._runtime_info["learning_rate"] == 2e-4
+    assert rd._runtime_info["batch_size"] == 4
+    assert rd._runtime_info["epochs"] == 3
+    assert rd._runtime_info["optimizer"] == "adamw_bnb_8bit"
+    assert rd._runtime_info["random_seed"] == 1234
+    assert rd._runtime_info["dtype"] == "bfloat16"
+
+
+def test_transformers_hook_prefers_fp16_when_bf16_not_set(fake_transformers_module):
+    rd.install_hooks()
+    import transformers
+
+    transformers.TrainingArguments(fp16=True)
+
+    assert rd._runtime_info["dtype"] == "float16"
+
+
+def test_transformers_hook_captures_model_identity_from_from_pretrained(fake_transformers_module):
+    rd.install_hooks()
+    import transformers
+
+    config = FakeModelConfig(architectures=["GraniteForCausalLM"])
+    transformers.PreTrainedModel.from_pretrained("ibm-granite/granite-3.3-2b-instruct", config=config)
+
+    assert rd._runtime_info["model_name"] == "ibm-granite/granite-3.3-2b-instruct"
+    assert rd._runtime_info["model_architecture"] == "GraniteForCausalLM"
+
+
+def test_transformers_hook_infers_bitsandbytes_quantization_from_load_in_4bit(fake_transformers_module):
+    rd.install_hooks()
+    import transformers
+
+    config = FakeModelConfig(quantization_config=FakeQuantizationConfig(load_in_4bit=True))
+    transformers.PreTrainedModel.from_pretrained("some-model", config=config)
+
+    assert rd._runtime_info["quantization_method"] == "bitsandbytes"
+    assert rd._runtime_info["quantization_bits"] == 4
+
+
+def test_transformers_hook_uses_explicit_quant_method_when_present(fake_transformers_module):
+    rd.install_hooks()
+    import transformers
+
+    config = FakeModelConfig(quantization_config=FakeQuantizationConfig(quant_method="gptq", bits=4))
+    transformers.PreTrainedModel.from_pretrained("some-model", config=config)
+
+    assert rd._runtime_info["quantization_method"] == "gptq"
+    assert rd._runtime_info["quantization_bits"] == 4
+
+
+def test_transformers_hook_no_quantization_config_leaves_fields_unset(fake_transformers_module):
+    rd.install_hooks()
+    import transformers
+
+    transformers.PreTrainedModel.from_pretrained("some-model", config=FakeModelConfig())
+
+    assert "quantization_method" not in rd._runtime_info
+    assert "quantization_bits" not in rd._runtime_info
+
+
+# ---------------------------------------------------------------------------
+# peft.LoraConfig
+# ---------------------------------------------------------------------------
+
+
+def test_peft_hook_captures_plain_lora(fake_peft_module):
+    rd.install_hooks()
+    import peft
+
+    peft.LoraConfig(r=16, lora_alpha=32)
+
+    assert rd._runtime_info["lora_rank"] == 16
+    assert rd._runtime_info["lora_alpha"] == 32
+    assert rd._runtime_info["adaptation_method"] == "lora"
+
+
+def test_peft_hook_detects_dora(fake_peft_module):
+    rd.install_hooks()
+    import peft
+
+    peft.LoraConfig(r=16, lora_alpha=32, use_dora=True)
+
+    assert rd._runtime_info["adaptation_method"] == "dora"
+
+
+def test_peft_hook_detects_rslora(fake_peft_module):
+    rd.install_hooks()
+    import peft
+
+    peft.LoraConfig(r=16, lora_alpha=32, use_rslora=True)
+
+    assert rd._runtime_info["adaptation_method"] == "rslora"
+
+
+def test_peft_hook_detects_qlora_when_base_model_already_quantized(
+    fake_transformers_module, fake_peft_module
+):
+    rd.install_hooks()
+    import peft
+    import transformers
+
+    config = FakeModelConfig(quantization_config=FakeQuantizationConfig(load_in_4bit=True))
+    transformers.PreTrainedModel.from_pretrained("some-model", config=config)
+    peft.LoraConfig(r=16, lora_alpha=32)
+
+    assert rd._runtime_info["adaptation_method"] == "qlora"

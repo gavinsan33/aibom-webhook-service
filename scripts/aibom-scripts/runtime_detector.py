@@ -12,6 +12,11 @@ Supported dataset frameworks:
   - torchvision.datasets
   - webdataset.WebDataset
 
+Also hooks transformers.TrainingArguments, transformers.PreTrainedModel.from_pretrained,
+and peft.LoraConfig -- catching model/training config for scripts that build these
+objects directly in Python, with no corresponding CLI flags for postprocess.py's
+command-line detectors to see.
+
 Writes detected metadata to $AIBOM_DATASET_OUTPUT (default: /results/dataset_detected.json).
 
 All hooks are fault-tolerant — detection failures never interrupt training.
@@ -527,6 +532,161 @@ def _install_webdataset_hook():
     wds.WebDataset.__init__ = _patched_init
 
 
+# ── transformers Trainer / model hook ────────────────────────────────────────
+#
+# CLI-argument parsing (postprocess.py's detect_trl_from_command) only sees
+# training config passed as literal flags on a recognized CLI (trl sft/dpo).
+# The far more common case -- a custom script that builds TrainingArguments
+# and calls Model.from_pretrained() directly in Python -- exposes nothing on
+# the command line at all. Hooking the real objects here, inside the training
+# process, catches that case regardless of how the script assembled its
+# config (CLI, YAML, hardcoded).
+
+_QUANT_CLASS_NAME_HINTS = (
+    ("BitsAndBytes", "bitsandbytes"),
+    ("GPTQ", "gptq"),
+    ("AWQ", "awq"),
+    ("HQQ", "hqq"),
+    ("AQLM", "aqlm"),
+)
+
+
+def _install_transformers_hook():
+    try:
+        import transformers
+    except ImportError:
+        _dbg("transformers hook: transformers not available, skipping")
+        return
+
+    if "transformers" in _hooks_installed:
+        return
+    _hooks_installed["transformers"] = True
+    _dbg("transformers hook: installed, patching TrainingArguments and PreTrainedModel.from_pretrained")
+
+    _orig_ta_init = transformers.TrainingArguments.__init__
+
+    def _patched_ta_init(self, *args, **kwargs):
+        _orig_ta_init(self, *args, **kwargs)
+        try:
+            info = {"training_framework": "transformers.Trainer"}
+            if getattr(self, "learning_rate", None) is not None:
+                info["learning_rate"] = self.learning_rate
+            if getattr(self, "per_device_train_batch_size", None) is not None:
+                info["batch_size"] = self.per_device_train_batch_size
+            if getattr(self, "num_train_epochs", None) is not None:
+                info["epochs"] = self.num_train_epochs
+            if getattr(self, "optim", None) is not None:
+                info["optimizer"] = str(self.optim)
+            if getattr(self, "seed", None) is not None:
+                info["random_seed"] = self.seed
+            if getattr(self, "bf16", False):
+                info["dtype"] = "bfloat16"
+            elif getattr(self, "fp16", False):
+                info["dtype"] = "float16"
+            with _lock:
+                _runtime_info.update(info)
+            _dbg(f"transformers hook: captured TrainingArguments {info}")
+        except Exception:
+            _dbg_exc("transformers._patched_ta_init")
+
+    transformers.TrainingArguments.__init__ = _patched_ta_init
+
+    _orig_from_pretrained = transformers.PreTrainedModel.from_pretrained.__func__
+
+    def _patched_from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
+        model = _orig_from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs)
+        try:
+            info = {"model_name": str(pretrained_model_name_or_path)}
+            config = getattr(model, "config", None)
+            architectures = getattr(config, "architectures", None) if config else None
+            if architectures:
+                info["model_architecture"] = architectures[0]
+
+            dtype = getattr(model, "dtype", None)
+            if dtype is not None:
+                info["dtype"] = str(dtype).replace("torch.", "")
+
+            quant_config = getattr(config, "quantization_config", None) if config else None
+            if quant_config is not None:
+                method = getattr(quant_config, "quant_method", None)
+                method = str(method) if method else None
+                if not method and (
+                    getattr(quant_config, "load_in_4bit", False)
+                    or getattr(quant_config, "load_in_8bit", False)
+                ):
+                    method = "bitsandbytes"
+                if not method:
+                    cls_name = type(quant_config).__name__
+                    for needle, name in _QUANT_CLASS_NAME_HINTS:
+                        if needle.lower() in cls_name.lower():
+                            method = name
+                            break
+                if method:
+                    info["quantization_method"] = method
+
+                bits = getattr(quant_config, "bits", None)
+                if bits is None and getattr(quant_config, "load_in_4bit", False):
+                    bits = 4
+                elif bits is None and getattr(quant_config, "load_in_8bit", False):
+                    bits = 8
+                if bits is not None:
+                    info["quantization_bits"] = bits
+
+            with _lock:
+                _runtime_info.update(info)
+            _dbg(f"transformers hook: captured model {info}")
+        except Exception:
+            _dbg_exc("transformers._patched_from_pretrained")
+        return model
+
+    transformers.PreTrainedModel.from_pretrained = classmethod(_patched_from_pretrained)
+
+
+# ── peft LoraConfig hook ──────────────────────────────────────────────────────
+
+def _install_peft_hook():
+    try:
+        import peft
+    except ImportError:
+        _dbg("peft hook: peft not available, skipping")
+        return
+
+    if "peft" in _hooks_installed:
+        return
+    _hooks_installed["peft"] = True
+    _dbg("peft hook: installed, patching LoraConfig.__init__")
+
+    _orig_init = peft.LoraConfig.__init__
+
+    def _patched_init(self, *args, **kwargs):
+        _orig_init(self, *args, **kwargs)
+        try:
+            info = {}
+            if getattr(self, "r", None) is not None:
+                info["lora_rank"] = self.r
+            if getattr(self, "lora_alpha", None) is not None:
+                info["lora_alpha"] = self.lora_alpha
+
+            with _lock:
+                already_quantized = bool(
+                    _runtime_info.get("quantization_method") or _runtime_info.get("quantization_bits")
+                )
+                if getattr(self, "use_dora", False):
+                    info["adaptation_method"] = "dora"
+                elif getattr(self, "use_rslora", False):
+                    info["adaptation_method"] = "rslora"
+                elif already_quantized:
+                    info["adaptation_method"] = "qlora"
+                else:
+                    info["adaptation_method"] = "lora"
+                _runtime_info.update(info)
+            _dbg(f"peft hook: captured LoraConfig {info}")
+        except Exception:
+            _dbg_exc("peft._patched_init")
+
+    peft.LoraConfig.__init__ = _patched_init
+
+
 # ── Public API ───────────────────────────────────────────────────────────────
 
 def install_hooks():
@@ -539,6 +699,8 @@ def install_hooks():
     _install_hf_datasets_hook()
     _install_torchvision_hook()
     _install_webdataset_hook()
+    _install_transformers_hook()
+    _install_peft_hook()
     atexit.register(_flush)
     _dbg(f"install_hooks: done, output will go to {_OUTPUT_PATH}")
 
@@ -560,6 +722,8 @@ def install_hooks_lazy():
         "datasets": _install_hf_datasets_hook,
         "torchvision": _install_torchvision_hook,
         "webdataset": _install_webdataset_hook,
+        "transformers": _install_transformers_hook,
+        "peft": _install_peft_hook,
     }
     _pending = set(_triggers.keys())
     _import_depth = [0]
