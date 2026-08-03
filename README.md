@@ -155,6 +155,7 @@ examples/
   vllm-inference-rhoai.yaml         # Same model via a RHOAI/KServe InferenceService
   granite-lora-finetune.yaml        # Example Job: single-GPU LoRA fine-tuning via trl sft
   granite-lora-finetune-multigpu.yaml  # Same, but 2 GPUs via trl's --num_processes passthrough
+  granite-lora-finetune-raw-trainer.yaml  # Same, but via raw transformers.Trainer + peft.LoraConfig (no CLI at all)
 tests/
   postprocess/test_postprocess.py   # Unit tests for postprocess.py's CLI-arg detectors and compile_aibom
   aibom_scripts/                    # Unit tests for runtime_detector.py's hooks (fake torch/datasets/transformers/peft modules)
@@ -353,10 +354,10 @@ Because `AIBOM` is a namespaced resource, it inherits ordinary Kubernetes RBAC: 
 
 ```bash
 # List AIBOMs in a namespace (only visible to users with RBAC on aiboms.aibom.io there)
-kubectl get aiboms -n gavin-test
+oc get aiboms -n gavin-test
 
 # Inspect one, including the full compiled AIBOM under spec.data
-kubectl get aibom train-job-abc123 -n gavin-test -o yaml
+oc get aibom train-job-abc123 -n gavin-test -o yaml
 ```
 
 `spec.jobName`, `spec.modelName`, `spec.experimentIntent`, and `spec.collectedAt` are pulled out as printer-friendly summary fields; `spec.data` holds the complete AIBOM JSON exactly as `postprocess.py` produced it.
@@ -408,6 +409,19 @@ It deliberately uses `trl`'s own `accelerate launch` passthrough (`--num_process
 # Deploy the example (namespace must be set up first, and the cluster/node
 # must have 2+ GPUs schedulable for this to actually run)
 oc apply -f examples/granite-lora-finetune-multigpu.yaml
+```
+
+## Example: Raw `transformers.Trainer` LoRA Fine-Tuning
+
+The `examples/granite-lora-finetune-raw-trainer.yaml` file runs the same LoRA fine-tune as the examples above, but via a custom Python script that calls `transformers.Trainer`/`peft.LoraConfig` directly instead of the `trl sft` CLI — no CLI flags at all for `postprocess.py`'s command-line detectors to see.
+
+It sets no `aibom.io/model-name` or `aibom.io/dataset-*` annotations, so every field in the resulting AIBOM's `model`, `training`, and `fine_tuning` sections is sourced purely from `runtime_detector.py`'s object-level hooks: `transformers.PreTrainedModel.from_pretrained` (model name/architecture/dtype), `transformers.TrainingArguments` (learning rate, batch size, epochs, seed, dtype), and `peft.LoraConfig` (LoRA rank/alpha, adaptation method) — see [Model Auto-Detection](#model-auto-detection). `dataset.declared.declared_via` should come back as `"inferred_from_runtime"`, since there's no annotation or CLI arg for the dataset name either — the third and last precedence tier described in [Dataset Declaration and Reconciliation](#dataset-declaration-and-reconciliation).
+
+The script also tokenizes the dataset via `.map()` before handing it to `Trainer` (which wraps it in its own `DataLoader` internally) — the same "dataset transformed before being wrapped" shape that `runtime_detector.py`'s dataset dedup relies on its `(builder_name, config_name)` key-based fallback to still collapse into a single `dataset.auto_detected` entry, rather than the transformed copy showing up as a second, generically-named one.
+
+```bash
+# Deploy the example (namespace must be set up first)
+oc apply -f examples/granite-lora-finetune-raw-trainer.yaml
 ```
 
 ## Roadmap

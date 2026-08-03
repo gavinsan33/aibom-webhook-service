@@ -1,0 +1,129 @@
+# Single-GPU LoRA fine-tuning example using raw `transformers.Trainer` +
+# `peft.LoraConfig` in a custom Python script, instead of the `trl sft` CLI
+# used by examples/granite-lora-finetune.yaml.
+#
+# This deliberately has NO recognizable CLI shape for postprocess.py's
+# command-line detectors (detect_vllm_from_command / detect_trl_from_command)
+# to parse -- the container just runs `python3 /tmp/train.py`. It exists to
+# exercise runtime_detector.py's newer object-level hooks instead:
+#   - transformers.PreTrainedModel.from_pretrained -> model name/architecture/dtype
+#   - transformers.TrainingArguments               -> learning rate, batch size,
+#                                                      epochs, optimizer, seed, dtype
+#   - peft.LoraConfig                               -> LoRA rank/alpha and
+#                                                      adaptation method (lora)
+#
+# No aibom.io/model-name or aibom.io/dataset-* annotations are set on purpose,
+# so every model/training/fine_tuning field in the resulting AIBOM is sourced
+# purely from these runtime hooks (dataset.declared.declared_via should show
+# up as "inferred_from_runtime", the third precedence tier, since there's no
+# annotation or CLI arg for the dataset name either -- see Dataset Declaration
+# and Reconciliation in the README).
+#
+# The training script also tokenizes the raw alpaca dataset via a `.map()`
+# call before handing it to Trainer (which wraps it in its own DataLoader
+# internally) -- the same "transform before wrap" shape that the dataset
+# auto_detected dedup fix in runtime_detector.py's _hf_dataset_key_registry
+# is meant to collapse into a single entry instead of a spurious second one.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: aibom-granite-lora-finetune-raw-trainer
+  namespace: gavin-test
+  annotations:
+    aibom.io/experiment-intent: sft
+    aibom.io/experiment-name: granite-lora-sft-raw-trainer-benchmark
+
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: finetune
+          image: nvcr.io/nvidia/pytorch:26.03-py3
+          command:
+            - sh
+            - -c
+            - |
+              pip install --no-cache-dir -U transformers peft datasets accelerate && \
+              export PATH="$HOME/.local/bin:$PATH" && \
+              cat > /tmp/train.py <<'PYEOF'
+              import torch
+              from datasets import load_dataset
+              from peft import LoraConfig, get_peft_model
+              from transformers import (
+                  AutoModelForCausalLM,
+                  AutoTokenizer,
+                  DataCollatorForLanguageModeling,
+                  Trainer,
+                  TrainingArguments,
+              )
+
+              model_name = "ibm-granite/granite-3.3-2b-instruct"
+
+              tokenizer = AutoTokenizer.from_pretrained(model_name)
+              if tokenizer.pad_token is None:
+                  tokenizer.pad_token = tokenizer.eos_token
+
+              model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16)
+
+              lora_config = LoraConfig(
+                  r=16,
+                  lora_alpha=32,
+                  lora_dropout=0.05,
+                  target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+                  task_type="CAUSAL_LM",
+              )
+              model = get_peft_model(model, lora_config)
+
+              def format_example(example):
+                  if example.get("input"):
+                      text = (
+                          f"### Instruction:\n{example['instruction']}\n\n"
+                          f"### Input:\n{example['input']}\n\n### Response:\n{example['output']}"
+                      )
+                  else:
+                      text = f"### Instruction:\n{example['instruction']}\n\n### Response:\n{example['output']}"
+                  return {"text": text}
+
+              def tokenize(example):
+                  return tokenizer(example["text"], truncation=True, max_length=512)
+
+              dataset = load_dataset("tatsu-lab/alpaca", split="train")
+              dataset = dataset.map(format_example)
+              tokenized = dataset.map(tokenize, remove_columns=dataset.column_names)
+
+              training_args = TrainingArguments(
+                  output_dir="/tmp/output",
+                  per_device_train_batch_size=4,
+                  gradient_accumulation_steps=4,
+                  learning_rate=2e-4,
+                  num_train_epochs=1,
+                  max_steps=50,
+                  logging_steps=5,
+                  bf16=True,
+                  seed=42,
+                  report_to="none",
+              )
+
+              trainer = Trainer(
+                  model=model,
+                  args=training_args,
+                  train_dataset=tokenized,
+                  data_collator=DataCollatorForLanguageModeling(tokenizer, mlm=False),
+              )
+              trainer.train()
+              PYEOF
+              python3 /tmp/train.py
+          env:
+            - name: HOME
+              value: /tmp
+            - name: AIBOM_DEBUG
+              value: "1"
+          resources:
+            requests:
+              nvidia.com/gpu: "1"
+            limits:
+              nvidia.com/gpu: "1"
