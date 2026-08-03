@@ -1,0 +1,17 @@
+# Must exist in each namespace where instrumented workloads run (pods can
+# only mount ConfigMaps from their own namespace). Populated at install time
+# via --set-file — see values.yaml.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aibom-scripts
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/managed-by: aibom-webhook-service
+data:
+  generate_snapshot.py: |
+    {{- .Values.scripts.generateSnapshot | nindent 4 }}
+  runtime_detector.py: |
+    {{- .Values.scripts.runtimeDetector | nindent 4 }}
+  k8s_api.py: |
+    {{- .Values.scripts.k8sApi | nindent 4 }}

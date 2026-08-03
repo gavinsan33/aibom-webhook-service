@@ -1,0 +1,42 @@
+image:
+  webhook:
+    repository: image-registry.openshift-image-registry.svc:5000/aibom-system/aibom-webhook-service
+    tag: latest
+  postprocess:
+    repository: image-registry.openshift-image-registry.svc:5000/aibom-system/aibom-postprocess
+    tag: latest
+  pullPolicy: Always
+
+replicaCount: 1
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+certManager:
+  issuerName: aibom-webhook-selfsigned
+  duration: 8760h # 1 year
+  renewBefore: 720h # 30 days
+
+webhook:
+  failurePolicy: Ignore
+  reinvocationPolicy: Never
+  # Namespaces must carry this label to opt in to pod mutation.
+  namespaceSelectorLabel:
+    key: aibom.io/enabled
+    value: "true"
+
+# OpenShift BuildConfig/ImageStream resources that build the webhook and
+# postprocess images from source in-cluster. Disable if images are built and
+# pushed externally instead.
+build:
+  enabled: true
+  gitRepo: https://github.com/gavinsan33/aibom-webhook-service.git
+  gitRef: master
+
+watcher:
+  enabled: true

@@ -1,0 +1,35 @@
+# Requires cert-manager (https://cert-manager.io/) installed in the cluster.
+#
+# Replaces the manual cluster cert-provisioning half of scripts/generate-certs.sh:
+# issues the webhook's server certificate into the same aibom-webhook-certs
+# Secret that templates/deployment.yaml already mounts, and keeps it renewed
+# automatically instead of expiring silently after 365 days. The CA bundle
+# needed by templates/webhook-configuration.yaml's clientConfig is injected
+# automatically by cert-manager's cainjector via that file's
+# cert-manager.io/inject-ca-from annotation, instead of being pasted in by hand.
+#
+# scripts/generate-certs.sh is unchanged and still used for local dev
+# (`make run`), which never touches a cluster.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ .Values.certManager.issuerName }}
+  namespace: {{ include "aibom-webhook.namespace" . }}
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: aibom-webhook-certs
+  namespace: {{ include "aibom-webhook.namespace" . }}
+spec:
+  secretName: aibom-webhook-certs
+  dnsNames:
+    - {{ include "aibom-webhook.serviceDNSName" . }}
+    - {{ include "aibom-webhook.serviceDNSName" . }}.cluster.local
+  issuerRef:
+    name: {{ .Values.certManager.issuerName }}
+    kind: Issuer
+  duration: {{ .Values.certManager.duration }}
+  renewBefore: {{ .Values.certManager.renewBefore }}

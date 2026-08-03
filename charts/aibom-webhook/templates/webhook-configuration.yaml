@@ -1,0 +1,34 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: aibom-webhook
+  annotations:
+    # cert-manager's cainjector controller watches for this annotation and
+    # keeps clientConfig.caBundle (below) populated and in sync with
+    # templates/certificates.yaml's Certificate automatically, including on renewal.
+    cert-manager.io/inject-ca-from: {{ include "aibom-webhook.namespace" . }}/aibom-webhook-certs
+webhooks:
+  - name: {{ include "aibom-webhook.serviceDNSName" . }}
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: {{ .Values.webhook.failurePolicy }}
+    reinvocationPolicy: {{ .Values.webhook.reinvocationPolicy }}
+    namespaceSelector:
+      matchLabels:
+        {{ .Values.webhook.namespaceSelectorLabel.key }}: {{ .Values.webhook.namespaceSelectorLabel.value | quote }}
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods"]
+        scope: Namespaced
+    clientConfig:
+      service:
+        name: aibom-webhook
+        namespace: {{ include "aibom-webhook.namespace" . }}
+        path: /mutate
+        port: 443
+      # caBundle is deliberately omitted: it's populated by cert-manager's cainjector
+      # (see the cert-manager.io/inject-ca-from annotation above). If this template set
+      # caBundle itself, Helm's server-side apply and cainjector's own apply would both
+      # try to own the field, causing an SSA conflict on every install/upgrade.
