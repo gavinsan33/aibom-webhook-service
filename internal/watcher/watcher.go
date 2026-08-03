@@ -613,6 +613,9 @@ func (w *Watcher) createPostprocessJobCore(ctx context.Context, namespace, trigg
 					ServiceAccountName: postprocessServiceAccountName,
 					SecurityContext: &corev1.PodSecurityContext{
 						RunAsNonRoot: &runAsNonRoot,
+						SeccompProfile: &corev1.SeccompProfile{
+							Type: corev1.SeccompProfileTypeRuntimeDefault,
+						},
 					},
 					Containers: []corev1.Container{
 						{
