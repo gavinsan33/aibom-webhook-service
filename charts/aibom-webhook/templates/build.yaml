@@ -1,3 +1,9 @@
+{{- /*
+Output tags are driven by image.*.tag rather than hardcoded "latest" so a build's
+output lands on the same ImageStreamTag that templates/deployment.yaml pulls from —
+tagging both with a commit SHA (see Makefile IMAGE_TAG) keeps every build immutable
+and rollback-able instead of always overwriting one mutable "latest" tag in place.
+*/ -}}
 {{- if .Values.build.enabled }}
 apiVersion: image.openshift.io/v1
 kind: ImageStream
@@ -23,7 +29,7 @@ spec:
   output:
     to:
       kind: ImageStreamTag
-      name: aibom-webhook-service:latest
+      name: aibom-webhook-service:{{ .Values.image.webhook.tag }}
   triggers:
     - type: ConfigChange
 ---
@@ -51,7 +57,7 @@ spec:
   output:
     to:
       kind: ImageStreamTag
-      name: aibom-postprocess:latest
+      name: aibom-postprocess:{{ .Values.image.postprocess.tag }}
   triggers:
     - type: ConfigChange
 {{- end }}

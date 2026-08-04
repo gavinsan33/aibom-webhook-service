@@ -50,18 +50,19 @@ make run
 
 ## Workload Namespace Setup
 
-Each namespace that runs instrumented workloads needs the `aibom.io/enabled` label, image pull access to `aibom-system`, the `aibom-scripts` ConfigMap, and RBAC letting workload pods and the postprocess Job write their own data directly via the Kubernetes API. The `charts/aibom-workload-namespace` Helm chart handles the RBAC/ConfigMap part; a single command installs (or upgrades) it:
+Each namespace that runs instrumented workloads needs the `aibom.io/enabled` label, image pull access to `aibom-system`, the `aibom-scripts` ConfigMap, and RBAC letting workload pods and the postprocess Job write their own data directly via the Kubernetes API. The namespace itself must already exist; a single command handles the rest:
 
 ```bash
-oc label namespace my-ai-workloads aibom.io/enabled=true
 make setup-namespace NAMESPACE=my-ai-workloads
 ```
 
-`make setup-namespace` runs `helm upgrade --install aibom-ns-<namespace> charts/aibom-workload-namespace -n <namespace>`, which:
-1. Creates a RoleBinding in `aibom-system` granting `system:image-puller` to `system:serviceaccounts:<namespace>` — allows pods in this namespace to pull the postprocess image
-2. Creates the `aibom-scripts` ConfigMap with the discovery script, dataset detector, and the shared `k8s_api.py` in-cluster REST helper both of them use — the contents are read from `scripts/aibom-scripts/*.py` at install time via `--set-file`
-3. Creates the `aibom-postprocess` ServiceAccount + Role/RoleBinding, granting `create`/`get` on `aiboms.aibom.io` scoped to this namespace — the postprocess Job uses this to create the AIBOM custom resource directly
-4. Creates the `aibom-workload-data` Role/RoleBinding, granting `create`/`get`/`patch` on `configmaps` (scoped to this namespace) to every ServiceAccount in the namespace — instrumented workload pods use this to write their discovery/dataset data directly into the per-workload data ConfigMap
+`make setup-namespace`:
+1. Labels the namespace `aibom.io/enabled=true` — opts it into webhook instrumentation
+2. Runs `helm upgrade --install aibom-ns-<namespace> charts/aibom-workload-namespace -n <namespace>`, which:
+   - Creates a RoleBinding in `aibom-system` granting `system:image-puller` to `system:serviceaccounts:<namespace>` — allows pods in this namespace to pull the postprocess image
+   - Creates the `aibom-scripts` ConfigMap with the discovery script, dataset detector, and the shared `k8s_api.py` in-cluster REST helper both of them use — the contents are read from `scripts/aibom-scripts/*.py` at install time via `--set-file`
+   - Creates the `aibom-postprocess` ServiceAccount + Role/RoleBinding, granting `create`/`get` on `aiboms.aibom.io` scoped to this namespace — the postprocess Job uses this to create the AIBOM custom resource directly
+   - Creates the `aibom-workload-data` Role/RoleBinding, granting `create`/`get`/`patch` on `configmaps` (scoped to this namespace) to every ServiceAccount in the namespace — instrumented workload pods use this to write their discovery/dataset data directly into the per-workload data ConfigMap
 
 **Upgrading an existing namespace**: if you set up a namespace before this RBAC/direct-write model existed, or `scripts/aibom-scripts/*.py` has changed, re-run `make setup-namespace NAMESPACE=<ns>` — `helm upgrade --install` is idempotent. This matters more than it sounds: the dataset detector hook mounts `k8s_api.py` via a `subPath` volume mount, so a stale `aibom-scripts` ConfigMap missing that key will fail *pod startup* for every instrumented workload in that namespace, not just silently skip dataset detection.
 
@@ -71,9 +72,16 @@ Deployment is a Helm chart (`charts/aibom-webhook`), covering the `aibom-system`
 
 If your account doesn't have cluster-scoped permission to create/patch CustomResourceDefinitions, use `make deploy-no-crds` (and `make redeploy-no-crds`) instead — these pass `--skip-crds` to Helm. The `aiboms.aibom.io` CRD (`charts/aibom-webhook/crds/aibom-crd.yaml`) must then already exist, installed once by a cluster-admin via `oc apply -f charts/aibom-webhook/crds/aibom-crd.yaml`.
 
+By default, `deploy`/`redeploy` use the `latest` tag for both images, so every rebuild overwrites the same ImageStreamTag in place — simple, but there's nothing to roll back to if a build is bad. Pass `IMAGE_TAG` to tag each build with something immutable instead, e.g. the commit it was built from:
+
 ```bash
 # Build both images in-cluster from source (default: charts/aibom-webhook/values.yaml build.gitRepo/gitRef)
 make deploy
+
+# Or, tag the build with the current commit instead of overwriting "latest" — the
+# ImageStreamTag this produces is never reused, so you can roll back by re-pointing
+# the Deployment (make deploy IMAGE_TAG=<older-sha>) at a previous one
+make deploy IMAGE_TAG=$(git rev-parse --short HEAD)
 
 # Or, to use externally built/pushed images instead of the in-cluster BuildConfig:
 helm upgrade --install aibom-webhook charts/aibom-webhook \
@@ -83,11 +91,10 @@ helm upgrade --install aibom-webhook charts/aibom-webhook \
   --set image.postprocess.repository=quay.io/<your-org>/aibom-postprocess \
   --set image.postprocess.tag=latest
 
-# Rebuild both images from source and roll out the new build
+# Rebuild both images from source and roll out the new build (add IMAGE_TAG=... to match)
 make redeploy
 
 # Set up a workload namespace (label, image pull access, scripts ConfigMap)
-oc label namespace my-ai-workloads aibom.io/enabled=true
 make setup-namespace NAMESPACE=my-ai-workloads
 
 # Verify: submit a Job, check the pod for the init container
@@ -156,7 +163,6 @@ charts/
   aibom-webhook/                    # Cluster-level install: namespace, CRD, RBAC, certs, Deployment/Service,
     crds/aibom-crd.yaml               # webhook config, OpenShift BuildConfig/ImageStream (make deploy/redeploy/undeploy)
     templates/
-      namespace.yaml
       serviceaccount.yaml
       clusterrole.yaml
       clusterrolebinding.yaml

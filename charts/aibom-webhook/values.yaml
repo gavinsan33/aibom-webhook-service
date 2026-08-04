@@ -1,3 +1,7 @@
+# When build.enabled=true, tag also names the ImageStreamTag the in-cluster
+# BuildConfig writes to (see templates/build.yaml) — the two must move together.
+# Override both to a commit SHA (Makefile IMAGE_TAG) for immutable, rollback-able
+# builds instead of always overwriting "latest" in place.
 image:
   webhook:
     repository: image-registry.openshift-image-registry.svc:5000/aibom-system/aibom-webhook-service
