@@ -1,19 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Generate self-signed TLS certs for the AIBOM webhook service.
-# Usage: ./scripts/generate-certs.sh [--local]
-#   --local: also add localhost to SAN (for local dev testing)
+# Generate self-signed TLS certs for running the webhook locally (just run).
+# Cluster deployments get their certs from cert-manager instead (see
+# charts/aibom-webhook/templates/certificates.yaml) — this script never touches
+# a cluster.
+# Usage: ./scripts/generate-certs.sh
 
 CERT_DIR="${CERT_DIR:-certs}"
 NAMESPACE="${NAMESPACE:-aibom-system}"
 SERVICE="${SERVICE:-aibom-webhook}"
-SECRET_NAME="${SECRET_NAME:-aibom-webhook-certs}"
 
-SAN="DNS:${SERVICE}.${NAMESPACE}.svc,DNS:${SERVICE}.${NAMESPACE}.svc.cluster.local"
-if [[ "${1:-}" == "--local" ]]; then
-    SAN="${SAN},DNS:localhost,IP:127.0.0.1"
-fi
+SAN="DNS:${SERVICE}.${NAMESPACE}.svc,DNS:${SERVICE}.${NAMESPACE}.svc.cluster.local,DNS:localhost,IP:127.0.0.1"
 
 mkdir -p "${CERT_DIR}"
 
@@ -42,30 +40,5 @@ openssl x509 -req \
     -days 365 -sha256 \
     -copy_extensions copy
 
-# Output CA bundle for webhook config
-CA_BUNDLE=$(base64 -w0 < "${CERT_DIR}/ca.crt")
 echo ""
-echo "CA bundle (paste into deploy/webhook-config.yaml caBundle field):"
-echo "${CA_BUNDLE}"
-echo ""
-
-# Detect CLI (prefer oc, fall back to kubectl)
-CLI="$(command -v oc 2>/dev/null || command -v kubectl 2>/dev/null || true)"
-
-if [[ -n "${CLI}" ]] && "${CLI}" cluster-info &>/dev/null 2>&1; then
-    "${CLI}" create namespace "${NAMESPACE}" --dry-run=client -o yaml | "${CLI}" apply -f -
-    "${CLI}" -n "${NAMESPACE}" create secret tls "${SECRET_NAME}" \
-        --cert="${CERT_DIR}/tls.crt" \
-        --key="${CERT_DIR}/tls.key" \
-        --dry-run=client -o yaml | "${CLI}" apply -f -
-    echo "Secret ${SECRET_NAME} created in namespace ${NAMESPACE}"
-
-    # Patch the webhook config with the CA bundle
-    if [[ -f deploy/webhook-config.yaml ]]; then
-        sed -i "s|caBundle:.*|caBundle: ${CA_BUNDLE}|" deploy/webhook-config.yaml
-        echo "Patched deploy/webhook-config.yaml with CA bundle"
-    fi
-else
-    echo "oc/kubectl not available or cluster not reachable — skipping secret creation"
-    echo "Manually create the secret and patch webhook-config.yaml with the CA bundle above"
-fi
+echo "Certs written to ${CERT_DIR}/ — run 'just run' to start the webhook against them."
