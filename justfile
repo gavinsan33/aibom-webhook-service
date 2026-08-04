@@ -75,27 +75,42 @@ docker-push-postprocess img="aibom-postprocess:latest":
 _check-auth:
     @oc whoami >/dev/null 2>&1 || { echo "error: not logged in to a cluster — run 'oc login' first" >&2; exit 1; }
 
-# tag sets both the BuildConfig output ImageStreamTag and the Deployment's image
-# reference. Defaults to the short SHA scripts/remote-build-sha.sh resolves (the
-# commit the BuildConfig is actually about to build) for an immutable, rollback-able
-# build — not local HEAD, which can be ahead of, behind, or diverged from what the
-# in-cluster build will clone. Pass an explicit tag (e.g. `just deploy latest`) to
-# overwrite a mutable tag in place instead.
+# --tag=<tag> sets both the BuildConfig output ImageStreamTag and the Deployment's
+# image reference. Defaults to the short SHA scripts/remote-build-sha.sh resolves
+# (the commit the BuildConfig is actually about to build) for an immutable,
+# rollback-able build — not local HEAD, which can be ahead of, behind, or diverged
+# from what the in-cluster build will clone. Pass e.g. --tag=latest to overwrite a
+# mutable tag in place instead.
 #
-# skip_crds=true is for accounts without cluster-scoped create/patch permission on
-# the CRD/Namespace: it never touches the Namespace object and skips the
-# aiboms.aibom.io CRD, which must then already exist — a cluster-admin runs
+# --skip-crds is for accounts without cluster-scoped create/patch permission on the
+# CRD/Namespace: it never touches the Namespace object and skips the aiboms.aibom.io
+# CRD, which must then already exist — a cluster-admin runs
 # `oc apply -f charts/aibom-webhook/crds/aibom-crd.yaml` and creates the namespace once.
 #
 # Install/upgrade the webhook chart. Requires cert-manager already installed in the cluster.
+# Usage: just deploy [--tag=<tag>] [--skip-crds]
 [group('deploy')]
-deploy tag=`scripts/remote-build-sha.sh` skip_crds="false": _check-auth
-    helm upgrade --install aibom-webhook charts/aibom-webhook -n {{ webhook_namespace }} \
-        {{ if skip_crds == "true" { "--skip-crds" } else { "--create-namespace" } }} \
-        --set image.webhook.tag={{ tag }} --set image.postprocess.tag={{ tag }}
+deploy *args: _check-auth
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tag=""
+    skip_crds=false
+    for arg in {{ args }}; do
+        case "$arg" in
+            --skip-crds) skip_crds=true ;;
+            --tag=*) tag="${arg#--tag=}" ;;
+            *) echo "error: unknown argument '$arg' (expected --tag=<tag> or --skip-crds)" >&2; exit 1 ;;
+        esac
+    done
+    [ -n "$tag" ] || tag="$(scripts/remote-build-sha.sh)"
+    ns_flag="--create-namespace"
+    [ "$skip_crds" = true ] && ns_flag="--skip-crds"
+    helm upgrade --install aibom-webhook charts/aibom-webhook -n {{ webhook_namespace }} "$ns_flag" \
+        --set image.webhook.tag="$tag" --set image.postprocess.tag="$tag"
 
+# Usage: just redeploy [--tag=<tag>] [--skip-crds]
 [group('deploy')]
-redeploy tag=`scripts/remote-build-sha.sh` skip_crds="false": (deploy tag skip_crds) (_rollout)
+redeploy *args: (deploy args) (_rollout)
 
 _rollout: _check-auth
     oc -n {{ webhook_namespace }} start-build aibom-webhook-service --wait

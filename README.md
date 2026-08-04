@@ -72,9 +72,9 @@ just setup-namespace my-ai-workloads
 
 Deployment is a Helm chart (`charts/aibom-webhook`), covering the `aibom-system` namespace, RBAC, cert-manager `Issuer`/`Certificate`, the webhook `Deployment`/`Service`, the `MutatingWebhookConfiguration`, and the OpenShift `BuildConfig`/`ImageStream` pair used to build both images in-cluster from source. `just deploy` requires cert-manager to already be installed in the cluster — it issues the webhook's TLS certificate into the `aibom-webhook-certs` Secret and keeps it renewed automatically (no more manually re-running a script before a 365-day cert expires). The `MutatingWebhookConfiguration`'s CA bundle is kept in sync by cert-manager's cainjector via its `cert-manager.io/inject-ca-from` annotation, rather than being pasted in by hand.
 
-If your account doesn't have cluster-scoped permission to create/patch CustomResourceDefinitions, pass `true` as the second (`skip_crds`) argument — e.g. `just deploy latest true`, or `just redeploy latest true` — to pass `--skip-crds` to Helm and never touch the Namespace object. The `aiboms.aibom.io` CRD (`charts/aibom-webhook/crds/aibom-crd.yaml`) and the namespace must then already exist, created once by a cluster-admin via `oc apply -f charts/aibom-webhook/crds/aibom-crd.yaml` and `oc create namespace aibom-system`.
+If your account doesn't have cluster-scoped permission to create/patch CustomResourceDefinitions, pass `--skip-crds` — e.g. `just deploy --skip-crds`, or `just redeploy --skip-crds` — to pass `--skip-crds` to Helm and never touch the Namespace object. The `aiboms.aibom.io` CRD (`charts/aibom-webhook/crds/aibom-crd.yaml`) and the namespace must then already exist, created once by a cluster-admin via `oc apply -f charts/aibom-webhook/crds/aibom-crd.yaml` and `oc create namespace aibom-system`.
 
-`deploy`/`redeploy` tag both images with the short SHA of the commit the BuildConfig is actually about to build — the tip of `build.gitRepo`/`build.gitRef` (resolved by `scripts/remote-build-sha.sh`, which mirrors `charts/aibom-webhook/values.yaml`'s defaults), fetched via `git ls-remote`, not your local `HEAD`. This matters because local `HEAD` can be ahead of, behind, or diverged from what the in-cluster build actually clones (e.g. unpushed commits); tagging by the remote SHA keeps the tag an accurate description of what's inside the image, and each build lands on its own ImageStreamTag instead of overwriting a shared one — you can roll back by re-pointing the Deployment at an older tag (`just deploy <older-sha>`). Pass an explicit tag (e.g. `latest`) to opt back into overwriting a mutable tag in place:
+`deploy`/`redeploy` tag both images with the short SHA of the commit the BuildConfig is actually about to build — the tip of `build.gitRepo`/`build.gitRef` (resolved by `scripts/remote-build-sha.sh`, which mirrors `charts/aibom-webhook/values.yaml`'s defaults), fetched via `git ls-remote`, not your local `HEAD`. This matters because local `HEAD` can be ahead of, behind, or diverged from what the in-cluster build actually clones (e.g. unpushed commits); tagging by the remote SHA keeps the tag an accurate description of what's inside the image, and each build lands on its own ImageStreamTag instead of overwriting a shared one — you can roll back by re-pointing the Deployment at an older tag (`just deploy --tag=<older-sha>`). Pass `--tag=latest` to opt back into overwriting a mutable tag in place:
 
 ```bash
 # Build both images in-cluster from source (default: charts/aibom-webhook/values.yaml build.gitRepo/gitRef),
@@ -82,7 +82,7 @@ If your account doesn't have cluster-scoped permission to create/patch CustomRes
 just deploy
 
 # Or, overwrite the "latest" tag in place instead of using the resolved commit SHA
-just deploy latest
+just deploy --tag=latest
 
 # Or, to use externally built/pushed images instead of the in-cluster BuildConfig:
 helm upgrade --install aibom-webhook charts/aibom-webhook \
@@ -382,7 +382,7 @@ oc create secret generic aibom-config \
 
 ### AIBOM Storage
 
-Completed AIBOMs are stored as namespaced `AIBOM` custom resources (`aiboms.aibom.io`, `charts/aibom-webhook/crds/aibom-crd.yaml`) — one per completed workload, created in the same namespace the workload ran in. `just deploy` registers the CRD; if your account lacks CRD permissions, use `just deploy latest true` instead and have a cluster-admin apply it once via `oc apply -f charts/aibom-webhook/crds/aibom-crd.yaml`. Nothing further needs to be set up per namespace to enable collection.
+Completed AIBOMs are stored as namespaced `AIBOM` custom resources (`aiboms.aibom.io`, `charts/aibom-webhook/crds/aibom-crd.yaml`) — one per completed workload, created in the same namespace the workload ran in. `just deploy` registers the CRD; if your account lacks CRD permissions, use `just deploy --skip-crds` instead and have a cluster-admin apply it once via `oc apply -f charts/aibom-webhook/crds/aibom-crd.yaml`. Nothing further needs to be set up per namespace to enable collection.
 
 Because `AIBOM` is a namespaced resource, it inherits ordinary Kubernetes RBAC: a user granted `get`/`list` on `aiboms` in namespace `team-a` cannot see `team-b`'s AIBOMs, without any extra code in this project — the same Role/RoleBinding mechanism admins already use for Pods and Jobs applies here.
 
