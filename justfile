@@ -135,8 +135,16 @@ deploy *args: _check-auth
             oc -n {{ webhook_namespace }} wait --for=condition=Complete "build/${bc}-1" --timeout=300s
         done
     else
-        oc -n {{ webhook_namespace }} start-build aibom-webhook-service --wait
-        oc -n {{ webhook_namespace }} start-build aibom-postprocess --wait
+        # latest is intentionally mutable — always rebuild it. Any other version is an
+        # immutable per-commit tag: if it's already been built (and not since pruned),
+        # rebuilding would just reproduce the same content, so skip it.
+        for bc in aibom-webhook-service aibom-postprocess; do
+            if [ "$version" != "latest" ] && oc -n {{ webhook_namespace }} get istag "${bc}:${version}" >/dev/null 2>&1; then
+                echo "${bc}:${version} already built — skipping rebuild"
+            else
+                oc -n {{ webhook_namespace }} start-build "$bc" --wait
+            fi
+        done
     fi
     oc -n {{ webhook_namespace }} delete pods -l openshift.io/build.name --field-selector=status.phase==Succeeded
     oc -n {{ webhook_namespace }} rollout restart deployment/aibom-webhook
