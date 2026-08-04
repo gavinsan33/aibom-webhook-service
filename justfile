@@ -113,16 +113,16 @@ deploy *args: _check-auth
             *) echo "error: unknown argument '$arg' (expected --version=<sha> or --skip-crds)" >&2; exit 1 ;;
         esac
     done
-    [ -n "$version" ] || version="$(scripts/remote-build-sha.sh)"
+    [[ -n "$version" ]] || version="$(scripts/remote-build-sha.sh)"
     ns_flag="--create-namespace"
-    [ "$skip_crds" = true ] && ns_flag="--skip-crds"
+    [[ "$skip_crds" = true ]] && ns_flag="--skip-crds"
     gitref_args=()
-    [ "$version" = "latest" ] || gitref_args=(--set "build.gitRef=$version")
+    [[ "$version" = "latest" ]] || gitref_args=(--set "build.gitRef=$version")
     first_install=false
     helm status aibom-webhook -n {{ webhook_namespace }} >/dev/null 2>&1 || first_install=true
     helm upgrade --install aibom-webhook charts/aibom-webhook -n {{ webhook_namespace }} "$ns_flag" \
         --set image.webhook.tag="$version" --set image.postprocess.tag="$version" "${gitref_args[@]}"
-    if [ "$first_install" = true ]; then
+    if [[ "$first_install" = true ]]; then
         # The BuildConfigs' ConfigChange trigger already auto-fired an initial build the
         # moment they were just created above — starting another would just double build
         # time. Wait on that auto-triggered build (always numbered -1) instead.
