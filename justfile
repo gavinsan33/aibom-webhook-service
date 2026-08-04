@@ -71,6 +71,10 @@ docker-push-postprocess img="aibom-postprocess:latest":
 
 # --- Cluster deployment --------------------------------------------------------
 
+# Every recipe below that talks to a cluster depends on this, so it always runs first.
+_check-auth:
+    @oc whoami >/dev/null 2>&1 || { echo "error: not logged in to a cluster — run 'oc login' first" >&2; exit 1; }
+
 # tag sets both the BuildConfig output ImageStreamTag and the Deployment's image
 # reference. Defaults to the short SHA scripts/remote-build-sha.sh resolves (the
 # commit the BuildConfig is actually about to build) for an immutable, rollback-able
@@ -85,7 +89,7 @@ docker-push-postprocess img="aibom-postprocess:latest":
 #
 # Install/upgrade the webhook chart. Requires cert-manager already installed in the cluster.
 [group('deploy')]
-deploy tag=`scripts/remote-build-sha.sh` skip_crds="false":
+deploy tag=`scripts/remote-build-sha.sh` skip_crds="false": _check-auth
     helm upgrade --install aibom-webhook charts/aibom-webhook -n {{ webhook_namespace }} \
         {{ if skip_crds == "true" { "--skip-crds" } else { "--create-namespace" } }} \
         --set image.webhook.tag={{ tag }} --set image.postprocess.tag={{ tag }}
@@ -93,7 +97,7 @@ deploy tag=`scripts/remote-build-sha.sh` skip_crds="false":
 [group('deploy')]
 redeploy tag=`scripts/remote-build-sha.sh` skip_crds="false": (deploy tag skip_crds) (_rollout)
 
-_rollout:
+_rollout: _check-auth
     oc -n {{ webhook_namespace }} start-build aibom-webhook-service --wait
     oc -n {{ webhook_namespace }} start-build aibom-postprocess --wait
     oc -n {{ webhook_namespace }} delete pods -l openshift.io/build.name --field-selector=status.phase==Succeeded
@@ -103,7 +107,7 @@ _rollout:
 
 [group('deploy')]
 [confirm("Uninstall the aibom-webhook release? This removes the webhook, RBAC, and Deployment (the CRD and any AIBOM resources are left in place).")]
-undeploy:
+undeploy: _check-auth
     helm uninstall aibom-webhook -n {{ webhook_namespace }}
 
 # Namespace must already exist. Installs RBAC + the aibom-scripts ConfigMap via the
@@ -111,7 +115,7 @@ undeploy:
 #
 # Opt an existing namespace into webhook instrumentation by labeling it aibom.io/enabled=true.
 [group('deploy')]
-setup-namespace namespace:
+setup-namespace namespace: _check-auth
     oc label namespace {{ namespace }} aibom.io/enabled=true --overwrite
     helm upgrade --install aibom-ns-{{ namespace }} charts/aibom-workload-namespace -n {{ namespace }} \
         --set-file scripts.generateSnapshot=scripts/aibom-scripts/generate_snapshot.py \
