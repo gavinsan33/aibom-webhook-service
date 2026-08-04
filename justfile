@@ -75,50 +75,73 @@ docker-push-postprocess img="aibom-postprocess:latest":
 _check-auth:
     @oc whoami >/dev/null 2>&1 || { echo "error: not logged in to a cluster — run 'oc login' first" >&2; exit 1; }
 
-# --tag=<tag> sets both the BuildConfig output ImageStreamTag and the Deployment's
-# image reference. Defaults to the short SHA scripts/remote-build-sha.sh resolves
-# (the commit the BuildConfig is actually about to build) for an immutable,
-# rollback-able build — not local HEAD, which can be ahead of, behind, or diverged
-# from what the in-cluster build will clone. Pass e.g. --tag=latest to overwrite a
-# mutable tag in place instead.
+# --version=<sha> is the single source of truth for what gets built and how it's
+# labeled: it sets the BuildConfig output ImageStreamTag, the Deployment's image
+# reference, AND (unless it's "latest") build.gitRef — so the BuildConfig actually
+# checks out and builds that exact commit, instead of always cloning whatever
+# gitRef's branch currently points to regardless of the tag name. That also pins
+# the build to a specific commit rather than the branch tip that could move
+# between resolving the version and the build actually cloning it. Defaults to
+# the short SHA scripts/remote-build-sha.sh resolves (the remote tip of
+# build.gitRef) for an immutable, rollback-able build — not local HEAD, which can
+# be ahead of, behind, or diverged from the remote. --version=latest opts back
+# into the old behavior: a mutable tag, tracking whatever build.gitRef's branch
+# currently is. (Called "version" rather than "tag" since it drives more than
+# just the image tag — it's also a git ref, and "tag" overloads both.)
 #
 # --skip-crds is for accounts without cluster-scoped create/patch permission on the
 # CRD/Namespace: it never touches the Namespace object and skips the aiboms.aibom.io
 # CRD, which must then already exist — a cluster-admin runs
 # `oc apply -f charts/aibom-webhook/crds/aibom-crd.yaml` and creates the namespace once.
 #
-# Install/upgrade the webhook chart. Requires cert-manager already installed in the cluster.
-# Usage: just deploy [--tag=<tag>] [--skip-crds]
+# Install/upgrade the webhook chart, build both images in-cluster from source, and
+# roll out the result. Requires cert-manager already installed in the cluster.
+# Builds every time: a BuildConfig's ConfigChange trigger only fires automatically
+# on its *initial* creation, never on later edits (e.g. a new tag) — so relying on
+# the trigger alone would leave subsequent deploys pointing at an unbuilt tag.
+# Usage: just deploy [--version=<sha>] [--skip-crds]
 [group('deploy')]
 deploy *args: _check-auth
     #!/usr/bin/env bash
     set -euo pipefail
-    tag=""
+    version=""
     skip_crds=false
     for arg in {{ args }}; do
         case "$arg" in
             --skip-crds) skip_crds=true ;;
-            --tag=*) tag="${arg#--tag=}" ;;
-            *) echo "error: unknown argument '$arg' (expected --tag=<tag> or --skip-crds)" >&2; exit 1 ;;
+            --version=*) version="${arg#--version=}" ;;
+            *) echo "error: unknown argument '$arg' (expected --version=<sha> or --skip-crds)" >&2; exit 1 ;;
         esac
     done
-    [ -n "$tag" ] || tag="$(scripts/remote-build-sha.sh)"
+    [ -n "$version" ] || version="$(scripts/remote-build-sha.sh)"
     ns_flag="--create-namespace"
     [ "$skip_crds" = true ] && ns_flag="--skip-crds"
+    gitref_args=()
+    [ "$version" = "latest" ] || gitref_args=(--set "build.gitRef=$version")
+    first_install=false
+    helm status aibom-webhook -n {{ webhook_namespace }} >/dev/null 2>&1 || first_install=true
     helm upgrade --install aibom-webhook charts/aibom-webhook -n {{ webhook_namespace }} "$ns_flag" \
-        --set image.webhook.tag="$tag" --set image.postprocess.tag="$tag"
-
-# Usage: just redeploy [--tag=<tag>] [--skip-crds]
-[group('deploy')]
-redeploy *args: (deploy args) (_rollout)
-
-_rollout: _check-auth
-    oc -n {{ webhook_namespace }} start-build aibom-webhook-service --wait
-    oc -n {{ webhook_namespace }} start-build aibom-postprocess --wait
+        --set image.webhook.tag="$version" --set image.postprocess.tag="$version" "${gitref_args[@]}"
+    if [ "$first_install" = true ]; then
+        # The BuildConfigs' ConfigChange trigger already auto-fired an initial build the
+        # moment they were just created above — starting another would just double build
+        # time. Wait on that auto-triggered build (always numbered -1) instead.
+        echo "first install: waiting on the auto-triggered initial builds instead of starting redundant ones"
+        for bc in aibom-webhook-service aibom-postprocess; do
+            for i in $(seq 1 30); do
+                oc -n {{ webhook_namespace }} get "build/${bc}-1" >/dev/null 2>&1 && break
+                sleep 1
+            done
+            oc -n {{ webhook_namespace }} wait --for=condition=Complete "build/${bc}-1" --timeout=300s
+        done
+    else
+        oc -n {{ webhook_namespace }} start-build aibom-webhook-service --wait
+        oc -n {{ webhook_namespace }} start-build aibom-postprocess --wait
+    fi
     oc -n {{ webhook_namespace }} delete pods -l openshift.io/build.name --field-selector=status.phase==Succeeded
     oc -n {{ webhook_namespace }} rollout restart deployment/aibom-webhook
     oc -n {{ webhook_namespace }} rollout status deployment/aibom-webhook --timeout=120s
-    @echo "NOTE: run 'just setup-namespace <namespace>' for each workload namespace"
+    echo "NOTE: run 'just setup-namespace <namespace>' for each workload namespace"
 
 [group('deploy')]
 [confirm("Uninstall the aibom-webhook release? This removes the webhook, RBAC, and Deployment (the CRD and any AIBOM resources are left in place).")]

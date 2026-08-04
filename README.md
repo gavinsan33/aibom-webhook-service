@@ -72,17 +72,22 @@ just setup-namespace my-ai-workloads
 
 Deployment is a Helm chart (`charts/aibom-webhook`), covering the `aibom-system` namespace, RBAC, cert-manager `Issuer`/`Certificate`, the webhook `Deployment`/`Service`, the `MutatingWebhookConfiguration`, and the OpenShift `BuildConfig`/`ImageStream` pair used to build both images in-cluster from source. `just deploy` requires cert-manager to already be installed in the cluster — it issues the webhook's TLS certificate into the `aibom-webhook-certs` Secret and keeps it renewed automatically (no more manually re-running a script before a 365-day cert expires). The `MutatingWebhookConfiguration`'s CA bundle is kept in sync by cert-manager's cainjector via its `cert-manager.io/inject-ca-from` annotation, rather than being pasted in by hand.
 
-If your account doesn't have cluster-scoped permission to create/patch CustomResourceDefinitions, pass `--skip-crds` — e.g. `just deploy --skip-crds`, or `just redeploy --skip-crds` — to pass `--skip-crds` to Helm and never touch the Namespace object. The `aiboms.aibom.io` CRD (`charts/aibom-webhook/crds/aibom-crd.yaml`) and the namespace must then already exist, created once by a cluster-admin via `oc apply -f charts/aibom-webhook/crds/aibom-crd.yaml` and `oc create namespace aibom-system`.
+`just deploy` always installs/upgrades the chart, builds both images in-cluster from source, and rolls out the result — it doesn't rely on the BuildConfig's `ConfigChange` trigger, which (per OpenShift's own docs) only fires automatically the *first* time a BuildConfig is created, never on later edits like a new output tag. If it only patched the chart and left triggering the build to that trigger, every deploy after the first would silently leave the Deployment pointing at a tag nothing had built yet (`ImagePullBackOff`). On a brand-new namespace, `deploy` detects that this is the first install (`helm status` finds no existing release) and waits on that auto-triggered build instead of also starting its own — starting a second, redundant build on top of the trigger's would just double the build time on that first deploy. Either way, expect a brief `ErrImagePull`/`ImagePullBackOff` on the pod while the build catches up to the Deployment's image reference — it resolves on its own once the image is pushed.
 
-`deploy`/`redeploy` tag both images with the short SHA of the commit the BuildConfig is actually about to build — the tip of `build.gitRepo`/`build.gitRef` (resolved by `scripts/remote-build-sha.sh`, which mirrors `charts/aibom-webhook/values.yaml`'s defaults), fetched via `git ls-remote`, not your local `HEAD`. This matters because local `HEAD` can be ahead of, behind, or diverged from what the in-cluster build actually clones (e.g. unpushed commits); tagging by the remote SHA keeps the tag an accurate description of what's inside the image, and each build lands on its own ImageStreamTag instead of overwriting a shared one — you can roll back by re-pointing the Deployment at an older tag (`just deploy --tag=<older-sha>`). Pass `--tag=latest` to opt back into overwriting a mutable tag in place:
+If your account doesn't have cluster-scoped permission to create/patch CustomResourceDefinitions, pass `--skip-crds` — e.g. `just deploy --skip-crds` — to pass `--skip-crds` to Helm and never touch the Namespace object. The `aiboms.aibom.io` CRD (`charts/aibom-webhook/crds/aibom-crd.yaml`) and the namespace must then already exist, created once by a cluster-admin via `oc apply -f charts/aibom-webhook/crds/aibom-crd.yaml` and `oc create namespace aibom-system`.
+
+`--version` is the single source of truth for what `just deploy` builds and how it's labeled: it sets the BuildConfig output ImageStreamTag, the Deployment's image reference, and (unless it's `latest`) `build.gitRef` — so the BuildConfig actually checks out and builds that exact commit, instead of always building whatever `build.gitRef`'s branch currently points to regardless of the tag name. Defaults to the short SHA `scripts/remote-build-sha.sh` resolves (the remote tip of `build.gitRepo`/`build.gitRef`, mirroring `charts/aibom-webhook/values.yaml`'s defaults) via `git ls-remote`, not your local `HEAD` — local `HEAD` can be ahead of, behind, or diverged from the remote (e.g. unpushed commits), and pinning `build.gitRef` to the resolved SHA also closes a race where the branch tip could otherwise move between resolving the tag and the build actually cloning it. Each build lands on its own ImageStreamTag instead of overwriting a shared one, so you can roll back with `just deploy --version=<older-sha>` — it rebuilds that exact historical commit rather than relabeling whatever's currently on the branch. Pass `--version=latest` to opt back into the old behavior: a mutable tag that always tracks `build.gitRef`'s branch tip. The resolved value also lands on the Deployment as the `app.kubernetes.io/version` label, so `oc get deployment aibom-webhook -o jsonpath='{.metadata.labels.app\.kubernetes\.io/version}'` tells you exactly what's actually running:
 
 ```bash
 # Build both images in-cluster from source (default: charts/aibom-webhook/values.yaml build.gitRepo/gitRef),
-# tagged with the short SHA of that ref's current remote tip
+# tagged with the short SHA of that ref's current remote tip, and roll out the result
 just deploy
 
 # Or, overwrite the "latest" tag in place instead of using the resolved commit SHA
-just deploy --tag=latest
+just deploy --version=latest
+
+# Roll back: rebuilds and redeploys that exact historical commit
+just deploy --version=<older-sha>
 
 # Or, to use externally built/pushed images instead of the in-cluster BuildConfig:
 helm upgrade --install aibom-webhook charts/aibom-webhook \
@@ -91,9 +96,6 @@ helm upgrade --install aibom-webhook charts/aibom-webhook \
   --set image.webhook.tag=latest \
   --set image.postprocess.repository=quay.io/<your-org>/aibom-postprocess \
   --set image.postprocess.tag=latest
-
-# Rebuild both images from source (tagged with the remote's current SHA) and roll out the new build
-just redeploy
 
 # Set up a workload namespace (label, image pull access, scripts ConfigMap)
 just setup-namespace my-ai-workloads
@@ -162,7 +164,7 @@ postprocess/
   Dockerfile                        # Postprocess container image; also COPYs in scripts/aibom-scripts/k8s_api.py
 charts/
   aibom-webhook/                    # Cluster-level install: namespace, CRD, RBAC, certs, Deployment/Service,
-    crds/aibom-crd.yaml               # webhook config, OpenShift BuildConfig/ImageStream (just deploy/redeploy/undeploy)
+    crds/aibom-crd.yaml               # webhook config, OpenShift BuildConfig/ImageStream (just deploy/undeploy)
     templates/
       serviceaccount.yaml
       clusterrole.yaml
@@ -178,7 +180,7 @@ charts/
       scripts-configmap.yaml
 scripts/
   generate-certs.sh                 # Self-signed TLS cert generation for local dev only (cluster deploy uses cert-manager)
-  remote-build-sha.sh                # Resolves the short SHA `just deploy`/`redeploy` tag with (justfile helper)
+  remote-build-sha.sh                # Resolves the short SHA `just deploy`'s --version defaults to (justfile helper)
   aibom-scripts/
     generate_snapshot.py             # Hardware discovery script (from coldpress)
     runtime_detector.py               # Dataset detection + training runtime hooks (from coldpress)
