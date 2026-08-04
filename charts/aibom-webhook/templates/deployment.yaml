@@ -5,6 +5,7 @@ metadata:
   namespace: {{ include "aibom-webhook.namespace" . }}
   labels:
     app: aibom-webhook
+    app.kubernetes.io/version: {{ .Values.image.webhook.tag | quote }}
 spec:
   replicas: {{ .Values.replicaCount }}
   strategy:
@@ -16,6 +17,7 @@ spec:
     metadata:
       labels:
         app: aibom-webhook
+        app.kubernetes.io/version: {{ .Values.image.webhook.tag | quote }}
     spec:
       serviceAccountName: aibom-webhook
       securityContext:
