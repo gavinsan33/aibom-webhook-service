@@ -1,7 +1,7 @@
 {{- /*
 Output tags are driven by image.*.tag rather than hardcoded "latest" so a build's
 output lands on the same ImageStreamTag that templates/deployment.yaml pulls from —
-tagging both with a commit SHA (see Makefile IMAGE_TAG) keeps every build immutable
+tagging both with a commit SHA (see justfile `tag` recipe arg) keeps every build immutable
 and rollback-able instead of always overwriting one mutable "latest" tag in place.
 */ -}}
 {{- if .Values.build.enabled }}

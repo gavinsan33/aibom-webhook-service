@@ -9,7 +9,7 @@
 # cert-manager.io/inject-ca-from annotation, instead of being pasted in by hand.
 #
 # scripts/generate-certs.sh is unchanged and still used for local dev
-# (`make run`), which never touches a cluster.
+# (`just run`), which never touches a cluster.
 apiVersion: cert-manager.io/v1
 kind: Issuer
 metadata:
