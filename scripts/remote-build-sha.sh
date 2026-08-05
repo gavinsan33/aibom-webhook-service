@@ -11,6 +11,4 @@ VALUES_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/charts/aibom-webho
 REPO="$(grep -m1 '^\s*gitRepo:' "${VALUES_FILE}" | sed 's/^\s*gitRepo:\s*//')"
 REF="$(grep -m1 '^\s*gitRef:' "${VALUES_FILE}" | sed 's/^\s*gitRef:\s*//')"
 
-# git ls-remote "${REPO}" "${REF}" | cut -c1-7
-echo $REPO
-echo $REF
+git ls-remote "${REPO}" "${REF}" | cut -c1-7
