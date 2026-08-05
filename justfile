@@ -160,9 +160,15 @@ undeploy: _check-auth
 # aibom-workload-namespace chart.
 #
 # Opt an existing namespace into webhook instrumentation by labeling it aibom.io/enabled=true.
+# Pass skip_label=true to leave the namespace label alone (e.g. it's already labeled, or
+# labeling is managed elsewhere).
 [group('deploy')]
-setup-namespace namespace: _check-auth
-    oc label namespace {{ namespace }} aibom.io/enabled=true --overwrite
+setup-namespace namespace skip_label="false": _check-auth
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ "{{ skip_label }}" != "true" ]; then
+        oc label namespace {{ namespace }} aibom.io/enabled=true --overwrite
+    fi
     helm upgrade --install aibom-ns-{{ namespace }} charts/aibom-workload-namespace -n {{ namespace }} \
         --set-file scripts.generateSnapshot=scripts/aibom-scripts/generate_snapshot.py \
         --set-file scripts.runtimeDetector=scripts/aibom-scripts/runtime_detector.py \
