@@ -25,59 +25,80 @@ Bare/ReplicaSet-owned pods (no `batch.kubernetes.io/job-name` label) that carry 
 
 - Go 1.22+
 - An OpenShift cluster (for deployment)
-- [cert-manager](https://cert-manager.io/) installed in the cluster (for deployment — issues and auto-renews the webhook's TLS certificate; see `deploy/certificates.yaml`)
+- `helm` 3.x
+- [`just`](https://github.com/casey/just) (task runner — everything below runs through it). Don't have it? Run `make install-just` (uses `brew`/`cargo` if available, otherwise the official install script). Then run `just` with no arguments to list all recipes.
+- [cert-manager](https://cert-manager.io/) installed in the cluster (for deployment — issues and auto-renews the webhook's TLS certificate; see `charts/aibom-webhook/templates/certificates.yaml`)
 - `openssl` (for local-dev TLS cert generation only — see `scripts/generate-certs.sh`)
 
 ## Quick Start
 
 ```bash
 # Build
-make build
+just build
 
-# Run Go tests
-make test
+# Run all tests (Go + Python)
+just test
 
-# Run Python tests (postprocess.py, runtime_detector.py)
-make test-python
+# Or run just one suite
+just test go
+just test python   # postprocess.py, runtime_detector.py
 
-# Generate self-signed TLS certs (for local dev, adds localhost to SAN)
-./scripts/generate-certs.sh --local
+# Generate self-signed TLS certs for local dev
+./scripts/generate-certs.sh
 
 # Run locally
-make run
+just run
 ```
 
 ## Workload Namespace Setup
 
-Each namespace that runs instrumented workloads needs the `aibom.io/enabled` label, image pull access to `aibom-system`, the `aibom-scripts` ConfigMap, and RBAC letting workload pods and the postprocess Job write their own data directly via the Kubernetes API. A single command handles all of it:
+Each namespace that runs instrumented workloads needs the `aibom.io/enabled` label, image pull access to `aibom-system`, the `aibom-scripts` ConfigMap, and RBAC letting workload pods and the postprocess Job write their own data directly via the Kubernetes API. The namespace itself must already exist; a single command handles the rest:
 
 ```bash
-make setup-namespace NAMESPACE=my-ai-workloads
+just setup-namespace my-ai-workloads
 ```
 
-This runs:
-1. `oc label namespace ... aibom.io/enabled=true` — opts the namespace into webhook instrumentation
-2. `oc policy add-role-to-group system:image-puller ...` — allows pods to pull the postprocess image from `aibom-system`
-3. Creates the `aibom-scripts` ConfigMap with the discovery script, dataset detector, and the shared `k8s_api.py` in-cluster REST helper both of them use
-4. Creates the `aibom-postprocess` ServiceAccount + Role/RoleBinding, granting `create`/`get` on `aiboms.aibom.io` scoped to this namespace — the postprocess Job uses this to create the AIBOM custom resource directly
-5. Creates the `aibom-workload-data` Role/RoleBinding, granting `create`/`get`/`patch` on `configmaps` (scoped to this namespace) to every ServiceAccount in the namespace — instrumented workload pods use this to write their discovery/dataset data directly into the per-workload data ConfigMap
+`just setup-namespace`:
+1. Labels the namespace `aibom.io/enabled=true` — opts it into webhook instrumentation
+2. Runs `helm upgrade --install aibom-ns-<namespace> charts/aibom-workload-namespace -n <namespace>`, which:
+   - Creates a RoleBinding in `aibom-system` granting `system:image-puller` to `system:serviceaccounts:<namespace>` — allows pods in this namespace to pull the postprocess image
+   - Creates the `aibom-scripts` ConfigMap with the discovery script, dataset detector, and the shared `k8s_api.py` in-cluster REST helper both of them use — the contents are read from `scripts/aibom-scripts/*.py` at install time via `--set-file`
+   - Creates the `aibom-postprocess` ServiceAccount + Role/RoleBinding, granting `create`/`get` on `aiboms.aibom.io` scoped to this namespace — the postprocess Job uses this to create the AIBOM custom resource directly
+   - Creates the `aibom-workload-data` Role/RoleBinding, granting `create`/`get`/`patch` on `configmaps` (scoped to this namespace) to every ServiceAccount in the namespace — instrumented workload pods use this to write their discovery/dataset data directly into the per-workload data ConfigMap
 
-**Upgrading an existing namespace**: if you set up a namespace before this RBAC/direct-write model existed, re-run `make setup-namespace NAMESPACE=<ns>` — it's idempotent. This matters more than it sounds: the dataset detector hook mounts `k8s_api.py` via a `subPath` volume mount, so a stale `aibom-scripts` ConfigMap missing that key will fail *pod startup* for every instrumented workload in that namespace, not just silently skip dataset detection.
+**Upgrading an existing namespace**: if you set up a namespace before this RBAC/direct-write model existed, or `scripts/aibom-scripts/*.py` has changed, re-run `just setup-namespace <ns>` — `helm upgrade --install` is idempotent. This matters more than it sounds: the dataset detector hook mounts `k8s_api.py` via a `subPath` volume mount, so a stale `aibom-scripts` ConfigMap missing that key will fail *pod startup* for every instrumented workload in that namespace, not just silently skip dataset detection.
 
 ## Cluster Deployment
 
-`make deploy` applies `deploy/certificates.yaml`, which requires cert-manager to already be installed in the cluster — it issues the webhook's TLS certificate into the `aibom-webhook-certs` Secret and keeps it renewed automatically (no more manually re-running a script before a 365-day cert expires). `deploy/webhook-config.yaml`'s CA bundle is kept in sync by cert-manager's cainjector via its `cert-manager.io/inject-ca-from` annotation, rather than being pasted in by hand.
+Deployment is a Helm chart (`charts/aibom-webhook`), covering the `aibom-system` namespace, RBAC, cert-manager `Issuer`/`Certificate`, the webhook `Deployment`/`Service`, the `MutatingWebhookConfiguration`, and the OpenShift `BuildConfig`/`ImageStream` pair used to build both images in-cluster from source. `just deploy` requires cert-manager to already be installed in the cluster — it issues the webhook's TLS certificate into the `aibom-webhook-certs` Secret and keeps it renewed automatically (no more manually re-running a script before a 365-day cert expires). The `MutatingWebhookConfiguration`'s CA bundle is kept in sync by cert-manager's cainjector via its `cert-manager.io/inject-ca-from` annotation, rather than being pasted in by hand.
+
+`just deploy` always installs/upgrades the chart, builds both images in-cluster from source, and rolls out the result — it doesn't rely on the BuildConfig's `ConfigChange` trigger, which (per OpenShift's own docs) only fires automatically the *first* time a BuildConfig is created, never on later edits like a new output tag. If it only patched the chart and left triggering the build to that trigger, every deploy after the first would silently leave the Deployment pointing at a tag nothing had built yet (`ImagePullBackOff`). On a brand-new namespace, `deploy` detects that this is the first install (`helm status` finds no existing release) and waits on that auto-triggered build instead of also starting its own — starting a second, redundant build on top of the trigger's would just double the build time on that first deploy. Either way, expect a brief `ErrImagePull`/`ImagePullBackOff` on the pod while the build catches up to the Deployment's image reference — it resolves on its own once the image is pushed.
+
+If your account doesn't have cluster-scoped permission to create/patch CustomResourceDefinitions, pass `--skip-crds` — e.g. `just deploy --skip-crds` — to pass `--skip-crds` to Helm and never touch the Namespace object. The `aiboms.aibom.io` CRD (`charts/aibom-webhook/crds/aibom-crd.yaml`) and the namespace must then already exist, created once by a cluster-admin via `oc apply -f charts/aibom-webhook/crds/aibom-crd.yaml` and `oc create namespace aibom-system`.
+
+`--version` is the single source of truth for what `just deploy` builds and how it's labeled: it sets the BuildConfig output ImageStreamTag, the Deployment's image reference, and (unless it's `latest`) `build.gitRef` — so the BuildConfig actually checks out and builds that exact commit, instead of always building whatever `build.gitRef`'s branch currently points to regardless of the tag name. Defaults to the short SHA `scripts/remote-build-sha.sh` resolves (the remote tip of `build.gitRepo`/`build.gitRef`, read straight out of `charts/aibom-webhook/values.yaml` rather than a second hardcoded copy) via `git ls-remote`, not your local `HEAD` — local `HEAD` can be ahead of, behind, or diverged from the remote (e.g. unpushed commits), and pinning `build.gitRef` to the resolved SHA also closes a race where the branch tip could otherwise move between resolving the tag and the build actually cloning it. Each build lands on its own ImageStreamTag instead of overwriting a shared one, so you can roll back with `just deploy --version=<older-sha>` — it rebuilds that exact historical commit rather than relabeling whatever's currently on the branch. Pass `--version=latest` to opt back into the old behavior: a mutable tag that always tracks `build.gitRef`'s branch tip. The resolved value also lands on the Deployment as the `app.kubernetes.io/version` label, so `oc get deployment aibom-webhook -o jsonpath='{.metadata.labels.app\.kubernetes\.io/version}'` tells you exactly what's actually running:
 
 ```bash
-# Build and push the container image
-make docker-build IMG=quay.io/<your-org>/aibom-webhook-service:latest
-make docker-push IMG=quay.io/<your-org>/aibom-webhook-service:latest
+# Build both images in-cluster from source (default: charts/aibom-webhook/values.yaml build.gitRepo/gitRef),
+# tagged with the short SHA of that ref's current remote tip, and roll out the result
+just deploy
 
-# Update the image in deploy/deployment.yaml, then deploy
-make deploy
+# Or, overwrite the "latest" tag in place instead of using the resolved commit SHA
+just deploy --version=latest
+
+# Roll back: rebuilds and redeploys that exact historical commit
+just deploy --version=<older-sha>
+
+# Or, to use externally built/pushed images instead of the in-cluster BuildConfig:
+helm upgrade --install aibom-webhook charts/aibom-webhook \
+  --set build.enabled=false \
+  --set image.webhook.repository=quay.io/<your-org>/aibom-webhook-service \
+  --set image.webhook.tag=latest \
+  --set image.postprocess.repository=quay.io/<your-org>/aibom-postprocess \
+  --set image.postprocess.tag=latest
 
 # Set up a workload namespace (label, image pull access, scripts ConfigMap)
-make setup-namespace NAMESPACE=my-ai-workloads
+just setup-namespace my-ai-workloads
 
 # Verify: submit a Job, check the pod for the init container
 oc get pod <pod-name> -n my-ai-workloads -o jsonpath='{.spec.initContainers[*].name}'
@@ -88,11 +109,13 @@ oc get pod <pod-name> -n my-ai-workloads -o jsonpath='{.spec.containers[0].env[*
 # Should include: AIBOM_DATASET_DETECT AIBOM_DEBUG AIBOM_DATASET_OUTPUT PYTHONPATH
 ```
 
+To remove the deployment: `just undeploy` (runs `helm uninstall aibom-webhook`, after a confirmation prompt). The CRD lives in `charts/aibom-webhook/crds/` — Helm installs CRDs once but never upgrades or removes them automatically, so schema changes to `aiboms.aibom.io` need a manual `oc apply -f charts/aibom-webhook/crds/aibom-crd.yaml`, and `helm uninstall` leaves the CRD (and any AIBOM custom resources) in place.
+
 ## Local Testing (without a cluster)
 
 ```bash
 # Start the server
-make run
+just run
 
 # In another terminal, send a test admission review
 curl -sk -X POST https://localhost:8443/mutate \
@@ -139,17 +162,25 @@ internal/
 postprocess/
   postprocess.py                    # AIBOM compiler; creates the AIBOM CR directly (runs in postprocess Job)
   Dockerfile                        # Postprocess container image; also COPYs in scripts/aibom-scripts/k8s_api.py
-deploy/
-  namespace.yaml                    # aibom-system namespace
-  rbac.yaml                         # ServiceAccount, ClusterRole, ClusterRoleBinding
-  deployment.yaml                   # Deployment + Service
-  build.yaml                        # OpenShift BuildConfig + ImageStream
-  webhook-config.yaml               # MutatingWebhookConfiguration
-  certificates.yaml                 # cert-manager Issuer + Certificate for the webhook's TLS cert
-  aibom-scripts-configmap.yaml      # Reference manifest for the scripts ConfigMap
-  aibom-crd.yaml                    # AIBOM CustomResourceDefinition
+charts/
+  aibom-webhook/                    # Cluster-level install: namespace, CRD, RBAC, certs, Deployment/Service,
+    crds/aibom-crd.yaml               # webhook config, OpenShift BuildConfig/ImageStream (just deploy/undeploy)
+    templates/
+      serviceaccount.yaml
+      clusterrole.yaml
+      clusterrolebinding.yaml
+      certificates.yaml             # cert-manager Issuer + Certificate
+      deployment.yaml                # Deployment + Service
+      webhook-configuration.yaml
+      build.yaml                    # OpenShift BuildConfig + ImageStream
+  aibom-workload-namespace/         # Per-namespace install: RBAC + scripts ConfigMap (just setup-namespace)
+    templates/
+      serviceaccount.yaml
+      rbac.yaml
+      scripts-configmap.yaml
 scripts/
   generate-certs.sh                 # Self-signed TLS cert generation for local dev only (cluster deploy uses cert-manager)
+  remote-build-sha.sh                # Resolves the short SHA `just deploy`'s --version defaults to (justfile helper)
   aibom-scripts/
     generate_snapshot.py             # Hardware discovery script (from coldpress)
     runtime_detector.py               # Dataset detection + training runtime hooks (from coldpress)
@@ -166,7 +197,8 @@ tests/
 pyproject.toml                      # pytest config (pythonpath into postprocess/ and scripts/aibom-scripts/)
 requirements-dev.txt                # Test-only deps (pytest, pyyaml) — production scripts stay dependency-free
 Dockerfile                          # Multi-stage build (distroless)
-Makefile                            # Build, test, deploy targets (make test, make test-python)
+justfile                            # Build, test, deploy recipes (just test, just test go, just test python)
+Makefile                            # Bootstrap only: `make install-just` installs the just task runner
 ```
 
 ## Configuration
@@ -352,7 +384,7 @@ oc create secret generic aibom-config \
 
 ### AIBOM Storage
 
-Completed AIBOMs are stored as namespaced `AIBOM` custom resources (`aiboms.aibom.io`, `deploy/aibom-crd.yaml`) — one per completed workload, created in the same namespace the workload ran in. The CRD is registered by `make deploy`; nothing further needs to be set up per namespace to enable collection.
+Completed AIBOMs are stored as namespaced `AIBOM` custom resources (`aiboms.aibom.io`, `charts/aibom-webhook/crds/aibom-crd.yaml`) — one per completed workload, created in the same namespace the workload ran in. `just deploy` registers the CRD; if your account lacks CRD permissions, use `just deploy --skip-crds` instead and have a cluster-admin apply it once via `oc apply -f charts/aibom-webhook/crds/aibom-crd.yaml`. Nothing further needs to be set up per namespace to enable collection.
 
 Because `AIBOM` is a namespaced resource, it inherits ordinary Kubernetes RBAC: a user granted `get`/`list` on `aiboms` in namespace `team-a` cannot see `team-b`'s AIBOMs, without any extra code in this project — the same Role/RoleBinding mechanism admins already use for Pods and Jobs applies here.
 
@@ -371,4 +403,4 @@ oc get aibom train-job-abc123 -n gavin-test -o yaml
 - **Phase 1** (complete): Webhook with placeholder discovery init container
 - **Phase 2** (complete): Real hardware discovery + dataset detector injection
 - **Phase 3** (complete): Job watcher + real postprocess container for AIBOM compilation
-- **Phase 4** (in progress): Production hardening — AIBOM storage (complete), cert-manager TLS (complete), securityContext + RBAC least-privilege (complete), Helm chart, metrics endpoint
+- **Phase 4** (complete): Production hardening — AIBOM storage, cert-manager TLS, securityContext + RBAC least-privilege, Helm chart

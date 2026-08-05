@@ -1,0 +1,6 @@
+apiVersion: v2
+name: aibom-workload-namespace
+description: Per-namespace RBAC and scripts ConfigMap for AIBOM-instrumented workload namespaces
+type: application
+version: 0.1.0
+appVersion: "latest"

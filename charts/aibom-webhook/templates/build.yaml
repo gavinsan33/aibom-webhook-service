@@ -1,0 +1,63 @@
+{{- /*
+Output tags are driven by image.*.tag rather than hardcoded "latest" so a build's
+output lands on the same ImageStreamTag that templates/deployment.yaml pulls from —
+tagging both with a commit SHA (see justfile `tag` recipe arg) keeps every build immutable
+and rollback-able instead of always overwriting one mutable "latest" tag in place.
+*/ -}}
+{{- if .Values.build.enabled }}
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: aibom-webhook-service
+  namespace: {{ include "aibom-webhook.namespace" . }}
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: aibom-webhook-service
+  namespace: {{ include "aibom-webhook.namespace" . }}
+spec:
+  source:
+    type: Git
+    git:
+      uri: {{ .Values.build.gitRepo }}
+      ref: {{ .Values.build.gitRef }}
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: Dockerfile
+  output:
+    to:
+      kind: ImageStreamTag
+      name: aibom-webhook-service:{{ .Values.image.webhook.tag }}
+  triggers:
+    - type: ConfigChange
+---
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: aibom-postprocess
+  namespace: {{ include "aibom-webhook.namespace" . }}
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: aibom-postprocess
+  namespace: {{ include "aibom-webhook.namespace" . }}
+spec:
+  source:
+    type: Git
+    git:
+      uri: {{ .Values.build.gitRepo }}
+      ref: {{ .Values.build.gitRef }}
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: postprocess/Dockerfile
+  output:
+    to:
+      kind: ImageStreamTag
+      name: aibom-postprocess:{{ .Values.image.postprocess.tag }}
+  triggers:
+    - type: ConfigChange
+{{- end }}
