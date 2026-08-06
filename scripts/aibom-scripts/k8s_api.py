@@ -77,3 +77,18 @@ def create_custom_object(namespace, group, version, plural, body):
     """POST a namespaced custom resource, e.g. an AIBOM (aibom.io/v1alpha1)."""
     path = f"/apis/{group}/{version}/namespaces/{namespace}/{plural}"
     return _request("POST", path, body=body)
+
+
+def get_custom_object(namespace, group, version, plural, name):
+    """GET a namespaced custom resource, e.g. a KServe InferenceService
+    (serving.kserve.io/v1beta1). Returns None if it doesn't exist (or has
+    already been deleted) rather than raising, since callers use this for
+    best-effort enrichment, not anything that should fail the caller outright.
+    """
+    path = f"/apis/{group}/{version}/namespaces/{namespace}/{plural}/{name}"
+    try:
+        return _request("GET", path)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None
+        raise

@@ -14,23 +14,11 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 )
-
-// inferenceServiceGVR identifies the KServe InferenceService resource. A
-// dynamic client is used to read it rather than adding a generated KServe
-// client dependency, since this is the only place that needs it.
-var inferenceServiceGVR = schema.GroupVersionResource{
-	Group:    "serving.kserve.io",
-	Version:  "v1beta1",
-	Resource: "inferenceservices",
-}
 
 const (
 	LabelEnabled             = "aibom.io/enabled"
@@ -60,7 +48,6 @@ const (
 
 type Watcher struct {
 	clientset        kubernetes.Interface
-	dynamicClient    dynamic.Interface
 	postprocessImage string
 	factory          informers.SharedInformerFactory
 	// podFactory is a separate, server-side label-selector-scoped factory for the Pod
@@ -72,15 +59,9 @@ type Watcher struct {
 	podFactory informers.SharedInformerFactory
 }
 
-// New builds a Watcher. dynamicClient may be nil, in which case
-// storage.key/path-based model detection for KServe InferenceServices is
-// skipped (the pod is still postprocessed, just without resolved model
-// identity) — callers that can't build a dynamic client can pass nil rather
-// than disabling the watcher entirely.
-func New(clientset kubernetes.Interface, dynamicClient dynamic.Interface, postprocessImage string) *Watcher {
+func New(clientset kubernetes.Interface, postprocessImage string) *Watcher {
 	w := &Watcher{
 		clientset:        clientset,
-		dynamicClient:    dynamicClient,
 		postprocessImage: postprocessImage,
 		factory:          informers.NewSharedInformerFactory(clientset, resyncPeriod),
 		podFactory: informers.NewSharedInformerFactoryWithOptions(
@@ -411,18 +392,22 @@ func (w *Watcher) getInstrumentedPods(job *batchv1.Job) ([]corev1.Pod, error) {
 }
 
 // extractDataFromPod reads a pod's contribution to the AIBOM data ConfigMap.
-// Both discovery and dataset data are written directly into dataCM by the
-// aibom-discovery init container and the app container's runtime-detector
-// hook respectively (keyed "discovery-<pod-name>.json"/"dataset-<pod-name>.json")
+// Discovery, dataset, and storage data are all written directly into dataCM
+// by the aibom-discovery init container (discovery and, for a KServe
+// predictor backed by an S3/MinIO data-connection bucket, storage — see
+// generate_snapshot.py's resolve_inference_service_storage) and the app
+// container's runtime-detector hook (dataset), keyed
+// "discovery-<pod-name>.json"/"dataset-<pod-name>.json"/"storage-<pod-name>.json"
 // rather than scraped from logs — dataCM is nil if the ConfigMap doesn't exist
-// yet (e.g. neither has run/flushed yet).
-func extractDataFromPod(pod *corev1.Pod, dataCM *corev1.ConfigMap) (discoveryJSON, datasetJSON string) {
+// yet (e.g. none of them have run/flushed yet).
+func extractDataFromPod(pod *corev1.Pod, dataCM *corev1.ConfigMap) (discoveryJSON, datasetJSON, storageJSON string) {
 	if dataCM != nil {
 		discoveryJSON = dataCM.Data[fmt.Sprintf("discovery-%s.json", pod.Name)]
 		datasetJSON = dataCM.Data[fmt.Sprintf("dataset-%s.json", pod.Name)]
+		storageJSON = dataCM.Data[fmt.Sprintf("storage-%s.json", pod.Name)]
 	}
 
-	return discoveryJSON, datasetJSON
+	return discoveryJSON, datasetJSON, storageJSON
 }
 
 // collectAIBOMAnnotations returns annotations with the aibom.io/ prefix stripped,
@@ -432,7 +417,7 @@ func collectAIBOMAnnotations(annotations map[string]string) map[string]string {
 	for key, value := range annotations {
 		if strings.HasPrefix(key, annotationPrefix) {
 			stripped := strings.TrimPrefix(key, annotationPrefix)
-			if stripped != "" && stripped != "instrumented" && stripped != "instrumented-by" && stripped != "postprocess-job" {
+			if stripped != "" && stripped != "instrumented" && stripped != "instrumented-by" && stripped != "postprocess-job" && stripped != "storage-info" {
 				result[stripped] = value
 			}
 		}
@@ -553,71 +538,9 @@ func mergeDatasets(datasets []string) string {
 	return string(bytes)
 }
 
-// resolveInferenceServiceStorage looks up the storage.key/storage.path (or
-// storageUri) declared on the KServe InferenceService owning any of the given
-// pods, so postprocess.py can identify a model served straight from an
-// S3/MinIO data-connection bucket — these pods run a built-in serving-runtime
-// container with a fixed --model=/mnt/models mount, so there's no CLI arg to
-// parse for the real model identity; it only exists on the InferenceService.
-//
-// Returns "{}" if no pod is a KServe predictor, no dynamic client was
-// configured, or the lookup fails for any reason — model detection falls back
-// to the existing CLI-arg parsing in that case, it just won't identify the
-// model for this deployment pattern.
-func (w *Watcher) resolveInferenceServiceStorage(ctx context.Context, namespace string, pods []corev1.Pod) string {
-	const empty = "{}"
-
-	if w.dynamicClient == nil {
-		return empty
-	}
-
-	var isvcName string
-	for _, pod := range pods {
-		if name := pod.Labels[aibomdata.LabelKServeInferenceService]; name != "" {
-			isvcName = name
-			break
-		}
-	}
-	if isvcName == "" {
-		return empty
-	}
-
-	obj, err := w.dynamicClient.Resource(inferenceServiceGVR).Namespace(namespace).Get(ctx, isvcName, metav1.GetOptions{})
-	if err != nil {
-		log.Printf("warning: could not get InferenceService %s/%s: %v", namespace, isvcName, err)
-		return empty
-	}
-
-	path, _, _ := unstructured.NestedString(obj.Object, "spec", "predictor", "model", "storage", "path")
-	storageKey, _, _ := unstructured.NestedString(obj.Object, "spec", "predictor", "model", "storage", "key")
-	storageURI, _, _ := unstructured.NestedString(obj.Object, "spec", "predictor", "model", "storageUri")
-
-	if path == "" && storageURI == "" {
-		return empty
-	}
-
-	result := map[string]string{"inference_service": isvcName}
-	if path != "" {
-		result["storage_path"] = path
-	}
-	if storageKey != "" {
-		result["storage_key"] = storageKey
-	}
-	if storageURI != "" {
-		result["storage_uri"] = storageURI
-	}
-
-	raw, err := json.Marshal(result)
-	if err != nil {
-		return empty
-	}
-	return string(raw)
-}
-
-// buildPostprocessInputs reads the discovery data the pods themselves already
-// wrote into the data ConfigMap, extracts dataset JSON from pod logs (still
-// log-scraped for now), and serializes container command/args info for model
-// detection.
+// buildPostprocessInputs reads the discovery, dataset, and storage data the
+// pods themselves already wrote into the data ConfigMap, and serializes
+// container command/args info for CLI-based model detection.
 func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configMapName string, pods []corev1.Pod) (discoveries, datasets []string, containersJSON, storageJSON string) {
 	dataCM, err := w.clientset.CoreV1().ConfigMaps(namespace).Get(ctx, configMapName, metav1.GetOptions{})
 	if err != nil {
@@ -628,9 +551,15 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 	}
 
 	for _, pod := range pods {
-		disc, ds := extractDataFromPod(&pod, dataCM)
+		disc, ds, storage := extractDataFromPod(&pod, dataCM)
 		discoveries = append(discoveries, disc)
 		datasets = append(datasets, ds)
+		if storageJSON == "" && storage != "" {
+			storageJSON = storage
+		}
+	}
+	if storageJSON == "" {
+		storageJSON = "{}"
 	}
 
 	type containerInfo struct {
@@ -653,7 +582,6 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 		}
 	}
 	raw, _ := json.Marshal(containers)
-	storageJSON = w.resolveInferenceServiceStorage(ctx, namespace, pods)
 	return discoveries, datasets, string(raw), storageJSON
 }
 

@@ -169,19 +169,32 @@ func requestsGPU(pod *corev1.Pod) bool {
 }
 
 func (m *Mutator) buildDiscoveryInitContainer(pod *corev1.Pod) corev1.Container {
+	env := []corev1.EnvVar{
+		downwardAPIEnv("POD_NAME", "metadata.name"),
+		downwardAPIEnv("POD_UID", "metadata.uid"),
+		downwardAPIEnv("POD_NAMESPACE", "metadata.namespace"),
+		downwardAPIEnv("POD_IP", "status.podIP"),
+		downwardAPIEnv("NODE_NAME", "spec.nodeName"),
+		{Name: "AIBOM_DATA_CONFIGMAP", Value: aibomdata.ConfigMapName(triggerName(pod))},
+	}
+	// Only pods KServe itself already labeled as a predictor get this one —
+	// a single-field label downward API reference fails pod admission
+	// outright if the referenced label isn't present on the pod, so this
+	// can't be added unconditionally for every workload kind (Job/JobSet/
+	// PyTorchJob/RayJob pods have no such label).
+	if pod.Labels[aibomdata.LabelKServeInferenceService] != "" {
+		env = append(env, downwardAPIEnv(
+			"INFERENCESERVICE_NAME",
+			fmt.Sprintf("metadata.labels['%s']", aibomdata.LabelKServeInferenceService),
+		))
+	}
+
 	c := corev1.Container{
 		Name:    "aibom-discovery",
 		Image:   m.DiscoveryImage,
 		Command: []string{"/bin/bash", "-c"},
 		Args:    []string{"python3 /scripts/generate_snapshot.py"},
-		Env: []corev1.EnvVar{
-			downwardAPIEnv("POD_NAME", "metadata.name"),
-			downwardAPIEnv("POD_UID", "metadata.uid"),
-			downwardAPIEnv("POD_NAMESPACE", "metadata.namespace"),
-			downwardAPIEnv("POD_IP", "status.podIP"),
-			downwardAPIEnv("NODE_NAME", "spec.nodeName"),
-			{Name: "AIBOM_DATA_CONFIGMAP", Value: aibomdata.ConfigMapName(triggerName(pod))},
-		},
+		Env:     env,
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: "aibom-data", MountPath: "/tmp/result"},
 			{Name: "aibom-scripts", MountPath: "/scripts", ReadOnly: true},

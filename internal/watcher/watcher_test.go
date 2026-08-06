@@ -3,6 +3,7 @@ package watcher
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -13,9 +14,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
-	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
 )
 
@@ -113,74 +111,6 @@ func TestShouldPostprocessPod_NoQualifyingSignal(t *testing.T) {
 
 	if shouldPostprocessPod(pod) {
 		t.Error("expected pod with no GPU request or annotations to be skipped")
-	}
-}
-
-func newUnstructuredInferenceService(namespace, name string, spec map[string]interface{}) *unstructured.Unstructured {
-	return &unstructured.Unstructured{
-		Object: map[string]interface{}{
-			"apiVersion": "serving.kserve.io/v1beta1",
-			"kind":       "InferenceService",
-			"metadata": map[string]interface{}{
-				"namespace": namespace,
-				"name":      name,
-			},
-			"spec": spec,
-		},
-	}
-}
-
-func TestResolveInferenceServiceStorage_FromStoragePath(t *testing.T) {
-	isvc := newUnstructuredInferenceService("gavin-test", "tinyllama-model", map[string]interface{}{
-		"predictor": map[string]interface{}{
-			"model": map[string]interface{}{
-				"storage": map[string]interface{}{
-					"key":  "minio-data-connection",
-					"path": "models/tinyllama-1.1b-chat",
-				},
-			},
-		},
-	})
-	dynClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), isvc)
-	w := &Watcher{dynamicClient: dynClient}
-
-	pod := instrumentedBarePod("tinyllama-model-predictor-abc123", "gavin-test")
-	pod.Labels[aibomdata.LabelKServeInferenceService] = "tinyllama-model"
-
-	raw := w.resolveInferenceServiceStorage(context.Background(), "gavin-test", []corev1.Pod{*pod})
-
-	var got map[string]string
-	if err := json.Unmarshal([]byte(raw), &got); err != nil {
-		t.Fatalf("resolveInferenceServiceStorage returned invalid JSON: %v", err)
-	}
-	if got["inference_service"] != "tinyllama-model" {
-		t.Errorf("inference_service = %q, want %q", got["inference_service"], "tinyllama-model")
-	}
-	if got["storage_path"] != "models/tinyllama-1.1b-chat" {
-		t.Errorf("storage_path = %q, want %q", got["storage_path"], "models/tinyllama-1.1b-chat")
-	}
-	if got["storage_key"] != "minio-data-connection" {
-		t.Errorf("storage_key = %q, want %q", got["storage_key"], "minio-data-connection")
-	}
-}
-
-func TestResolveInferenceServiceStorage_NoDynamicClient(t *testing.T) {
-	w := &Watcher{}
-	pod := instrumentedBarePod("tinyllama-model-predictor-abc123", "gavin-test")
-	pod.Labels[aibomdata.LabelKServeInferenceService] = "tinyllama-model"
-
-	if got := w.resolveInferenceServiceStorage(context.Background(), "gavin-test", []corev1.Pod{*pod}); got != "{}" {
-		t.Errorf("expected empty result with nil dynamic client, got %q", got)
-	}
-}
-
-func TestResolveInferenceServiceStorage_NotAKServePod(t *testing.T) {
-	dynClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme())
-	w := &Watcher{dynamicClient: dynClient}
-	pod := instrumentedBarePod("web-pod", "gavin-test")
-
-	if got := w.resolveInferenceServiceStorage(context.Background(), "gavin-test", []corev1.Pod{*pod}); got != "{}" {
-		t.Errorf("expected empty result for non-KServe pod, got %q", got)
 	}
 }
 
@@ -316,7 +246,7 @@ func TestIsJobComplete(t *testing.T) {
 
 func TestIsNamespaceEnabled(t *testing.T) {
 	client := fake.NewSimpleClientset(enabledNamespace("enabled-ns"), disabledNamespace("disabled-ns"))
-	w := New(client, nil, "busybox:latest")
+	w := New(client, "busybox:latest")
 	startWatcher(t, w)
 
 	if !w.isNamespaceEnabled("enabled-ns") {
@@ -349,7 +279,7 @@ func TestOnJobEvent_CreatesPostprocessJob(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, job, pod, dataConfigMap)
-	w := New(client, nil, "aibom-postprocess:latest")
+	w := New(client, "aibom-postprocess:latest")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -447,7 +377,7 @@ func TestOnJobEvent_WithAnnotations(t *testing.T) {
 	pod := instrumentedPod("train-job", "test-ns")
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, nil, "aibom-postprocess:latest")
+	w := New(client, "aibom-postprocess:latest")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -470,7 +400,7 @@ func TestOnJobEvent_NonEnabledNamespace_Skips(t *testing.T) {
 	pod := instrumentedPod("train-job", "disabled-ns")
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, nil, "busybox:latest")
+	w := New(client, "busybox:latest")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -488,7 +418,7 @@ func TestOnJobEvent_IncompleteJob_Skips(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, job)
-	w := New(client, nil, "busybox:latest")
+	w := New(client, "busybox:latest")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -506,7 +436,7 @@ func TestOnJobEvent_AlreadyPostprocessed_Skips(t *testing.T) {
 	pod := instrumentedPod("train-job", "test-ns")
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, nil, "busybox:latest")
+	w := New(client, "busybox:latest")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -535,7 +465,7 @@ func TestOnJobEvent_NoInstrumentedPods_Skips(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, nil, "busybox:latest")
+	w := New(client, "busybox:latest")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -565,7 +495,7 @@ func TestOnJobEvent_NoGPU_Skips(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, nil, "busybox:latest")
+	w := New(client, "busybox:latest")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -583,7 +513,7 @@ func TestOnJobEvent_PostprocessJob_Skips(t *testing.T) {
 	pod := instrumentedPod("train-job-aibom-postprocess", "test-ns")
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, nil, "busybox:latest")
+	w := New(client, "busybox:latest")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -604,7 +534,7 @@ func TestFinalizerAddedToGPUJob(t *testing.T) {
 	pod := instrumentedPod("gpu-job", "test-ns")
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, nil, "busybox:latest")
+	w := New(client, "busybox:latest")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -644,7 +574,7 @@ func TestFinalizerNotAddedToNonGPUJob(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, nil, "busybox:latest")
+	w := New(client, "busybox:latest")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -673,7 +603,7 @@ func TestPostprocessOnDeletion(t *testing.T) {
 	pod := instrumentedPod("server-job", "test-ns")
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, nil, "aibom-postprocess:latest")
+	w := New(client, "aibom-postprocess:latest")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -722,7 +652,7 @@ func TestFinalizerAddedToAnnotatedJob(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, nil, "busybox:latest")
+	w := New(client, "busybox:latest")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -742,7 +672,7 @@ func TestPodFinalizerAddedToGPUPod(t *testing.T) {
 	pod := instrumentedBarePod("predictor-pod", "test-ns")
 
 	client := fake.NewSimpleClientset(ns, pod)
-	w := New(client, nil, "busybox:latest")
+	w := New(client, "busybox:latest")
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
@@ -761,6 +691,77 @@ func TestPodFinalizerAddedToGPUPod(t *testing.T) {
 	}
 }
 
+// TestPostprocessReadsStorageInfoFromDiscoveryData reproduces the scenario
+// that motivated writing storage.json in the discovery init container (see
+// generate_snapshot.py's resolve_inference_service_storage) instead of the
+// watcher looking it up lazily at pod-deletion time: deleting an
+// InferenceService removes it from etcd immediately, well before Kubernetes'
+// garbage collector cascades the delete down to the Pod, so by the time
+// postprocessing runs at pod deletion, a live Get against the
+// InferenceService would 404 almost every time. Model identity must instead
+// come from what the init container already wrote at pod startup, while the
+// InferenceService still existed — the watcher itself never talks to
+// serving.kserve.io at all.
+func TestPostprocessReadsStorageInfoFromDiscoveryData(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	now := metav1.Now()
+	pod := instrumentedBarePod("granite-model-predictor-abc123", "test-ns")
+	pod.Labels[aibomdata.LabelKServeInferenceService] = "granite-model"
+	pod.Finalizers = []string{podFinalizerName}
+	pod.DeletionTimestamp = &now
+
+	storageJSON := `{"inference_service":"granite-model","storage_path":"models/tinyllama-1.1b-chat"}`
+	dataConfigMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pod.Name + "-aibom-postprocess-data",
+			Namespace: "test-ns",
+		},
+		Data: map[string]string{
+			fmt.Sprintf("storage-%s.json", pod.Name): storageJSON,
+		},
+	}
+
+	client := fake.NewSimpleClientset(ns, pod, dataConfigMap)
+	w := New(client, "aibom-postprocess:latest")
+	startWatcher(t, w)
+
+	w.onPodEvent(pod)
+
+	cm, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), pod.Name+"-aibom-postprocess-data", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("data configmap not found: %v", err)
+	}
+	var got map[string]string
+	if err := json.Unmarshal([]byte(cm.Data["storage.json"]), &got); err != nil {
+		t.Fatalf("invalid storage.json: %v", err)
+	}
+	if got["storage_path"] != "models/tinyllama-1.1b-chat" {
+		t.Errorf("storage_path = %q, want %q", got["storage_path"], "models/tinyllama-1.1b-chat")
+	}
+}
+
+func TestPostprocessDefaultsStorageInfoWhenAbsent(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	now := metav1.Now()
+	pod := instrumentedBarePod("web-pod", "test-ns")
+	pod.Finalizers = []string{podFinalizerName}
+	pod.DeletionTimestamp = &now
+
+	client := fake.NewSimpleClientset(ns, pod)
+	w := New(client, "aibom-postprocess:latest")
+	startWatcher(t, w)
+
+	w.onPodEvent(pod)
+
+	cm, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), pod.Name+"-aibom-postprocess-data", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("data configmap not found: %v", err)
+	}
+	if cm.Data["storage.json"] != "{}" {
+		t.Errorf("storage.json = %q, want %q for a workload with no InferenceService storage info", cm.Data["storage.json"], "{}")
+	}
+}
+
 func TestPodFinalizerNotAddedToNonGPUPod(t *testing.T) {
 	ns := enabledNamespace("test-ns")
 	pod := &corev1.Pod{
@@ -776,7 +777,7 @@ func TestPodFinalizerNotAddedToNonGPUPod(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, pod)
-	w := New(client, nil, "busybox:latest")
+	w := New(client, "busybox:latest")
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
@@ -805,7 +806,7 @@ func TestPodFinalizerAddedToAnnotatedPod(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, pod)
-	w := New(client, nil, "busybox:latest")
+	w := New(client, "busybox:latest")
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
@@ -828,7 +829,7 @@ func TestPostprocessOnPodDeletion(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, pod)
-	w := New(client, nil, "aibom-postprocess:latest")
+	w := New(client, "aibom-postprocess:latest")
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
@@ -870,7 +871,7 @@ func TestOnPodEvent_JobOwnedPod_Skipped(t *testing.T) {
 	pod.Finalizers = []string{podFinalizerName}
 
 	client := fake.NewSimpleClientset(ns, pod)
-	w := New(client, nil, "busybox:latest")
+	w := New(client, "busybox:latest")
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
@@ -906,7 +907,7 @@ func TestOnPodEvent_NotInstrumented_Skipped(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, pod)
-	w := New(client, nil, "busybox:latest")
+	w := New(client, "busybox:latest")
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
@@ -952,7 +953,7 @@ func TestCollectAIBOM(t *testing.T) {
 	ppJob, ppPod, dataConfigMap := newAIBOMPostprocessFixtures("train-job", "test-ns")
 
 	client := fake.NewSimpleClientset(ns, ppJob, ppPod, dataConfigMap)
-	w := New(client, nil, "aibom-postprocess:latest")
+	w := New(client, "aibom-postprocess:latest")
 	startWatcher(t, w)
 
 	w.onJobEvent(ppJob)

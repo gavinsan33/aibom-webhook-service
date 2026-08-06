@@ -46,6 +46,37 @@ subjects:
     apiGroup: rbac.authorization.k8s.io
     name: system:serviceaccounts:{{ .Release.Namespace }}
 ---
+# Lets the aibom-discovery init container (running as the workload's own
+# ServiceAccount) read the InferenceService that owns it, to resolve model
+# identity for KServe predictors backed by an S3/MinIO data-connection
+# storage.key/path (see generate_snapshot.py's resolve_inference_service_storage).
+# Namespace-scoped and read-only, mirroring aibom-workload-data — no
+# permission on the storage.key Secret itself, only the InferenceService's
+# own declared storage path/URI string.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: aibom-workload-inferenceservices
+  namespace: {{ .Release.Namespace }}
+rules:
+  - apiGroups: ["serving.kserve.io"]
+    resources: ["inferenceservices"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: aibom-workload-inferenceservices
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: aibom-workload-inferenceservices
+subjects:
+  - kind: Group
+    apiGroup: rbac.authorization.k8s.io
+    name: system:serviceaccounts:{{ .Release.Namespace }}
+---
 # Grants pods in this namespace pull access to images in the aibom-system
 # namespace. OpenShift's system:image-puller role must be bound from the
 # image's own namespace, so this RoleBinding is deliberately created in

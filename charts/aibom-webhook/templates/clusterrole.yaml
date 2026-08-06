@@ -22,12 +22,11 @@ rules:
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["list", "watch", "create", "patch", "delete"]
-  # inferenceservices: a single Get per qualifying predictor pod, to read the
-  # declared spec.predictor.model.storage.path/storageUri for model identity.
-  # No list/watch — pods identify their owning InferenceService by name via
-  # the serving.kserve.io/inferenceservice label, so there's no informer here.
-  # Deliberately no "secrets" verb: the referenced data-connection Secret
-  # (storage.key) is never read, only the storage path/URI string.
-  - apiGroups: ["serving.kserve.io"]
-    resources: ["inferenceservices"]
-    verbs: ["get"]
+  # No serving.kserve.io permission here deliberately: resolving an
+  # InferenceService's storage.path/storageUri for model identity is done by
+  # the aibom-discovery init container itself, using the workload's own
+  # namespace-scoped RBAC (see aibom-workload-namespace's rbac.yaml) — not by
+  # this always-on, cluster-wide identity. That also avoids the alternative
+  # (a live Get from the watcher at pod-deletion time) racing against
+  # Kubernetes' garbage collector, which removes a deleted InferenceService
+  # from etcd immediately, well before cascading the delete down to its Pod.

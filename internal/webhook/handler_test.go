@@ -145,6 +145,60 @@ func TestShouldMutate_GPURequest(t *testing.T) {
 	}
 }
 
+func TestMutate_KServePredictor_AddsInferenceServiceNameEnv(t *testing.T) {
+	m := newTestMutator()
+	pod := podWithGPU()
+	pod.Labels = map[string]string{"serving.kserve.io/inferenceservice": "granite-model"}
+
+	patches, err := m.Mutate(pod)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, p := range patches {
+		if p.Path != "/spec/initContainers" {
+			continue
+		}
+		c := p.Value.([]corev1.Container)[0]
+		for _, env := range c.Env {
+			if env.Name == "INFERENCESERVICE_NAME" {
+				if env.ValueFrom == nil || env.ValueFrom.FieldRef == nil {
+					t.Fatalf("INFERENCESERVICE_NAME should be a downward API field ref, got %+v", env)
+				}
+				want := "metadata.labels['serving.kserve.io/inferenceservice']"
+				if env.ValueFrom.FieldRef.FieldPath != want {
+					t.Errorf("field path = %q, want %q", env.ValueFrom.FieldRef.FieldPath, want)
+				}
+				return
+			}
+		}
+		t.Fatal("expected INFERENCESERVICE_NAME env var on a KServe predictor pod")
+	}
+	t.Fatal("init container patch not found")
+}
+
+func TestMutate_NonKServePod_NoInferenceServiceNameEnv(t *testing.T) {
+	m := newTestMutator()
+	patches, err := m.Mutate(podWithGPU())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, p := range patches {
+		if p.Path != "/spec/initContainers" {
+			continue
+		}
+		c := p.Value.([]corev1.Container)[0]
+		for _, env := range c.Env {
+			if env.Name == "INFERENCESERVICE_NAME" {
+				t.Error("INFERENCESERVICE_NAME should not be set for a pod without the KServe predictor label — a downward API field ref to a missing label fails pod admission")
+			}
+		}
+		return
+	}
+	t.Fatal("init container patch not found")
+}
+
 func TestShouldMutate_AlreadyInstrumented(t *testing.T) {
 	m := newTestMutator()
 	if m.shouldMutate(podAlreadyInstrumented()) {

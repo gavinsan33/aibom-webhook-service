@@ -210,16 +210,65 @@ snapshot["benchmarks"]["context_switch"] = context_switch_benchmark()
 with open("/tmp/result/discovery.json", "w") as f:
     json.dump(snapshot, f, indent=2)
 
+def resolve_inference_service_storage(namespace):
+    """Resolve model identity from the owning KServe InferenceService's
+    declared storage.path/storageUri, for predictors backed by an S3/MinIO
+    data-connection bucket (spec.predictor.model.storage.key/path) rather
+    than a custom serving container — the predictor's built-in vLLM container
+    always runs with a fixed --model=/mnt/models mount, so there's no CLI arg
+    identifying the actual model.
+
+    This runs here, in the discovery init container at pod startup, rather
+    than later from the always-on watcher at pod deletion: deleting the
+    InferenceService is the normal way one of these pods gets deleted at all,
+    and Kubernetes' garbage collector removes the InferenceService from etcd
+    immediately, well before the delete cascades down to this pod — resolving
+    it lazily at deletion time would lose that race almost every time.
+    """
+    isvc_name = os.environ.get("INFERENCESERVICE_NAME", "")
+    if not k8s_api or not namespace or not isvc_name:
+        return None
+    try:
+        isvc = k8s_api.get_custom_object(namespace, "serving.kserve.io", "v1beta1", "inferenceservices", isvc_name)
+    except Exception as e:
+        print(f"WARNING: could not get InferenceService {namespace}/{isvc_name}: {e}")
+        return None
+    if not isvc:
+        return None
+
+    model = ((isvc.get("spec") or {}).get("predictor") or {}).get("model") or {}
+    storage = model.get("storage") or {}
+    path = storage.get("path")
+    storage_key = storage.get("key")
+    storage_uri = model.get("storageUri")
+
+    if not path and not storage_uri:
+        return None
+
+    result = {"inference_service": isvc_name}
+    if path:
+        result["storage_path"] = path
+    if storage_key:
+        result["storage_key"] = storage_key
+    if storage_uri:
+        result["storage_uri"] = storage_uri
+    return result
+
+
 # Write directly into the AIBOM data ConfigMap the webhook told us about,
 # rather than printing to stdout for the watcher to scrape from pod logs.
 pod_name = os.environ.get("POD_NAME", "")
 pod_namespace = os.environ.get("POD_NAMESPACE", "")
 configmap_name = os.environ.get("AIBOM_DATA_CONFIGMAP", "")
+
+data_updates = {f"discovery-{pod_name}.json": json.dumps(snapshot)}
+storage_info = resolve_inference_service_storage(pod_namespace)
+if storage_info:
+    data_updates[f"storage-{pod_name}.json"] = json.dumps(storage_info)
+
 if k8s_api and pod_name and pod_namespace and configmap_name:
     try:
-        k8s_api.patch_configmap(
-            pod_namespace, configmap_name, {f"discovery-{pod_name}.json": json.dumps(snapshot)}
-        )
+        k8s_api.patch_configmap(pod_namespace, configmap_name, data_updates)
     except Exception as e:
         print(f"WARNING: could not write discovery data to ConfigMap {configmap_name}: {e}")
 else:
