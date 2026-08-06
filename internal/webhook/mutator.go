@@ -46,6 +46,11 @@ func (m *Mutator) Mutate(pod *corev1.Pod) ([]PatchOperation, error) {
 	// Add aibom-scripts ConfigMap volume
 	patches = appendVolume(patches, pod, buildScriptsVolume())
 
+	// Add our own Kubernetes API token volume — see buildTokenVolume's doc
+	// comment for why the pod's own (possibly absent) automounted token
+	// can't be relied on for containers this webhook adds.
+	patches = appendVolume(patches, pod, buildTokenVolume())
+
 	// Add discovery init container
 	initContainer := m.buildDiscoveryInitContainer(pod)
 	if len(pod.Spec.InitContainers) == 0 {
@@ -198,6 +203,7 @@ func (m *Mutator) buildDiscoveryInitContainer(pod *corev1.Pod) corev1.Container 
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: "aibom-data", MountPath: "/tmp/result"},
 			{Name: "aibom-scripts", MountPath: "/scripts", ReadOnly: true},
+			aibomTokenVolumeMount(),
 		},
 	}
 
@@ -302,6 +308,15 @@ func (m *Mutator) buildDatasetDetectorPatches(pod *corev1.Pod, containerIdx int)
 			MountPath: "/tmp/aibom",
 		},
 	}
+	// Unlike the discovery init container (which we add fresh and so never
+	// has a pre-existing mount to collide with), this is the workload's own
+	// container — if automountServiceAccountToken wasn't disabled, the
+	// built-in ServiceAccount admission controller already mounted a token
+	// at this same path before our webhook ran, and a second volumeMount at
+	// an identical path fails pod admission outright.
+	if !hasVolumeMountAtPath(container.VolumeMounts, aibomTokenVolumeMount().MountPath) {
+		mounts = append(mounts, aibomTokenVolumeMount())
+	}
 
 	mountPath := fmt.Sprintf("/spec/containers/%d/volumeMounts", containerIdx)
 	if len(container.VolumeMounts) == 0 {
@@ -350,6 +365,70 @@ func buildScriptsVolume() corev1.Volume {
 			},
 		},
 	}
+}
+
+// buildTokenVolume provisions our own copy of the standard "kube-api-access"
+// projected volume — the same three sources (SA token, cluster CA bundle,
+// namespace) the built-in ServiceAccount admission controller normally
+// projects automatically. That controller only mounts it into containers
+// already present in the pod spec when it runs; since we add the discovery
+// init container (and, for dataset detection, hooks into app containers)
+// via a mutating webhook patch afterward, those newly-added containers never
+// get the automatic one — this is true regardless of the pod's own
+// automountServiceAccountToken setting, since a container only gets a token
+// if it has an explicit volumeMount naming a token volume. Without this,
+// k8s_api.py (used by both generate_snapshot.py and runtime_detector.py) has
+// no token to authenticate with at all.
+func buildTokenVolume() corev1.Volume {
+	expirationSeconds := int64(3600)
+	return corev1.Volume{
+		Name: "aibom-token",
+		VolumeSource: corev1.VolumeSource{
+			Projected: &corev1.ProjectedVolumeSource{
+				Sources: []corev1.VolumeProjection{
+					{
+						ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
+							Path:              "token",
+							ExpirationSeconds: &expirationSeconds,
+						},
+					},
+					{
+						ConfigMap: &corev1.ConfigMapProjection{
+							LocalObjectReference: corev1.LocalObjectReference{Name: "kube-root-ca.crt"},
+							Items:                []corev1.KeyToPath{{Key: "ca.crt", Path: "ca.crt"}},
+						},
+					},
+					{
+						DownwardAPI: &corev1.DownwardAPIProjection{
+							Items: []corev1.DownwardAPIVolumeFile{
+								{Path: "namespace", FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"}},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+// aibomTokenVolumeMount mounts buildTokenVolume at the exact path k8s_api.py
+// expects (_SA_DIR), so it's indistinguishable from the token the
+// ServiceAccount admission controller would have auto-mounted.
+func aibomTokenVolumeMount() corev1.VolumeMount {
+	return corev1.VolumeMount{
+		Name:      "aibom-token",
+		MountPath: "/var/run/secrets/kubernetes.io/serviceaccount",
+		ReadOnly:  true,
+	}
+}
+
+func hasVolumeMountAtPath(mounts []corev1.VolumeMount, path string) bool {
+	for _, m := range mounts {
+		if m.MountPath == path {
+			return true
+		}
+	}
+	return false
 }
 
 // appendVolume adds a volume patch, handling nil vs existing volumes array.

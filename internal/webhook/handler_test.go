@@ -3,6 +3,7 @@ package webhook
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -266,8 +267,8 @@ func TestMutate_InjectsInitContainer(t *testing.T) {
 			if len(containers[0].Env) != 6 {
 				t.Errorf("expected 6 env vars, got %d", len(containers[0].Env))
 			}
-			if len(containers[0].VolumeMounts) != 2 {
-				t.Errorf("expected 2 volume mounts (aibom-data + aibom-scripts), got %d", len(containers[0].VolumeMounts))
+			if len(containers[0].VolumeMounts) != 3 {
+				t.Errorf("expected 3 volume mounts (aibom-data + aibom-scripts + aibom-token), got %d", len(containers[0].VolumeMounts))
 			}
 			return
 		}
@@ -432,6 +433,71 @@ func TestMutate_InjectsDatasetDetectorEnvVars(t *testing.T) {
 	for _, expected := range []string{"AIBOM_DATASET_DETECT", "AIBOM_DEBUG", "AIBOM_DATASET_OUTPUT", "PYTHONPATH"} {
 		if !envVarNames[expected] {
 			t.Errorf("expected env var %q in dataset detector patches", expected)
+		}
+	}
+}
+
+// collectContainerVolumeMountPatches gathers every VolumeMount added to a
+// container's volumeMounts, regardless of whether the patch replaced the
+// whole array ([]VolumeMount, when the container started with none) or
+// appended individual entries (VolumeMount, one patch per entry, when it
+// already had some) — see buildDatasetDetectorPatches.
+func collectContainerVolumeMountPatches(patches []PatchOperation, containerIdx int) []corev1.VolumeMount {
+	prefix := fmt.Sprintf("/spec/containers/%d/volumeMounts", containerIdx)
+	var mounts []corev1.VolumeMount
+	for _, p := range patches {
+		if p.Path == prefix {
+			mounts = append(mounts, p.Value.([]corev1.VolumeMount)...)
+		} else if p.Path == prefix+"/-" {
+			mounts = append(mounts, p.Value.(corev1.VolumeMount))
+		}
+	}
+	return mounts
+}
+
+func TestMutate_AddsTokenMountToAppContainer(t *testing.T) {
+	m := newTestMutator()
+	patches, err := m.Mutate(podWithOwner("Job"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	mounts := collectContainerVolumeMountPatches(patches, 0)
+	if len(mounts) == 0 {
+		t.Fatal("container volumeMounts patch not found")
+	}
+	for _, mount := range mounts {
+		if mount.Name == "aibom-token" && mount.MountPath == "/var/run/secrets/kubernetes.io/serviceaccount" {
+			return
+		}
+	}
+	t.Fatal("expected aibom-token mount when the container has no existing token mount")
+}
+
+// TestMutate_SkipsTokenMountWhenAlreadyPresent guards against the real
+// failure mode this exists to avoid: if automountServiceAccountToken wasn't
+// disabled, the built-in ServiceAccount admission controller already mounted
+// a token at this exact path before our webhook ran — a second volumeMount
+// at an identical path fails pod admission outright.
+func TestMutate_SkipsTokenMountWhenAlreadyPresent(t *testing.T) {
+	m := newTestMutator()
+	pod := podWithOwner("Job")
+	pod.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{
+		{Name: "kube-api-access-abcde", MountPath: "/var/run/secrets/kubernetes.io/serviceaccount", ReadOnly: true},
+	}
+
+	patches, err := m.Mutate(pod)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	mounts := collectContainerVolumeMountPatches(patches, 0)
+	if len(mounts) == 0 {
+		t.Fatal("container volumeMounts patch not found")
+	}
+	for _, mount := range mounts {
+		if mount.Name == "aibom-token" {
+			t.Fatal("should not add a second volumeMount at a path the container already mounts")
 		}
 	}
 }
