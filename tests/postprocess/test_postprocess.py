@@ -90,6 +90,33 @@ def test_detect_vllm_returns_none_for_empty_command():
 
 
 # ---------------------------------------------------------------------------
+# KServe InferenceService storage-path detection (S3/MinIO data-connection)
+# ---------------------------------------------------------------------------
+
+
+def test_detect_model_from_storage_uses_last_path_segment():
+    result = pp.detect_model_from_storage({"storage_path": "models/tinyllama-1.1b-chat"})
+    assert result == {"model_name": "tinyllama-1.1b-chat"}
+
+
+def test_detect_model_from_storage_falls_back_to_storage_uri():
+    result = pp.detect_model_from_storage({"storage_uri": "s3://bucket/models/granite-3.0-8b-instruct/"})
+    assert result == {"model_name": "granite-3.0-8b-instruct"}
+
+
+def test_detect_model_from_storage_infers_quantization_from_name():
+    result = pp.detect_model_from_storage({"storage_path": "models/some-model-AWQ"})
+    assert result["model_name"] == "some-model-AWQ"
+    assert result["quantization_method"] == "awq"
+
+
+def test_detect_model_from_storage_returns_none_when_empty():
+    assert pp.detect_model_from_storage({}) is None
+    assert pp.detect_model_from_storage(None) is None
+    assert pp.detect_model_from_storage({"storage_key": "minio-data-connection"}) is None
+
+
+# ---------------------------------------------------------------------------
 # trl CLI detection
 # ---------------------------------------------------------------------------
 

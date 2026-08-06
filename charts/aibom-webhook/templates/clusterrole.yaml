@@ -22,3 +22,12 @@ rules:
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["list", "watch", "create", "patch", "delete"]
+  # inferenceservices: a single Get per qualifying predictor pod, to read the
+  # declared spec.predictor.model.storage.path/storageUri for model identity.
+  # No list/watch — pods identify their owning InferenceService by name via
+  # the serving.kserve.io/inferenceservice label, so there's no informer here.
+  # Deliberately no "secrets" verb: the referenced data-connection Secret
+  # (storage.key) is never read, only the storage path/URI string.
+  - apiGroups: ["serving.kserve.io"]
+    resources: ["inferenceservices"]
+    verbs: ["get"]

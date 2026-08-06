@@ -14,11 +14,23 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 )
+
+// inferenceServiceGVR identifies the KServe InferenceService resource. A
+// dynamic client is used to read it rather than adding a generated KServe
+// client dependency, since this is the only place that needs it.
+var inferenceServiceGVR = schema.GroupVersionResource{
+	Group:    "serving.kserve.io",
+	Version:  "v1beta1",
+	Resource: "inferenceservices",
+}
 
 const (
 	LabelEnabled             = "aibom.io/enabled"
@@ -48,6 +60,7 @@ const (
 
 type Watcher struct {
 	clientset        kubernetes.Interface
+	dynamicClient    dynamic.Interface
 	postprocessImage string
 	factory          informers.SharedInformerFactory
 	// podFactory is a separate, server-side label-selector-scoped factory for the Pod
@@ -59,9 +72,15 @@ type Watcher struct {
 	podFactory informers.SharedInformerFactory
 }
 
-func New(clientset kubernetes.Interface, postprocessImage string) *Watcher {
+// New builds a Watcher. dynamicClient may be nil, in which case
+// storage.key/path-based model detection for KServe InferenceServices is
+// skipped (the pod is still postprocessed, just without resolved model
+// identity) — callers that can't build a dynamic client can pass nil rather
+// than disabling the watcher entirely.
+func New(clientset kubernetes.Interface, dynamicClient dynamic.Interface, postprocessImage string) *Watcher {
 	w := &Watcher{
 		clientset:        clientset,
+		dynamicClient:    dynamicClient,
 		postprocessImage: postprocessImage,
 		factory:          informers.NewSharedInformerFactory(clientset, resyncPeriod),
 		podFactory: informers.NewSharedInformerFactoryWithOptions(
@@ -421,7 +440,7 @@ func collectAIBOMAnnotations(annotations map[string]string) map[string]string {
 	return result
 }
 
-func (w *Watcher) createDataConfigMap(ctx context.Context, namespace, configMapName, jobName string, discoveries []string, datasets []string, annotations map[string]string, containersJSON string) error {
+func (w *Watcher) createDataConfigMap(ctx context.Context, namespace, configMapName, jobName string, discoveries []string, datasets []string, annotations map[string]string, containersJSON, storageJSON string) error {
 	// Build discovery data: array of discovery objects
 	var discoveryArray []json.RawMessage
 	for _, d := range discoveries {
@@ -443,11 +462,16 @@ func (w *Watcher) createDataConfigMap(ctx context.Context, namespace, configMapN
 
 	annotationsJSON, _ := json.Marshal(annotations)
 
+	if storageJSON == "" {
+		storageJSON = "{}"
+	}
+
 	aggregateData := map[string]string{
 		"discovery.json":   discoveryData,
 		"dataset.json":     datasetData,
 		"annotations.json": string(annotationsJSON),
 		"containers.json":  containersJSON,
+		"storage.json":     storageJSON,
 	}
 
 	// The pods themselves may have already created this ConfigMap (writing their
@@ -529,11 +553,72 @@ func mergeDatasets(datasets []string) string {
 	return string(bytes)
 }
 
+// resolveInferenceServiceStorage looks up the storage.key/storage.path (or
+// storageUri) declared on the KServe InferenceService owning any of the given
+// pods, so postprocess.py can identify a model served straight from an
+// S3/MinIO data-connection bucket — these pods run a built-in serving-runtime
+// container with a fixed --model=/mnt/models mount, so there's no CLI arg to
+// parse for the real model identity; it only exists on the InferenceService.
+//
+// Returns "{}" if no pod is a KServe predictor, no dynamic client was
+// configured, or the lookup fails for any reason — model detection falls back
+// to the existing CLI-arg parsing in that case, it just won't identify the
+// model for this deployment pattern.
+func (w *Watcher) resolveInferenceServiceStorage(ctx context.Context, namespace string, pods []corev1.Pod) string {
+	const empty = "{}"
+
+	if w.dynamicClient == nil {
+		return empty
+	}
+
+	var isvcName string
+	for _, pod := range pods {
+		if name := pod.Labels[aibomdata.LabelKServeInferenceService]; name != "" {
+			isvcName = name
+			break
+		}
+	}
+	if isvcName == "" {
+		return empty
+	}
+
+	obj, err := w.dynamicClient.Resource(inferenceServiceGVR).Namespace(namespace).Get(ctx, isvcName, metav1.GetOptions{})
+	if err != nil {
+		log.Printf("warning: could not get InferenceService %s/%s: %v", namespace, isvcName, err)
+		return empty
+	}
+
+	path, _, _ := unstructured.NestedString(obj.Object, "spec", "predictor", "model", "storage", "path")
+	storageKey, _, _ := unstructured.NestedString(obj.Object, "spec", "predictor", "model", "storage", "key")
+	storageURI, _, _ := unstructured.NestedString(obj.Object, "spec", "predictor", "model", "storageUri")
+
+	if path == "" && storageURI == "" {
+		return empty
+	}
+
+	result := map[string]string{"inference_service": isvcName}
+	if path != "" {
+		result["storage_path"] = path
+	}
+	if storageKey != "" {
+		result["storage_key"] = storageKey
+	}
+	if storageURI != "" {
+		result["storage_uri"] = storageURI
+	}
+
+	raw, err := json.Marshal(result)
+	if err != nil {
+		return empty
+	}
+	return string(raw)
+}
+
 // buildPostprocessInputs reads the discovery data the pods themselves already
 // wrote into the data ConfigMap, extracts dataset JSON from pod logs (still
 // log-scraped for now), and serializes container command/args info for model
 // detection.
-func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configMapName string, pods []corev1.Pod) (discoveries, datasets []string, containersJSON string) {
+func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configMapName string, pods []corev1.Pod) (discoveries, datasets []string, containersJSON, storageJSON string) {
 	dataCM, err := w.clientset.CoreV1().ConfigMaps(namespace).Get(ctx, configMapName, metav1.GetOptions{})
 	if err != nil {
 		if !errors.IsNotFound(err) {
@@ -568,7 +653,8 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 		}
 	}
 	raw, _ := json.Marshal(containers)
-	return discoveries, datasets, string(raw)
+	storageJSON = w.resolveInferenceServiceStorage(ctx, namespace, pods)
+	return discoveries, datasets, string(raw), storageJSON
 }
 
 // createPostprocessJobCore creates the data ConfigMap and the postprocess Job for a
@@ -580,9 +666,9 @@ func (w *Watcher) createPostprocessJobCore(ctx context.Context, namespace, trigg
 	postprocessName := postprocessJobName(triggerName)
 	configMapName := aibomdata.ConfigMapName(triggerName)
 
-	discoveries, datasets, containersJSON := w.buildPostprocessInputs(ctx, namespace, configMapName, pods)
+	discoveries, datasets, containersJSON, storageJSON := w.buildPostprocessInputs(ctx, namespace, configMapName, pods)
 
-	if err := w.createDataConfigMap(ctx, namespace, configMapName, triggerName, discoveries, datasets, annotations, containersJSON); err != nil {
+	if err := w.createDataConfigMap(ctx, namespace, configMapName, triggerName, discoveries, datasets, annotations, containersJSON, storageJSON); err != nil {
 		log.Printf("warning: could not create data configmap for %s/%s: %v", namespace, triggerName, err)
 	}
 

@@ -127,6 +127,13 @@ def load_annotations():
     return data
 
 
+def load_storage():
+    data = load_json_file(f"{INPUT_DIR}/storage.json", "InferenceService storage")
+    if data is None:
+        return {}
+    return data
+
+
 def load_containers():
     data = load_json_file(f"{INPUT_DIR}/containers.json", "Container specs")
     if data is None:
@@ -494,6 +501,40 @@ def detect_parallelization_from_command(tokens):
         strategy = None
 
     return {"parallelization_strategy": strategy} if strategy else None
+
+
+def detect_model_from_storage(storage):
+    """Detect model identity from a KServe InferenceService's declared
+    storage.path/storageUri (see watcher.go's resolveInferenceServiceStorage
+    and storage.json). Predictor pods backed by an S3/MinIO data-connection
+    bucket run a built-in serving-runtime container with a fixed
+    --model=/mnt/models mount, so detect_vllm_from_command can't recover the
+    real model identity from the CLI — only the InferenceService object
+    declares it, as a bucket path string, e.g. "models/tinyllama-1.1b-chat".
+
+    This is a best-effort identification, not a verification: the returned
+    model_name is only the final path segment of the declared location. It is
+    not derived from the actual file contents, and it does not confirm the
+    bucket data matches the name (a renamed or generically-named prefix would
+    be misreported), since resolving the data-connection Secret and reading
+    the bucket is out of scope here.
+    """
+    if not storage:
+        return None
+
+    location = storage.get("storage_path") or storage.get("storage_uri")
+    if not location:
+        return None
+
+    model_name = location.rstrip("/").split("/")[-1]
+    if not model_name:
+        return None
+
+    result = {"model_name": model_name}
+    quant = detect_quantization_from_name(model_name)
+    if quant:
+        result.update(quant)
+    return result
 
 
 def detect_model_from_containers(containers):
@@ -1154,10 +1195,17 @@ def main():
     detected_datasets, runtime_info = load_datasets()
     annotations = load_annotations()
     containers = load_containers()
+    storage = load_storage()
     print()
 
-    # Model detection from container commands
+    # Model detection from container commands, then from a KServe
+    # InferenceService's declared storage path/URI — the latter overrides
+    # model_name since S3/MinIO-backed predictors have no CLI arg to parse it
+    # from (see detect_model_from_storage).
     detected_model = detect_model_from_containers(containers)
+    storage_model = detect_model_from_storage(storage)
+    if storage_model:
+        detected_model = {**(detected_model or {}), **storage_model}
     cli_dataset = detect_dataset_from_containers(containers)
     if detected_model:
         print(f"--- Model Detection ---")
