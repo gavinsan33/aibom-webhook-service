@@ -99,20 +99,38 @@ _check-auth:
 # Builds every time: a BuildConfig's ConfigChange trigger only fires automatically
 # on its *initial* creation, never on later edits (e.g. a new tag) — so relying on
 # the trigger alone would leave subsequent deploys pointing at an unbuilt tag.
-# Usage: just deploy [--version=<sha>] [--skip-crds]
+#
+# With no arguments, deploys build.gitRef from values.yaml (master) at its current
+# remote tip — NOT your local checkout or branch, which this recipe never inspects.
+# --branch[=<name>] deploys a different branch instead: defaults to whatever branch
+# is currently checked out locally if no name is given, resolves it to its remote
+# tip SHA via remote-build-sha.sh (erroring if it hasn't been pushed), and uses that
+# SHA the same way --version would — so it's still pinned to immutable content, not
+# a mutable branch name that could move between resolving and building it.
+# Usage: just deploy [--version=<sha> | --branch[=<name>]] [--skip-crds]
 [group('deploy')]
 deploy *args: _check-auth
     #!/usr/bin/env bash
     set -euo pipefail
     version=""
+    branch=""
     skip_crds=false
     for arg in {{ args }}; do
         case "$arg" in
             --skip-crds) skip_crds=true ;;
             --version=*) version="${arg#--version=}" ;;
-            *) echo "error: unknown argument '$arg' (expected --version=<sha> or --skip-crds)" >&2; exit 1 ;;
+            --branch) branch="$(git rev-parse --abbrev-ref HEAD)" ;;
+            --branch=*) branch="${arg#--branch=}" ;;
+            *) echo "error: unknown argument '$arg' (expected --version=<sha>, --branch[=<name>], or --skip-crds)" >&2; exit 1 ;;
         esac
     done
+    if [[ -n "$version" && -n "$branch" ]]; then
+        echo "error: --version and --branch are mutually exclusive" >&2
+        exit 1
+    fi
+    if [[ -n "$branch" ]]; then
+        version="$(scripts/remote-build-sha.sh "$branch")"
+    fi
     [[ -n "$version" ]] || version="$(scripts/remote-build-sha.sh)"
     ns_flag="--create-namespace"
     [[ "$skip_crds" = true ]] && ns_flag="--skip-crds"
