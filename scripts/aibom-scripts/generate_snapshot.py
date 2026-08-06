@@ -259,7 +259,7 @@ def resolve_inference_service_storage(namespace):
 # rather than printing to stdout for the watcher to scrape from pod logs.
 pod_name = os.environ.get("POD_NAME", "")
 pod_namespace = os.environ.get("POD_NAMESPACE", "")
-configmap_name = os.environ.get("AIBOM_DATA_CONFIGMAP", "")
+configmap_name = k8s_api.resolve_data_configmap_name() if k8s_api else ""
 
 data_updates = {f"discovery-{pod_name}.json": json.dumps(snapshot)}
 storage_info = resolve_inference_service_storage(pod_namespace)

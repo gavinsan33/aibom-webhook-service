@@ -13,6 +13,13 @@ import urllib.request
 
 _SA_DIR = "/var/run/secrets/kubernetes.io/serviceaccount"
 
+# Mirrors aibomdata's constants in watcher.go — the two must stay in sync,
+# since the Go watcher and resolve_data_configmap_name() below each
+# independently compute the same deterministic name for the same trigger.
+_MAX_JOB_NAME_LENGTH = 63
+_POSTPROCESS_SUFFIX = "-aibom-postprocess"
+_CONFIGMAP_SUFFIX = "-data"
+
 
 def _api_server():
     host = os.environ["KUBERNETES_SERVICE_HOST"]
@@ -92,3 +99,32 @@ def get_custom_object(namespace, group, version, plural, name):
         if e.code == 404:
             return None
         raise
+
+
+def _postprocess_job_name(trigger_name):
+    max_base = _MAX_JOB_NAME_LENGTH - len(_POSTPROCESS_SUFFIX)
+    trigger_name = trigger_name[:max_base].rstrip("-")
+    return trigger_name + _POSTPROCESS_SUFFIX
+
+
+def resolve_data_configmap_name():
+    """Returns the data ConfigMap name discovery/dataset scripts should write
+    into. Prefers the webhook-injected AIBOM_DATA_CONFIGMAP env var, which is
+    reliable for Job/JobSet/PyTorchJob/RayJob-owned pods (their trigger name
+    comes from ownerReferences, already set before admission).
+
+    Falls back to deriving it from POD_NAME for bare/ReplicaSet-owned pods
+    (e.g. KServe predictors): their own pod name isn't assigned yet when the
+    mutating webhook runs (the API server hasn't resolved generateName to a
+    real name at that point), so the webhook can't bake in a static value for
+    them — see mutator.go's dataConfigMapEnvVar. POD_NAME, a downward API
+    value resolved later by the kubelet, is reliable by the time this
+    actually runs.
+    """
+    configmap_name = os.environ.get("AIBOM_DATA_CONFIGMAP", "")
+    if configmap_name:
+        return configmap_name
+    pod_name = os.environ.get("POD_NAME", "")
+    if not pod_name:
+        return ""
+    return _postprocess_job_name(pod_name) + _CONFIGMAP_SUFFIX

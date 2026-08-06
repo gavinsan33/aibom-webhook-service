@@ -159,6 +159,25 @@ func triggerName(pod *corev1.Pod) string {
 	return pod.Name
 }
 
+// dataConfigMapEnvVar returns the static AIBOM_DATA_CONFIGMAP env var, but
+// only when triggerName(pod) is reliably known at admission time — i.e. the
+// pod has a matching owner (its name comes from ownerReferences, already set
+// before admission). For a bare/ReplicaSet-owned pod with no such owner
+// (e.g. a KServe predictor), triggerName falls back to pod.Name, which is
+// EMPTY at this point for any pod created via generateName — the API server
+// hasn't assigned the real name yet when this webhook runs. Baking in
+// aibomdata.ConfigMapName("") here would silently point every write at a
+// malformed "-aibom-postprocess-data" ConfigMap. Instead, ok is false and the
+// caller omits the env var entirely; k8s_api.resolve_data_configmap_name()
+// derives the same name at runtime from POD_NAME (a downward API value,
+// resolved by the kubelet after the real name exists).
+func dataConfigMapEnvVar(pod *corev1.Pod) (corev1.EnvVar, bool) {
+	if !hasMatchingOwner(pod) {
+		return corev1.EnvVar{}, false
+	}
+	return corev1.EnvVar{Name: "AIBOM_DATA_CONFIGMAP", Value: aibomdata.ConfigMapName(triggerName(pod))}, true
+}
+
 func requestsGPU(pod *corev1.Pod) bool {
 	gpuResource := corev1.ResourceName("nvidia.com/gpu")
 	for i := range pod.Spec.Containers {
@@ -180,7 +199,9 @@ func (m *Mutator) buildDiscoveryInitContainer(pod *corev1.Pod) corev1.Container 
 		downwardAPIEnv("POD_NAMESPACE", "metadata.namespace"),
 		downwardAPIEnv("POD_IP", "status.podIP"),
 		downwardAPIEnv("NODE_NAME", "spec.nodeName"),
-		{Name: "AIBOM_DATA_CONFIGMAP", Value: aibomdata.ConfigMapName(triggerName(pod))},
+	}
+	if dataConfigMapEnv, ok := dataConfigMapEnvVar(pod); ok {
+		env = append(env, dataConfigMapEnv)
 	}
 	// Only pods KServe itself already labeled as a predictor get this one —
 	// a single-field label downward API reference fails pod admission
@@ -249,10 +270,12 @@ func (m *Mutator) buildDatasetDetectorPatches(pod *corev1.Pod, containerIdx int)
 		{Name: "AIBOM_DATASET_DETECT", Value: "1"},
 		{Name: "AIBOM_DEBUG", Value: "1"},
 		{Name: "AIBOM_DATASET_OUTPUT", Value: "/tmp/aibom/dataset_detected.json"},
-		{Name: "AIBOM_DATA_CONFIGMAP", Value: aibomdata.ConfigMapName(triggerName(pod))},
 		downwardAPIEnv("POD_NAME", "metadata.name"),
 		downwardAPIEnv("POD_NAMESPACE", "metadata.namespace"),
 		{Name: "PYTHONPATH", Value: pythonPath},
+	}
+	if dataConfigMapEnv, ok := dataConfigMapEnvVar(pod); ok {
+		envVars = append(envVars, dataConfigMapEnv)
 	}
 
 	envPath := fmt.Sprintf("/spec/containers/%d/env", containerIdx)

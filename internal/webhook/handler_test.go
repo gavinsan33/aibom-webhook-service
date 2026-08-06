@@ -276,6 +276,61 @@ func TestMutate_InjectsInitContainer(t *testing.T) {
 	t.Error("initContainers patch not found")
 }
 
+func TestMutate_JobOwnedPod_HasStaticDataConfigMapEnv(t *testing.T) {
+	m := newTestMutator()
+	patches, err := m.Mutate(podWithOwner("Job"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, p := range patches {
+		if p.Path != "/spec/initContainers" {
+			continue
+		}
+		c := p.Value.([]corev1.Container)[0]
+		for _, env := range c.Env {
+			if env.Name == "AIBOM_DATA_CONFIGMAP" {
+				want := "test-job-aibom-postprocess-data"
+				if env.Value != want {
+					t.Errorf("AIBOM_DATA_CONFIGMAP = %q, want %q", env.Value, want)
+				}
+				return
+			}
+		}
+		t.Fatal("expected AIBOM_DATA_CONFIGMAP for a Job-owned pod — its trigger name comes from ownerReferences, known at admission time")
+	}
+	t.Fatal("init container patch not found")
+}
+
+// TestMutate_BarePod_OmitsDataConfigMapEnv guards against the real failure
+// mode this exists to avoid: a bare/ReplicaSet-owned pod's own name isn't
+// assigned yet when the webhook runs (the API server hasn't resolved
+// generateName to a real name at admission time), so baking in
+// aibomdata.ConfigMapName(triggerName(pod)) here would silently produce a
+// malformed "-aibom-postprocess-data" value (empty trigger prefix) — see
+// dataConfigMapEnvVar's doc comment.
+func TestMutate_BarePod_OmitsDataConfigMapEnv(t *testing.T) {
+	m := newTestMutator()
+	patches, err := m.Mutate(podWithGPU())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, p := range patches {
+		if p.Path != "/spec/initContainers" {
+			continue
+		}
+		c := p.Value.([]corev1.Container)[0]
+		for _, env := range c.Env {
+			if env.Name == "AIBOM_DATA_CONFIGMAP" {
+				t.Errorf("expected no AIBOM_DATA_CONFIGMAP for a bare pod (got %q) — its own name isn't known at admission time", env.Value)
+			}
+		}
+		return
+	}
+	t.Fatal("init container patch not found")
+}
+
 func TestMutate_ExistingInitContainers(t *testing.T) {
 	m := newTestMutator()
 	pod := podWithOwner("Job")
