@@ -29,6 +29,9 @@ const (
 
 	annotationPrefix = "aibom.io/"
 
+	instrumentedByAnnotationKey = "instrumented-by"
+	storageInfoAnnotationKey    = "storage-info"
+
 	initContainerName = "aibom-discovery"
 
 	finalizerName = "aibom.io/log-extraction"
@@ -410,6 +413,16 @@ func extractDataFromPod(pod *corev1.Pod, dataCM *corev1.ConfigMap) (discoveryJSO
 	return discoveryJSON, datasetJSON, storageJSON
 }
 
+// internalAnnotationKeys holds aibom.io/ annotation keys (prefix stripped) that are
+// bookkeeping rather than user-supplied AIBOM metadata, and so must be excluded from
+// collectAIBOMAnnotations.
+var internalAnnotationKeys = map[string]bool{
+	strings.TrimPrefix(LabelInstrumented, annotationPrefix):     true,
+	instrumentedByAnnotationKey:                                 true,
+	strings.TrimPrefix(AnnotationPostprocess, annotationPrefix): true,
+	storageInfoAnnotationKey:                                    true,
+}
+
 // collectAIBOMAnnotations returns annotations with the aibom.io/ prefix stripped,
 // excluding internal bookkeeping keys.
 func collectAIBOMAnnotations(annotations map[string]string) map[string]string {
@@ -417,7 +430,7 @@ func collectAIBOMAnnotations(annotations map[string]string) map[string]string {
 	for key, value := range annotations {
 		if strings.HasPrefix(key, annotationPrefix) {
 			stripped := strings.TrimPrefix(key, annotationPrefix)
-			if stripped != "" && stripped != "instrumented" && stripped != "instrumented-by" && stripped != "postprocess-job" && stripped != "storage-info" {
+			if stripped != "" && !internalAnnotationKeys[stripped] {
 				result[stripped] = value
 			}
 		}
