@@ -144,13 +144,13 @@ func (w *Watcher) onJobEvent(obj interface{}) {
 
 	if job.Labels[LabelPostprocessFor] != "" {
 		alreadyCollected := job.Annotations != nil && job.Annotations[AnnotationAIBOMCollected] != ""
-		if w.isJobComplete(job) && !alreadyCollected {
+		if w.isJobFinished(job) && !alreadyCollected {
 			w.collectAIBOM(context.TODO(), job)
 		}
 		return
 	}
 
-	readyForPostprocess := w.isJobComplete(job) || job.DeletionTimestamp != nil
+	readyForPostprocess := w.isJobFinished(job) || job.DeletionTimestamp != nil
 
 	if !readyForPostprocess {
 		// Path A: job is new/running — add finalizer if it qualifies
@@ -174,7 +174,7 @@ func (w *Watcher) onJobEvent(obj interface{}) {
 		return
 	}
 
-	if !hasFinalizer(job) && !w.isJobComplete(job) {
+	if !hasFinalizer(job) && !w.isJobFinished(job) {
 		return
 	}
 
@@ -414,9 +414,15 @@ func (w *Watcher) isNamespaceEnabled(namespace string) bool {
 	return ns.Labels[LabelEnabled] == "true"
 }
 
-func (w *Watcher) isJobComplete(job *batchv1.Job) bool {
+// isJobFinished reports whether the job has reached a terminal state — either
+// succeeded or failed — since both should trigger finalizer removal and
+// cleanup the same way a bare completion would.
+func (w *Watcher) isJobFinished(job *batchv1.Job) bool {
 	for _, c := range job.Status.Conditions {
-		if c.Type == batchv1.JobComplete && c.Status == corev1.ConditionTrue {
+		if c.Status != corev1.ConditionTrue {
+			continue
+		}
+		if c.Type == batchv1.JobComplete || c.Type == batchv1.JobFailed {
 			return true
 		}
 	}
