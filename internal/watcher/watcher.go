@@ -179,6 +179,10 @@ func (w *Watcher) onJobEvent(obj interface{}) {
 
 	if err := w.createPostprocessJob(context.TODO(), job); err != nil {
 		log.Printf("failed to create postprocess job for %s/%s: %v", job.Namespace, job.Name, err)
+		// Leave the finalizer in place so the next resync retries postprocess-job
+		// creation instead of cleaning up (and deleting pod logs) with no AIBOM
+		// ever generated.
+		return
 	}
 
 	if hasFinalizer(job) {
@@ -251,6 +255,10 @@ func (w *Watcher) onPodEvent(obj interface{}) {
 
 	if err := w.createPostprocessJobForPod(context.TODO(), pod); err != nil {
 		log.Printf("failed to create postprocess job for pod %s/%s: %v", pod.Namespace, pod.Name, err)
+		// Leave the finalizer in place so the next resync retries postprocess-job
+		// creation instead of cleaning up (and deleting pod logs) with no AIBOM
+		// ever generated.
+		return
 	}
 
 	w.removePodFinalizer(context.TODO(), pod)
