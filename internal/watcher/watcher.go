@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,16 +22,23 @@ import (
 )
 
 const (
-	LabelEnabled             = "aibom.io/enabled"
-	LabelInstrumented        = "aibom.io/instrumented"
-	LabelPostprocessFor      = aibomdata.LabelPostprocessFor
-	AnnotationPostprocess    = "aibom.io/postprocess-job"
-	AnnotationAIBOMCollected = "aibom.io/aibom-collected"
+	LabelEnabled                 = "aibom.io/enabled"
+	LabelInstrumented            = "aibom.io/instrumented"
+	LabelPostprocessFor          = aibomdata.LabelPostprocessFor
+	AnnotationPostprocess        = "aibom.io/postprocess-job"
+	AnnotationAIBOMCollected     = "aibom.io/aibom-collected"
+	AnnotationPostprocessRetries = "aibom.io/postprocess-retries"
 
 	annotationPrefix = "aibom.io/"
 
 	instrumentedByAnnotationKey = "instrumented-by"
 	storageInfoAnnotationKey    = "storage-info"
+
+	// maxPostprocessRetries caps how many times postprocess-job creation is
+	// retried (once per resync, see resyncPeriod) before giving up and removing
+	// the finalizer anyway — otherwise a permanently failing case (bad image,
+	// exhausted quota) would keep the Job/Pod stuck un-deletable forever.
+	maxPostprocessRetries = 5
 
 	initContainerName = "aibom-discovery"
 
@@ -179,9 +187,18 @@ func (w *Watcher) onJobEvent(obj interface{}) {
 
 	if err := w.createPostprocessJob(context.TODO(), job); err != nil {
 		log.Printf("failed to create postprocess job for %s/%s: %v", job.Namespace, job.Name, err)
+		retries := postprocessRetryCount(job.Annotations) + 1
+		if retries >= maxPostprocessRetries {
+			log.Printf("giving up on postprocessing %s/%s after %d retries; removing finalizer", job.Namespace, job.Name, retries)
+			if hasFinalizer(job) {
+				w.removeFinalizer(context.TODO(), job)
+			}
+			return
+		}
 		// Leave the finalizer in place so the next resync retries postprocess-job
 		// creation instead of cleaning up (and deleting pod logs) with no AIBOM
 		// ever generated.
+		w.setJobPostprocessRetries(context.TODO(), job, retries)
 		return
 	}
 
@@ -255,9 +272,16 @@ func (w *Watcher) onPodEvent(obj interface{}) {
 
 	if err := w.createPostprocessJobForPod(context.TODO(), pod); err != nil {
 		log.Printf("failed to create postprocess job for pod %s/%s: %v", pod.Namespace, pod.Name, err)
+		retries := postprocessRetryCount(pod.Annotations) + 1
+		if retries >= maxPostprocessRetries {
+			log.Printf("giving up on postprocessing pod %s/%s after %d retries; removing finalizer", pod.Namespace, pod.Name, retries)
+			w.removePodFinalizer(context.TODO(), pod)
+			return
+		}
 		// Leave the finalizer in place so the next resync retries postprocess-job
 		// creation instead of cleaning up (and deleting pod logs) with no AIBOM
 		// ever generated.
+		w.setPodPostprocessRetries(context.TODO(), pod, retries)
 		return
 	}
 
@@ -358,6 +382,30 @@ func (w *Watcher) removePodFinalizer(ctx context.Context, pod *corev1.Pod) {
 	}
 }
 
+// postprocessRetryCount reads the current postprocess-job creation retry count
+// from an annotation, defaulting to 0 if absent or unparseable.
+func postprocessRetryCount(annotations map[string]string) int {
+	n, err := strconv.Atoi(annotations[AnnotationPostprocessRetries])
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+func (w *Watcher) setJobPostprocessRetries(ctx context.Context, job *batchv1.Job, n int) {
+	patch := fmt.Sprintf(`{"metadata":{"annotations":{"%s":"%d"}}}`, AnnotationPostprocessRetries, n)
+	if _, err := w.clientset.BatchV1().Jobs(job.Namespace).Patch(ctx, job.Name, types.MergePatchType, []byte(patch), metav1.PatchOptions{}); err != nil {
+		log.Printf("warning: could not record postprocess retry count for %s/%s: %v", job.Namespace, job.Name, err)
+	}
+}
+
+func (w *Watcher) setPodPostprocessRetries(ctx context.Context, pod *corev1.Pod, n int) {
+	patch := fmt.Sprintf(`{"metadata":{"annotations":{"%s":"%d"}}}`, AnnotationPostprocessRetries, n)
+	if _, err := w.clientset.CoreV1().Pods(pod.Namespace).Patch(ctx, pod.Name, types.MergePatchType, []byte(patch), metav1.PatchOptions{}); err != nil {
+		log.Printf("warning: could not record postprocess retry count for pod %s/%s: %v", pod.Namespace, pod.Name, err)
+	}
+}
+
 func (w *Watcher) isNamespaceEnabled(namespace string) bool {
 	ns, err := w.factory.Core().V1().Namespaces().Lister().Get(namespace)
 	if err != nil {
@@ -425,10 +473,11 @@ func extractDataFromPod(pod *corev1.Pod, dataCM *corev1.ConfigMap) (discoveryJSO
 // bookkeeping rather than user-supplied AIBOM metadata, and so must be excluded from
 // collectAIBOMAnnotations.
 var internalAnnotationKeys = map[string]bool{
-	strings.TrimPrefix(LabelInstrumented, annotationPrefix):     true,
-	instrumentedByAnnotationKey:                                 true,
-	strings.TrimPrefix(AnnotationPostprocess, annotationPrefix): true,
-	storageInfoAnnotationKey:                                    true,
+	strings.TrimPrefix(LabelInstrumented, annotationPrefix):            true,
+	instrumentedByAnnotationKey:                                        true,
+	strings.TrimPrefix(AnnotationPostprocess, annotationPrefix):        true,
+	storageInfoAnnotationKey:                                           true,
+	strings.TrimPrefix(AnnotationPostprocessRetries, annotationPrefix): true,
 }
 
 // collectAIBOMAnnotations returns annotations with the aibom.io/ prefix stripped,
