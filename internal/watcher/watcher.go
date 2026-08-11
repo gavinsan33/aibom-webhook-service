@@ -29,6 +29,9 @@ const (
 
 	annotationPrefix = "aibom.io/"
 
+	instrumentedByAnnotationKey = "instrumented-by"
+	storageInfoAnnotationKey    = "storage-info"
+
 	initContainerName = "aibom-discovery"
 
 	finalizerName = "aibom.io/log-extraction"
@@ -392,18 +395,32 @@ func (w *Watcher) getInstrumentedPods(job *batchv1.Job) ([]corev1.Pod, error) {
 }
 
 // extractDataFromPod reads a pod's contribution to the AIBOM data ConfigMap.
-// Both discovery and dataset data are written directly into dataCM by the
-// aibom-discovery init container and the app container's runtime-detector
-// hook respectively (keyed "discovery-<pod-name>.json"/"dataset-<pod-name>.json")
+// Discovery, dataset, and storage data are all written directly into dataCM
+// by the aibom-discovery init container (discovery and, for a KServe
+// predictor backed by an S3/MinIO data-connection bucket, storage — see
+// generate_snapshot.py's resolve_inference_service_storage) and the app
+// container's runtime-detector hook (dataset), keyed
+// "discovery-<pod-name>.json"/"dataset-<pod-name>.json"/"storage-<pod-name>.json"
 // rather than scraped from logs — dataCM is nil if the ConfigMap doesn't exist
-// yet (e.g. neither has run/flushed yet).
-func extractDataFromPod(pod *corev1.Pod, dataCM *corev1.ConfigMap) (discoveryJSON, datasetJSON string) {
+// yet (e.g. none of them have run/flushed yet).
+func extractDataFromPod(pod *corev1.Pod, dataCM *corev1.ConfigMap) (discoveryJSON, datasetJSON, storageJSON string) {
 	if dataCM != nil {
 		discoveryJSON = dataCM.Data[fmt.Sprintf("discovery-%s.json", pod.Name)]
 		datasetJSON = dataCM.Data[fmt.Sprintf("dataset-%s.json", pod.Name)]
+		storageJSON = dataCM.Data[fmt.Sprintf("storage-%s.json", pod.Name)]
 	}
 
-	return discoveryJSON, datasetJSON
+	return discoveryJSON, datasetJSON, storageJSON
+}
+
+// internalAnnotationKeys holds aibom.io/ annotation keys (prefix stripped) that are
+// bookkeeping rather than user-supplied AIBOM metadata, and so must be excluded from
+// collectAIBOMAnnotations.
+var internalAnnotationKeys = map[string]bool{
+	strings.TrimPrefix(LabelInstrumented, annotationPrefix):     true,
+	instrumentedByAnnotationKey:                                 true,
+	strings.TrimPrefix(AnnotationPostprocess, annotationPrefix): true,
+	storageInfoAnnotationKey:                                    true,
 }
 
 // collectAIBOMAnnotations returns annotations with the aibom.io/ prefix stripped,
@@ -413,7 +430,7 @@ func collectAIBOMAnnotations(annotations map[string]string) map[string]string {
 	for key, value := range annotations {
 		if strings.HasPrefix(key, annotationPrefix) {
 			stripped := strings.TrimPrefix(key, annotationPrefix)
-			if stripped != "" && stripped != "instrumented" && stripped != "instrumented-by" && stripped != "postprocess-job" {
+			if stripped != "" && !internalAnnotationKeys[stripped] {
 				result[stripped] = value
 			}
 		}
@@ -421,7 +438,7 @@ func collectAIBOMAnnotations(annotations map[string]string) map[string]string {
 	return result
 }
 
-func (w *Watcher) createDataConfigMap(ctx context.Context, namespace, configMapName, jobName string, discoveries []string, datasets []string, annotations map[string]string, containersJSON string) error {
+func (w *Watcher) createDataConfigMap(ctx context.Context, namespace, configMapName, jobName string, discoveries []string, datasets []string, annotations map[string]string, containersJSON, storageJSON string) error {
 	// Build discovery data: array of discovery objects
 	var discoveryArray []json.RawMessage
 	for _, d := range discoveries {
@@ -443,11 +460,16 @@ func (w *Watcher) createDataConfigMap(ctx context.Context, namespace, configMapN
 
 	annotationsJSON, _ := json.Marshal(annotations)
 
+	if storageJSON == "" {
+		storageJSON = "{}"
+	}
+
 	aggregateData := map[string]string{
 		"discovery.json":   discoveryData,
 		"dataset.json":     datasetData,
 		"annotations.json": string(annotationsJSON),
 		"containers.json":  containersJSON,
+		"storage.json":     storageJSON,
 	}
 
 	// The pods themselves may have already created this ConfigMap (writing their
@@ -529,11 +551,10 @@ func mergeDatasets(datasets []string) string {
 	return string(bytes)
 }
 
-// buildPostprocessInputs reads the discovery data the pods themselves already
-// wrote into the data ConfigMap, extracts dataset JSON from pod logs (still
-// log-scraped for now), and serializes container command/args info for model
-// detection.
-func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configMapName string, pods []corev1.Pod) (discoveries, datasets []string, containersJSON string) {
+// buildPostprocessInputs reads the discovery, dataset, and storage data the
+// pods themselves already wrote into the data ConfigMap, and serializes
+// container command/args info for CLI-based model detection.
+func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configMapName string, pods []corev1.Pod) (discoveries, datasets []string, containersJSON, storageJSON string) {
 	dataCM, err := w.clientset.CoreV1().ConfigMaps(namespace).Get(ctx, configMapName, metav1.GetOptions{})
 	if err != nil {
 		if !errors.IsNotFound(err) {
@@ -543,9 +564,15 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 	}
 
 	for _, pod := range pods {
-		disc, ds := extractDataFromPod(&pod, dataCM)
+		disc, ds, storage := extractDataFromPod(&pod, dataCM)
 		discoveries = append(discoveries, disc)
 		datasets = append(datasets, ds)
+		if storageJSON == "" && storage != "" {
+			storageJSON = storage
+		}
+	}
+	if storageJSON == "" {
+		storageJSON = "{}"
 	}
 
 	type containerInfo struct {
@@ -568,7 +595,7 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 		}
 	}
 	raw, _ := json.Marshal(containers)
-	return discoveries, datasets, string(raw)
+	return discoveries, datasets, string(raw), storageJSON
 }
 
 // createPostprocessJobCore creates the data ConfigMap and the postprocess Job for a
@@ -580,9 +607,9 @@ func (w *Watcher) createPostprocessJobCore(ctx context.Context, namespace, trigg
 	postprocessName := postprocessJobName(triggerName)
 	configMapName := aibomdata.ConfigMapName(triggerName)
 
-	discoveries, datasets, containersJSON := w.buildPostprocessInputs(ctx, namespace, configMapName, pods)
+	discoveries, datasets, containersJSON, storageJSON := w.buildPostprocessInputs(ctx, namespace, configMapName, pods)
 
-	if err := w.createDataConfigMap(ctx, namespace, configMapName, triggerName, discoveries, datasets, annotations, containersJSON); err != nil {
+	if err := w.createDataConfigMap(ctx, namespace, configMapName, triggerName, discoveries, datasets, annotations, containersJSON, storageJSON); err != nil {
 		log.Printf("warning: could not create data configmap for %s/%s: %v", namespace, triggerName, err)
 	}
 

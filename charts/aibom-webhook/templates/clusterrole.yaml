@@ -22,3 +22,11 @@ rules:
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["list", "watch", "create", "patch", "delete"]
+  # No serving.kserve.io permission here deliberately: resolving an
+  # InferenceService's storage.path/storageUri for model identity is done by
+  # the aibom-discovery init container itself, using the workload's own
+  # namespace-scoped RBAC (see aibom-workload-namespace's rbac.yaml) — not by
+  # this always-on, cluster-wide identity. That also avoids the alternative
+  # (a live Get from the watcher at pod-deletion time) racing against
+  # Kubernetes' garbage collector, which removes a deleted InferenceService
+  # from etcd immediately, well before cascading the delete down to its Pod.

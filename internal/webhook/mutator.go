@@ -46,6 +46,11 @@ func (m *Mutator) Mutate(pod *corev1.Pod) ([]PatchOperation, error) {
 	// Add aibom-scripts ConfigMap volume
 	patches = appendVolume(patches, pod, buildScriptsVolume())
 
+	// Add our own Kubernetes API token volume — see buildTokenVolume's doc
+	// comment for why the pod's own (possibly absent) automounted token
+	// can't be relied on for containers this webhook adds.
+	patches = appendVolume(patches, pod, buildTokenVolume())
+
 	// Add discovery init container
 	initContainer := m.buildDiscoveryInitContainer(pod)
 	if len(pod.Spec.InitContainers) == 0 {
@@ -154,6 +159,25 @@ func triggerName(pod *corev1.Pod) string {
 	return pod.Name
 }
 
+// dataConfigMapEnvVar returns the static AIBOM_DATA_CONFIGMAP env var, but
+// only when triggerName(pod) is reliably known at admission time — i.e. the
+// pod has a matching owner (its name comes from ownerReferences, already set
+// before admission). For a bare/ReplicaSet-owned pod with no such owner
+// (e.g. a KServe predictor), triggerName falls back to pod.Name, which is
+// EMPTY at this point for any pod created via generateName — the API server
+// hasn't assigned the real name yet when this webhook runs. Baking in
+// aibomdata.ConfigMapName("") here would silently point every write at a
+// malformed "-aibom-postprocess-data" ConfigMap. Instead, ok is false and the
+// caller omits the env var entirely; k8s_api.resolve_data_configmap_name()
+// derives the same name at runtime from POD_NAME (a downward API value,
+// resolved by the kubelet after the real name exists).
+func dataConfigMapEnvVar(pod *corev1.Pod) (corev1.EnvVar, bool) {
+	if !hasMatchingOwner(pod) {
+		return corev1.EnvVar{}, false
+	}
+	return corev1.EnvVar{Name: "AIBOM_DATA_CONFIGMAP", Value: aibomdata.ConfigMapName(triggerName(pod))}, true
+}
+
 func requestsGPU(pod *corev1.Pod) bool {
 	gpuResource := corev1.ResourceName("nvidia.com/gpu")
 	for i := range pod.Spec.Containers {
@@ -169,22 +193,38 @@ func requestsGPU(pod *corev1.Pod) bool {
 }
 
 func (m *Mutator) buildDiscoveryInitContainer(pod *corev1.Pod) corev1.Container {
+	env := []corev1.EnvVar{
+		downwardAPIEnv("POD_NAME", "metadata.name"),
+		downwardAPIEnv("POD_UID", "metadata.uid"),
+		downwardAPIEnv("POD_NAMESPACE", "metadata.namespace"),
+		downwardAPIEnv("POD_IP", "status.podIP"),
+		downwardAPIEnv("NODE_NAME", "spec.nodeName"),
+	}
+	if dataConfigMapEnv, ok := dataConfigMapEnvVar(pod); ok {
+		env = append(env, dataConfigMapEnv)
+	}
+	// Only pods KServe itself already labeled as a predictor get this one —
+	// a single-field label downward API reference fails pod admission
+	// outright if the referenced label isn't present on the pod, so this
+	// can't be added unconditionally for every workload kind (Job/JobSet/
+	// PyTorchJob/RayJob pods have no such label).
+	if pod.Labels[aibomdata.LabelKServeInferenceService] != "" {
+		env = append(env, downwardAPIEnv(
+			"INFERENCESERVICE_NAME",
+			fmt.Sprintf("metadata.labels['%s']", aibomdata.LabelKServeInferenceService),
+		))
+	}
+
 	c := corev1.Container{
 		Name:    "aibom-discovery",
 		Image:   m.DiscoveryImage,
 		Command: []string{"/bin/bash", "-c"},
 		Args:    []string{"python3 /scripts/generate_snapshot.py"},
-		Env: []corev1.EnvVar{
-			downwardAPIEnv("POD_NAME", "metadata.name"),
-			downwardAPIEnv("POD_UID", "metadata.uid"),
-			downwardAPIEnv("POD_NAMESPACE", "metadata.namespace"),
-			downwardAPIEnv("POD_IP", "status.podIP"),
-			downwardAPIEnv("NODE_NAME", "spec.nodeName"),
-			{Name: "AIBOM_DATA_CONFIGMAP", Value: aibomdata.ConfigMapName(triggerName(pod))},
-		},
+		Env:     env,
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: "aibom-data", MountPath: "/tmp/result"},
 			{Name: "aibom-scripts", MountPath: "/scripts", ReadOnly: true},
+			aibomTokenVolumeMount(),
 		},
 	}
 
@@ -230,10 +270,12 @@ func (m *Mutator) buildDatasetDetectorPatches(pod *corev1.Pod, containerIdx int)
 		{Name: "AIBOM_DATASET_DETECT", Value: "1"},
 		{Name: "AIBOM_DEBUG", Value: "1"},
 		{Name: "AIBOM_DATASET_OUTPUT", Value: "/tmp/aibom/dataset_detected.json"},
-		{Name: "AIBOM_DATA_CONFIGMAP", Value: aibomdata.ConfigMapName(triggerName(pod))},
 		downwardAPIEnv("POD_NAME", "metadata.name"),
 		downwardAPIEnv("POD_NAMESPACE", "metadata.namespace"),
 		{Name: "PYTHONPATH", Value: pythonPath},
+	}
+	if dataConfigMapEnv, ok := dataConfigMapEnvVar(pod); ok {
+		envVars = append(envVars, dataConfigMapEnv)
 	}
 
 	envPath := fmt.Sprintf("/spec/containers/%d/env", containerIdx)
@@ -289,6 +331,15 @@ func (m *Mutator) buildDatasetDetectorPatches(pod *corev1.Pod, containerIdx int)
 			MountPath: "/tmp/aibom",
 		},
 	}
+	// Unlike the discovery init container (which we add fresh and so never
+	// has a pre-existing mount to collide with), this is the workload's own
+	// container — if automountServiceAccountToken wasn't disabled, the
+	// built-in ServiceAccount admission controller already mounted a token
+	// at this same path before our webhook ran, and a second volumeMount at
+	// an identical path fails pod admission outright.
+	if !hasVolumeMountAtPath(container.VolumeMounts, aibomTokenVolumeMount().MountPath) {
+		mounts = append(mounts, aibomTokenVolumeMount())
+	}
 
 	mountPath := fmt.Sprintf("/spec/containers/%d/volumeMounts", containerIdx)
 	if len(container.VolumeMounts) == 0 {
@@ -337,6 +388,70 @@ func buildScriptsVolume() corev1.Volume {
 			},
 		},
 	}
+}
+
+// buildTokenVolume provisions our own copy of the standard "kube-api-access"
+// projected volume — the same three sources (SA token, cluster CA bundle,
+// namespace) the built-in ServiceAccount admission controller normally
+// projects automatically. That controller only mounts it into containers
+// already present in the pod spec when it runs; since we add the discovery
+// init container (and, for dataset detection, hooks into app containers)
+// via a mutating webhook patch afterward, those newly-added containers never
+// get the automatic one — this is true regardless of the pod's own
+// automountServiceAccountToken setting, since a container only gets a token
+// if it has an explicit volumeMount naming a token volume. Without this,
+// k8s_api.py (used by both generate_snapshot.py and runtime_detector.py) has
+// no token to authenticate with at all.
+func buildTokenVolume() corev1.Volume {
+	expirationSeconds := int64(3600)
+	return corev1.Volume{
+		Name: "aibom-token",
+		VolumeSource: corev1.VolumeSource{
+			Projected: &corev1.ProjectedVolumeSource{
+				Sources: []corev1.VolumeProjection{
+					{
+						ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
+							Path:              "token",
+							ExpirationSeconds: &expirationSeconds,
+						},
+					},
+					{
+						ConfigMap: &corev1.ConfigMapProjection{
+							LocalObjectReference: corev1.LocalObjectReference{Name: "kube-root-ca.crt"},
+							Items:                []corev1.KeyToPath{{Key: "ca.crt", Path: "ca.crt"}},
+						},
+					},
+					{
+						DownwardAPI: &corev1.DownwardAPIProjection{
+							Items: []corev1.DownwardAPIVolumeFile{
+								{Path: "namespace", FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"}},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+// aibomTokenVolumeMount mounts buildTokenVolume at the exact path k8s_api.py
+// expects (_SA_DIR), so it's indistinguishable from the token the
+// ServiceAccount admission controller would have auto-mounted.
+func aibomTokenVolumeMount() corev1.VolumeMount {
+	return corev1.VolumeMount{
+		Name:      "aibom-token",
+		MountPath: "/var/run/secrets/kubernetes.io/serviceaccount",
+		ReadOnly:  true,
+	}
+}
+
+func hasVolumeMountAtPath(mounts []corev1.VolumeMount, path string) bool {
+	for _, m := range mounts {
+		if m.MountPath == path {
+			return true
+		}
+	}
+	return false
 }
 
 // appendVolume adds a volume patch, handling nil vs existing volumes array.

@@ -18,6 +18,13 @@ const (
 	// derive a second-generation data ConfigMap name from the postprocess Job's
 	// own name (see mutator.go's shouldMutate).
 	LabelPostprocessFor = "aibom.io/postprocess-for"
+
+	// LabelKServeInferenceService is the label KServe applies to every predictor
+	// pod, naming the owning InferenceService. For a predictor pod already
+	// instrumented via the requestsGPU fallback, it lets the watcher look up
+	// that InferenceService to resolve model identity for storage.key/path-based
+	// (S3/MinIO data-connection) deployments, which carry no CLI args to parse.
+	LabelKServeInferenceService = "serving.kserve.io/inferenceservice"
 )
 
 // PostprocessJobName returns the deterministic postprocess Job name for a

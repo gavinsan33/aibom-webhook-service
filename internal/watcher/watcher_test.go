@@ -2,10 +2,13 @@ package watcher
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/gavinsan33/aibom-webhook-service/internal/aibomdata"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -99,6 +102,15 @@ func instrumentedBarePod(name, namespace string) *corev1.Pod {
 				},
 			}},
 		},
+	}
+}
+
+func TestShouldPostprocessPod_NoQualifyingSignal(t *testing.T) {
+	pod := instrumentedBarePod("web-pod", "gavin-test")
+	pod.Spec.Containers[0].Resources = corev1.ResourceRequirements{}
+
+	if shouldPostprocessPod(pod) {
+		t.Error("expected pod with no GPU request or annotations to be skipped")
 	}
 }
 
@@ -676,6 +688,77 @@ func TestPodFinalizerAddedToGPUPod(t *testing.T) {
 	_, err = client.BatchV1().Jobs("test-ns").Get(context.TODO(), "predictor-pod-aibom-postprocess", metav1.GetOptions{})
 	if err == nil {
 		t.Error("postprocess job should not be created before pod is deleted")
+	}
+}
+
+// TestPostprocessReadsStorageInfoFromDiscoveryData reproduces the scenario
+// that motivated writing storage.json in the discovery init container (see
+// generate_snapshot.py's resolve_inference_service_storage) instead of the
+// watcher looking it up lazily at pod-deletion time: deleting an
+// InferenceService removes it from etcd immediately, well before Kubernetes'
+// garbage collector cascades the delete down to the Pod, so by the time
+// postprocessing runs at pod deletion, a live Get against the
+// InferenceService would 404 almost every time. Model identity must instead
+// come from what the init container already wrote at pod startup, while the
+// InferenceService still existed — the watcher itself never talks to
+// serving.kserve.io at all.
+func TestPostprocessReadsStorageInfoFromDiscoveryData(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	now := metav1.Now()
+	pod := instrumentedBarePod("granite-model-predictor-abc123", "test-ns")
+	pod.Labels[aibomdata.LabelKServeInferenceService] = "granite-model"
+	pod.Finalizers = []string{podFinalizerName}
+	pod.DeletionTimestamp = &now
+
+	storageJSON := `{"inference_service":"granite-model","storage_path":"models/tinyllama-1.1b-chat"}`
+	dataConfigMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pod.Name + "-aibom-postprocess-data",
+			Namespace: "test-ns",
+		},
+		Data: map[string]string{
+			fmt.Sprintf("storage-%s.json", pod.Name): storageJSON,
+		},
+	}
+
+	client := fake.NewSimpleClientset(ns, pod, dataConfigMap)
+	w := New(client, "aibom-postprocess:latest")
+	startWatcher(t, w)
+
+	w.onPodEvent(pod)
+
+	cm, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), pod.Name+"-aibom-postprocess-data", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("data configmap not found: %v", err)
+	}
+	var got map[string]string
+	if err := json.Unmarshal([]byte(cm.Data["storage.json"]), &got); err != nil {
+		t.Fatalf("invalid storage.json: %v", err)
+	}
+	if got["storage_path"] != "models/tinyllama-1.1b-chat" {
+		t.Errorf("storage_path = %q, want %q", got["storage_path"], "models/tinyllama-1.1b-chat")
+	}
+}
+
+func TestPostprocessDefaultsStorageInfoWhenAbsent(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	now := metav1.Now()
+	pod := instrumentedBarePod("web-pod", "test-ns")
+	pod.Finalizers = []string{podFinalizerName}
+	pod.DeletionTimestamp = &now
+
+	client := fake.NewSimpleClientset(ns, pod)
+	w := New(client, "aibom-postprocess:latest")
+	startWatcher(t, w)
+
+	w.onPodEvent(pod)
+
+	cm, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), pod.Name+"-aibom-postprocess-data", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("data configmap not found: %v", err)
+	}
+	if cm.Data["storage.json"] != "{}" {
+		t.Errorf("storage.json = %q, want %q for a workload with no InferenceService storage info", cm.Data["storage.json"], "{}")
 	}
 }
 

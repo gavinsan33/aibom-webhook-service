@@ -3,6 +3,7 @@ package webhook
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -145,6 +146,60 @@ func TestShouldMutate_GPURequest(t *testing.T) {
 	}
 }
 
+func TestMutate_KServePredictor_AddsInferenceServiceNameEnv(t *testing.T) {
+	m := newTestMutator()
+	pod := podWithGPU()
+	pod.Labels = map[string]string{"serving.kserve.io/inferenceservice": "granite-model"}
+
+	patches, err := m.Mutate(pod)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, p := range patches {
+		if p.Path != "/spec/initContainers" {
+			continue
+		}
+		c := p.Value.([]corev1.Container)[0]
+		for _, env := range c.Env {
+			if env.Name == "INFERENCESERVICE_NAME" {
+				if env.ValueFrom == nil || env.ValueFrom.FieldRef == nil {
+					t.Fatalf("INFERENCESERVICE_NAME should be a downward API field ref, got %+v", env)
+				}
+				want := "metadata.labels['serving.kserve.io/inferenceservice']"
+				if env.ValueFrom.FieldRef.FieldPath != want {
+					t.Errorf("field path = %q, want %q", env.ValueFrom.FieldRef.FieldPath, want)
+				}
+				return
+			}
+		}
+		t.Fatal("expected INFERENCESERVICE_NAME env var on a KServe predictor pod")
+	}
+	t.Fatal("init container patch not found")
+}
+
+func TestMutate_NonKServePod_NoInferenceServiceNameEnv(t *testing.T) {
+	m := newTestMutator()
+	patches, err := m.Mutate(podWithGPU())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, p := range patches {
+		if p.Path != "/spec/initContainers" {
+			continue
+		}
+		c := p.Value.([]corev1.Container)[0]
+		for _, env := range c.Env {
+			if env.Name == "INFERENCESERVICE_NAME" {
+				t.Error("INFERENCESERVICE_NAME should not be set for a pod without the KServe predictor label — a downward API field ref to a missing label fails pod admission")
+			}
+		}
+		return
+	}
+	t.Fatal("init container patch not found")
+}
+
 func TestShouldMutate_AlreadyInstrumented(t *testing.T) {
 	m := newTestMutator()
 	if m.shouldMutate(podAlreadyInstrumented()) {
@@ -212,13 +267,68 @@ func TestMutate_InjectsInitContainer(t *testing.T) {
 			if len(containers[0].Env) != 6 {
 				t.Errorf("expected 6 env vars, got %d", len(containers[0].Env))
 			}
-			if len(containers[0].VolumeMounts) != 2 {
-				t.Errorf("expected 2 volume mounts (aibom-data + aibom-scripts), got %d", len(containers[0].VolumeMounts))
+			if len(containers[0].VolumeMounts) != 3 {
+				t.Errorf("expected 3 volume mounts (aibom-data + aibom-scripts + aibom-token), got %d", len(containers[0].VolumeMounts))
 			}
 			return
 		}
 	}
 	t.Error("initContainers patch not found")
+}
+
+func TestMutate_JobOwnedPod_HasStaticDataConfigMapEnv(t *testing.T) {
+	m := newTestMutator()
+	patches, err := m.Mutate(podWithOwner("Job"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, p := range patches {
+		if p.Path != "/spec/initContainers" {
+			continue
+		}
+		c := p.Value.([]corev1.Container)[0]
+		for _, env := range c.Env {
+			if env.Name == "AIBOM_DATA_CONFIGMAP" {
+				want := "test-job-aibom-postprocess-data"
+				if env.Value != want {
+					t.Errorf("AIBOM_DATA_CONFIGMAP = %q, want %q", env.Value, want)
+				}
+				return
+			}
+		}
+		t.Fatal("expected AIBOM_DATA_CONFIGMAP for a Job-owned pod — its trigger name comes from ownerReferences, known at admission time")
+	}
+	t.Fatal("init container patch not found")
+}
+
+// TestMutate_BarePod_OmitsDataConfigMapEnv guards against the real failure
+// mode this exists to avoid: a bare/ReplicaSet-owned pod's own name isn't
+// assigned yet when the webhook runs (the API server hasn't resolved
+// generateName to a real name at admission time), so baking in
+// aibomdata.ConfigMapName(triggerName(pod)) here would silently produce a
+// malformed "-aibom-postprocess-data" value (empty trigger prefix) — see
+// dataConfigMapEnvVar's doc comment.
+func TestMutate_BarePod_OmitsDataConfigMapEnv(t *testing.T) {
+	m := newTestMutator()
+	patches, err := m.Mutate(podWithGPU())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, p := range patches {
+		if p.Path != "/spec/initContainers" {
+			continue
+		}
+		c := p.Value.([]corev1.Container)[0]
+		for _, env := range c.Env {
+			if env.Name == "AIBOM_DATA_CONFIGMAP" {
+				t.Errorf("expected no AIBOM_DATA_CONFIGMAP for a bare pod (got %q) — its own name isn't known at admission time", env.Value)
+			}
+		}
+		return
+	}
+	t.Fatal("init container patch not found")
 }
 
 func TestMutate_ExistingInitContainers(t *testing.T) {
@@ -378,6 +488,71 @@ func TestMutate_InjectsDatasetDetectorEnvVars(t *testing.T) {
 	for _, expected := range []string{"AIBOM_DATASET_DETECT", "AIBOM_DEBUG", "AIBOM_DATASET_OUTPUT", "PYTHONPATH"} {
 		if !envVarNames[expected] {
 			t.Errorf("expected env var %q in dataset detector patches", expected)
+		}
+	}
+}
+
+// collectContainerVolumeMountPatches gathers every VolumeMount added to a
+// container's volumeMounts, regardless of whether the patch replaced the
+// whole array ([]VolumeMount, when the container started with none) or
+// appended individual entries (VolumeMount, one patch per entry, when it
+// already had some) — see buildDatasetDetectorPatches.
+func collectContainerVolumeMountPatches(patches []PatchOperation, containerIdx int) []corev1.VolumeMount {
+	prefix := fmt.Sprintf("/spec/containers/%d/volumeMounts", containerIdx)
+	var mounts []corev1.VolumeMount
+	for _, p := range patches {
+		if p.Path == prefix {
+			mounts = append(mounts, p.Value.([]corev1.VolumeMount)...)
+		} else if p.Path == prefix+"/-" {
+			mounts = append(mounts, p.Value.(corev1.VolumeMount))
+		}
+	}
+	return mounts
+}
+
+func TestMutate_AddsTokenMountToAppContainer(t *testing.T) {
+	m := newTestMutator()
+	patches, err := m.Mutate(podWithOwner("Job"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	mounts := collectContainerVolumeMountPatches(patches, 0)
+	if len(mounts) == 0 {
+		t.Fatal("container volumeMounts patch not found")
+	}
+	for _, mount := range mounts {
+		if mount.Name == "aibom-token" && mount.MountPath == "/var/run/secrets/kubernetes.io/serviceaccount" {
+			return
+		}
+	}
+	t.Fatal("expected aibom-token mount when the container has no existing token mount")
+}
+
+// TestMutate_SkipsTokenMountWhenAlreadyPresent guards against the real
+// failure mode this exists to avoid: if automountServiceAccountToken wasn't
+// disabled, the built-in ServiceAccount admission controller already mounted
+// a token at this exact path before our webhook ran — a second volumeMount
+// at an identical path fails pod admission outright.
+func TestMutate_SkipsTokenMountWhenAlreadyPresent(t *testing.T) {
+	m := newTestMutator()
+	pod := podWithOwner("Job")
+	pod.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{
+		{Name: "kube-api-access-abcde", MountPath: "/var/run/secrets/kubernetes.io/serviceaccount", ReadOnly: true},
+	}
+
+	patches, err := m.Mutate(pod)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	mounts := collectContainerVolumeMountPatches(patches, 0)
+	if len(mounts) == 0 {
+		t.Fatal("container volumeMounts patch not found")
+	}
+	for _, mount := range mounts {
+		if mount.Name == "aibom-token" {
+			t.Fatal("should not add a second volumeMount at a path the container already mounts")
 		}
 	}
 }

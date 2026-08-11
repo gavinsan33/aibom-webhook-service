@@ -42,7 +42,7 @@ _OUTPUT_PATH = os.environ.get(
 _DEBUG = os.environ.get("AIBOM_DEBUG", "0") == "1"
 _POD_NAME = os.environ.get("POD_NAME", "")
 _POD_NAMESPACE = os.environ.get("POD_NAMESPACE", "")
-_DATA_CONFIGMAP = os.environ.get("AIBOM_DATA_CONFIGMAP", "")
+_DATA_CONFIGMAP = k8s_api.resolve_data_configmap_name() if k8s_api else ""
 
 
 def _dbg(msg):
