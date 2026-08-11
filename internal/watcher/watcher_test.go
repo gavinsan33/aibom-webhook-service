@@ -202,7 +202,7 @@ func TestMergeDatasets_Invalid(t *testing.T) {
 // Core watcher event tests
 // ---------------------------------------------------------------------------
 
-func TestIsJobComplete(t *testing.T) {
+func TestIsJobFinished(t *testing.T) {
 	tests := []struct {
 		name     string
 		job      *batchv1.Job
@@ -230,15 +230,15 @@ func TestIsJobComplete(t *testing.T) {
 					},
 				},
 			},
-			expected: false,
+			expected: true,
 		},
 	}
 
 	w := &Watcher{}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := w.isJobComplete(tt.job); got != tt.expected {
-				t.Errorf("isJobComplete() = %v, want %v", got, tt.expected)
+			if got := w.isJobFinished(tt.job); got != tt.expected {
+				t.Errorf("isJobFinished() = %v, want %v", got, tt.expected)
 			}
 		})
 	}
