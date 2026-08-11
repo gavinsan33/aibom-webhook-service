@@ -59,7 +59,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	response := h.handleAdmission(&review)
 
 	review.Response = response
-	review.Response.UID = review.Request.UID
+	if review.Request != nil {
+		review.Response.UID = review.Request.UID
+	}
 
 	respBytes, err := json.Marshal(review)
 	if err != nil {
