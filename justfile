@@ -176,15 +176,17 @@ undeploy: _check-auth
 
 # --- Local kind cluster --------------------------------------------------------
 #
-# Not OpenShift — no BuildConfig/ImageStream, no oc. The kind cluster here runs
-# on podman, not docker (KIND_EXPERIMENTAL_PROVIDER=podman — kind needs this on
-# every command that touches node containers, load included, so it can exec
-# into them). Build with podman, save to a tar, `kind load image-archive`
-# it in, no registry involved. build.enabled is set to false on deploy (that
-# template is OpenShift-only) and image.*.repository/tag point at the
-# locally-loaded tags instead of the in-cluster registry. Requires the kind
-# cluster to already be up with cert-manager installed
-# (templates/certificates.yaml still needs it).
+# Not OpenShift — no BuildConfig/ImageStream, no oc. Provider (docker vs podman)
+# is auto-detected the same way mock-openshift-cluster's scripts/lib.sh picks it
+# for `just up`/`just down`: docker unless its daemon is unreachable. This has
+# to match exactly — kind tracks clusters per-provider, so loading images via
+# the wrong provider silently creates/targets a second, empty "mock-openshift"
+# cluster instead of erroring, and every pod on the real one sits in
+# ImagePullBackOff since the image never actually landed on its node.
+# build.enabled is set to false on deploy (that template is OpenShift-only)
+# and image.*.repository/tag point at the locally-loaded tags instead of the
+# in-cluster registry. Requires the kind cluster to already be up with
+# cert-manager installed (templates/certificates.yaml still needs it).
 
 kind_cluster_name := "mock-openshift"
 kind_webhook_img := "localhost/aibom-webhook-service:dev"
@@ -194,14 +196,18 @@ kind_postprocess_img := "localhost/aibom-postprocess:dev"
 kind-image:
     #!/usr/bin/env bash
     set -euo pipefail
-    export KIND_EXPERIMENTAL_PROVIDER=podman
-    podman build -t {{ kind_webhook_img }} .
-    podman build -t {{ kind_postprocess_img }} -f postprocess/Dockerfile .
+    if [ -z "${KIND_EXPERIMENTAL_PROVIDER:-}" ] && ! docker info >/dev/null 2>&1 && command -v podman >/dev/null 2>&1; then
+        export KIND_EXPERIMENTAL_PROVIDER=podman
+    fi
+    engine=podman
+    command -v docker >/dev/null 2>&1 && [ "${KIND_EXPERIMENTAL_PROVIDER:-}" != "podman" ] && engine=docker
+    "$engine" build -t {{ kind_webhook_img }} .
+    "$engine" build -t {{ kind_postprocess_img }} -f postprocess/Dockerfile .
     tar_webhook="$(mktemp -t aibom-webhook-kind-XXXXXX.tar)"
     tar_postprocess="$(mktemp -t aibom-postprocess-kind-XXXXXX.tar)"
     trap 'rm -f "$tar_webhook" "$tar_postprocess"' EXIT
-    podman save {{ kind_webhook_img }} -o "$tar_webhook"
-    podman save {{ kind_postprocess_img }} -o "$tar_postprocess"
+    "$engine" save {{ kind_webhook_img }} -o "$tar_webhook"
+    "$engine" save {{ kind_postprocess_img }} -o "$tar_postprocess"
     kind load image-archive "$tar_webhook" --name {{ kind_cluster_name }}
     kind load image-archive "$tar_postprocess" --name {{ kind_cluster_name }}
 
