@@ -59,3 +59,12 @@ watcher:
 # disables telemetry collection entirely.
 prometheus:
   url: https://thanos-querier.openshift-monitoring.svc:9091
+
+# Optional, purely for a clickable Grafana Explore deep link in the AIBOM
+# (resource_utilization.grafana_links) — actual telemetry queries always go
+# straight to prometheus.url above, never through Grafana. datasourceUid is
+# the UID of the Grafana datasource pointing at that same Prometheus. Leave
+# both empty to omit the link entirely.
+grafana:
+  url: ""
+  datasourceUid: ""

@@ -71,11 +71,28 @@ const (
 	configMapSuffix   = aibomdata.ConfigMapSuffix
 )
 
+// Config bundles the watcher's telemetry-related settings — grouped into a struct
+// rather than four same-typed positional strings in New(), which would otherwise be
+// easy to transpose by accident (e.g. swapping prometheusURL and grafanaURL) with no
+// compiler error to catch it.
+type Config struct {
+	PostprocessImage string
+	PrometheusURL    string
+	// GrafanaURL and GrafanaDatasourceUID are only used to build a clickable Grafana
+	// Explore deep link into resource_utilization.grafana_links — actual telemetry
+	// queries always go straight to PrometheusURL (see postprocess.py). Either being
+	// empty just omits the link for that pod's telemetry rather than erroring.
+	GrafanaURL           string
+	GrafanaDatasourceUID string
+}
+
 type Watcher struct {
-	clientset        kubernetes.Interface
-	postprocessImage string
-	prometheusURL    string
-	factory          informers.SharedInformerFactory
+	clientset            kubernetes.Interface
+	postprocessImage     string
+	prometheusURL        string
+	grafanaURL           string
+	grafanaDatasourceUID string
+	factory              informers.SharedInformerFactory
 	// podFactory is a separate, server-side label-selector-scoped factory for the Pod
 	// informer. Unlike Jobs (which have no label capturing "qualifies for
 	// postprocessing", so watch-everything-then-filter is unavoidable), pods are far
@@ -85,12 +102,14 @@ type Watcher struct {
 	podFactory informers.SharedInformerFactory
 }
 
-func New(clientset kubernetes.Interface, postprocessImage string, prometheusURL string) *Watcher {
+func New(clientset kubernetes.Interface, cfg Config) *Watcher {
 	w := &Watcher{
-		clientset:        clientset,
-		postprocessImage: postprocessImage,
-		prometheusURL:    prometheusURL,
-		factory:          informers.NewSharedInformerFactory(clientset, resyncPeriod),
+		clientset:            clientset,
+		postprocessImage:     cfg.PostprocessImage,
+		prometheusURL:        cfg.PrometheusURL,
+		grafanaURL:           cfg.GrafanaURL,
+		grafanaDatasourceUID: cfg.GrafanaDatasourceUID,
+		factory:              informers.NewSharedInformerFactory(clientset, resyncPeriod),
 		podFactory: informers.NewSharedInformerFactoryWithOptions(
 			clientset, resyncPeriod,
 			informers.WithTweakListOptions(func(opts *metav1.ListOptions) {
@@ -808,6 +827,8 @@ func (w *Watcher) createPostprocessJobCore(ctx context.Context, namespace, trigg
 								{Name: "AIBOM_JOB_NAMESPACE", Value: namespace},
 								{Name: "AIBOM_INPUT_DIR", Value: "/data/input"},
 								{Name: "PROMETHEUS_URL", Value: w.prometheusURL},
+								{Name: "GRAFANA_URL", Value: w.grafanaURL},
+								{Name: "GRAFANA_DATASOURCE_UID", Value: w.grafanaDatasourceUID},
 							},
 							VolumeMounts: []corev1.VolumeMount{
 								{

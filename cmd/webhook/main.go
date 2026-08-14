@@ -31,6 +31,8 @@ func main() {
 	flag.BoolVar(&cfg.EnableWatcher, "enable-watcher", true, "start the Job completion watcher")
 	flag.StringVar(&cfg.PostprocessImage, "postprocess-image", "busybox:latest", "image for postprocess Jobs")
 	flag.StringVar(&cfg.PrometheusURL, "prometheus-url", "https://thanos-querier.openshift-monitoring.svc:9091", "Prometheus/Thanos endpoint the postprocess Job queries for telemetry (empty disables telemetry collection)")
+	flag.StringVar(&cfg.GrafanaURL, "grafana-url", "", "Grafana base URL, used only to build a clickable Explore link in the AIBOM (telemetry itself always queries prometheus-url directly); empty omits the link")
+	flag.StringVar(&cfg.GrafanaDatasourceUID, "grafana-datasource-uid", "", "UID of the Grafana datasource pointing at prometheus-url, needed to build the Explore link above")
 	flag.Parse()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -72,7 +74,12 @@ func main() {
 			if err != nil {
 				log.Printf("WARNING: failed to create Kubernetes clientset, watcher disabled: %v", err)
 			} else {
-				w := watcher.New(clientset, cfg.PostprocessImage, cfg.PrometheusURL)
+				w := watcher.New(clientset, watcher.Config{
+					PostprocessImage:     cfg.PostprocessImage,
+					PrometheusURL:        cfg.PrometheusURL,
+					GrafanaURL:           cfg.GrafanaURL,
+					GrafanaDatasourceUID: cfg.GrafanaDatasourceUID,
+				})
 				go func() {
 					if err := w.Start(ctx); err != nil {
 						log.Printf("watcher error: %v", err)
