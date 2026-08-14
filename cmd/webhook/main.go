@@ -30,6 +30,7 @@ func main() {
 	flag.BoolVar(&cfg.DatasetDetection, "dataset-detection", true, "inject dataset detection hooks into application containers")
 	flag.BoolVar(&cfg.EnableWatcher, "enable-watcher", true, "start the Job completion watcher")
 	flag.StringVar(&cfg.PostprocessImage, "postprocess-image", "busybox:latest", "image for postprocess Jobs")
+	flag.StringVar(&cfg.PrometheusURL, "prometheus-url", "https://thanos-querier.openshift-monitoring.svc:9091", "Prometheus/Thanos endpoint the postprocess Job queries for telemetry (empty disables telemetry collection)")
 	flag.Parse()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -71,7 +72,7 @@ func main() {
 			if err != nil {
 				log.Printf("WARNING: failed to create Kubernetes clientset, watcher disabled: %v", err)
 			} else {
-				w := watcher.New(clientset, cfg.PostprocessImage)
+				w := watcher.New(clientset, cfg.PostprocessImage, cfg.PrometheusURL)
 				go func() {
 					if err := w.Start(ctx); err != nil {
 						log.Printf("watcher error: %v", err)

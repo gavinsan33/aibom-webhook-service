@@ -54,6 +54,17 @@ const (
 	postprocessContainerName      = "aibom-postprocess"
 	postprocessServiceAccountName = "aibom-postprocess"
 
+	// serviceCAConfigMapName is created per workload namespace by the
+	// aibom-workload-namespace chart (service.beta.openshift.io/inject-cabundle
+	// annotation), the same way gpu-quota-operator's service-ca ConfigMap works.
+	// Mounted as optional: on a cluster/chart version where it doesn't exist yet
+	// (or a plain-HTTP dev Prometheus that doesn't need it), the mount resolves to
+	// an empty directory instead of blocking the pod, and postprocess.py's own
+	// missing-file fallback (system trust store) takes it from there.
+	serviceCAConfigMapName = "aibom-service-ca"
+	serviceCAVolumeName    = "service-ca"
+	serviceCAMountPath     = "/etc/aibom-postprocess/service-ca"
+
 	resyncPeriod      = 30 * time.Second
 	maxJobNameLength  = aibomdata.MaxJobNameLength
 	postprocessSuffix = aibomdata.PostprocessSuffix
@@ -63,6 +74,7 @@ const (
 type Watcher struct {
 	clientset        kubernetes.Interface
 	postprocessImage string
+	prometheusURL    string
 	factory          informers.SharedInformerFactory
 	// podFactory is a separate, server-side label-selector-scoped factory for the Pod
 	// informer. Unlike Jobs (which have no label capturing "qualifies for
@@ -73,10 +85,11 @@ type Watcher struct {
 	podFactory informers.SharedInformerFactory
 }
 
-func New(clientset kubernetes.Interface, postprocessImage string) *Watcher {
+func New(clientset kubernetes.Interface, postprocessImage string, prometheusURL string) *Watcher {
 	w := &Watcher{
 		clientset:        clientset,
 		postprocessImage: postprocessImage,
+		prometheusURL:    prometheusURL,
 		factory:          informers.NewSharedInformerFactory(clientset, resyncPeriod),
 		podFactory: informers.NewSharedInformerFactoryWithOptions(
 			clientset, resyncPeriod,
@@ -794,31 +807,17 @@ func (w *Watcher) createPostprocessJobCore(ctx context.Context, namespace, trigg
 								{Name: "AIBOM_JOB_NAME", Value: triggerName},
 								{Name: "AIBOM_JOB_NAMESPACE", Value: namespace},
 								{Name: "AIBOM_INPUT_DIR", Value: "/data/input"},
-								{
-									Name: "GRAFANA_URL",
-									ValueFrom: &corev1.EnvVarSource{
-										SecretKeyRef: &corev1.SecretKeySelector{
-											LocalObjectReference: corev1.LocalObjectReference{Name: "aibom-config"},
-											Key:                  "grafana-url",
-											Optional:             &optional,
-										},
-									},
-								},
-								{
-									Name: "GRAFANA_API_TOKEN",
-									ValueFrom: &corev1.EnvVarSource{
-										SecretKeyRef: &corev1.SecretKeySelector{
-											LocalObjectReference: corev1.LocalObjectReference{Name: "aibom-config"},
-											Key:                  "grafana-api-token",
-											Optional:             &optional,
-										},
-									},
-								},
+								{Name: "PROMETHEUS_URL", Value: w.prometheusURL},
 							},
 							VolumeMounts: []corev1.VolumeMount{
 								{
 									Name:      "aibom-input",
 									MountPath: "/data/input",
+									ReadOnly:  true,
+								},
+								{
+									Name:      serviceCAVolumeName,
+									MountPath: serviceCAMountPath,
 									ReadOnly:  true,
 								},
 							},
@@ -830,6 +829,15 @@ func (w *Watcher) createPostprocessJobCore(ctx context.Context, namespace, trigg
 							VolumeSource: corev1.VolumeSource{
 								ConfigMap: &corev1.ConfigMapVolumeSource{
 									LocalObjectReference: corev1.LocalObjectReference{Name: configMapName},
+								},
+							},
+						},
+						{
+							Name: serviceCAVolumeName,
+							VolumeSource: corev1.VolumeSource{
+								ConfigMap: &corev1.ConfigMapVolumeSource{
+									LocalObjectReference: corev1.LocalObjectReference{Name: serviceCAConfigMapName},
+									Optional:             &optional,
 								},
 							},
 						},
