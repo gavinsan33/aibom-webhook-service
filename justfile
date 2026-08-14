@@ -186,7 +186,7 @@ undeploy: _check-auth
 # cluster to already be up with cert-manager installed
 # (templates/certificates.yaml still needs it).
 
-kind_cluster_name := "aibom-kind"
+kind_cluster_name := "mock-openshift"
 kind_webhook_img := "localhost/aibom-webhook-service:dev"
 kind_postprocess_img := "localhost/aibom-postprocess:dev"
 
