@@ -43,6 +43,8 @@ spec:
             - --postprocess-image={{ .Values.image.postprocess.repository }}:{{ .Values.image.postprocess.tag }}
             - --enable-watcher={{ .Values.watcher.enabled }}
             - --prometheus-url={{ .Values.prometheus.url }}
+            - --grafana-url={{ .Values.grafana.url }}
+            - --grafana-datasource-uid={{ .Values.grafana.datasourceUid }}
           volumeMounts:
             - name: certs
               mountPath: /certs
