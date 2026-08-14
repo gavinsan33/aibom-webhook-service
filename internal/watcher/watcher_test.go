@@ -250,7 +250,7 @@ func TestIsJobFinished(t *testing.T) {
 
 func TestIsNamespaceEnabled(t *testing.T) {
 	client := fake.NewSimpleClientset(enabledNamespace("enabled-ns"), disabledNamespace("disabled-ns"))
-	w := New(client, "busybox:latest")
+	w := New(client, "busybox:latest", "")
 	startWatcher(t, w)
 
 	if !w.isNamespaceEnabled("enabled-ns") {
@@ -283,7 +283,7 @@ func TestOnJobEvent_CreatesPostprocessJob(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, job, pod, dataConfigMap)
-	w := New(client, "aibom-postprocess:latest")
+	w := New(client, "aibom-postprocess:latest", "")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -356,12 +356,20 @@ func TestOnJobEvent_CreatesPostprocessJob(t *testing.T) {
 		t.Errorf("AIBOM_INPUT_DIR = %q, want %q", envNames["AIBOM_INPUT_DIR"], "/data/input")
 	}
 
-	// Verify volume mount
-	if len(ppJob.Spec.Template.Spec.Volumes) != 1 {
-		t.Fatalf("expected 1 volume, got %d", len(ppJob.Spec.Template.Spec.Volumes))
+	// Verify volume mounts: the data ConfigMap, plus the optional service-ca bundle
+	// used to trust in-cluster Prometheus/Thanos Querier's TLS cert.
+	if len(ppJob.Spec.Template.Spec.Volumes) != 2 {
+		t.Fatalf("expected 2 volumes, got %d", len(ppJob.Spec.Template.Spec.Volumes))
 	}
 	if ppJob.Spec.Template.Spec.Volumes[0].ConfigMap.Name != "train-job-aibom-postprocess-data" {
 		t.Errorf("volume configmap name = %q, want %q", ppJob.Spec.Template.Spec.Volumes[0].ConfigMap.Name, "train-job-aibom-postprocess-data")
+	}
+	serviceCAVolume := ppJob.Spec.Template.Spec.Volumes[1]
+	if serviceCAVolume.ConfigMap.Name != serviceCAConfigMapName {
+		t.Errorf("service-ca volume configmap name = %q, want %q", serviceCAVolume.ConfigMap.Name, serviceCAConfigMapName)
+	}
+	if serviceCAVolume.ConfigMap.Optional == nil || !*serviceCAVolume.ConfigMap.Optional {
+		t.Error("service-ca volume should be optional")
 	}
 
 	// Verify original job annotated
@@ -381,7 +389,7 @@ func TestOnJobEvent_WithAnnotations(t *testing.T) {
 	pod := instrumentedPod("train-job", "test-ns")
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, "aibom-postprocess:latest")
+	w := New(client, "aibom-postprocess:latest", "")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -404,7 +412,7 @@ func TestOnJobEvent_NonEnabledNamespace_Skips(t *testing.T) {
 	pod := instrumentedPod("train-job", "disabled-ns")
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, "busybox:latest")
+	w := New(client, "busybox:latest", "")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -422,7 +430,7 @@ func TestOnJobEvent_IncompleteJob_Skips(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, job)
-	w := New(client, "busybox:latest")
+	w := New(client, "busybox:latest", "")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -440,7 +448,7 @@ func TestOnJobEvent_AlreadyPostprocessed_Skips(t *testing.T) {
 	pod := instrumentedPod("train-job", "test-ns")
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, "busybox:latest")
+	w := New(client, "busybox:latest", "")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -469,7 +477,7 @@ func TestOnJobEvent_NoInstrumentedPods_Skips(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, "busybox:latest")
+	w := New(client, "busybox:latest", "")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -499,7 +507,7 @@ func TestOnJobEvent_NoGPU_Skips(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, "busybox:latest")
+	w := New(client, "busybox:latest", "")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -517,7 +525,7 @@ func TestOnJobEvent_PostprocessJob_Skips(t *testing.T) {
 	pod := instrumentedPod("train-job-aibom-postprocess", "test-ns")
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, "busybox:latest")
+	w := New(client, "busybox:latest", "")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -538,7 +546,7 @@ func TestFinalizerAddedToGPUJob(t *testing.T) {
 	pod := instrumentedPod("gpu-job", "test-ns")
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, "busybox:latest")
+	w := New(client, "busybox:latest", "")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -578,7 +586,7 @@ func TestFinalizerNotAddedToNonGPUJob(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, "busybox:latest")
+	w := New(client, "busybox:latest", "")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -607,7 +615,7 @@ func TestPostprocessOnDeletion(t *testing.T) {
 	pod := instrumentedPod("server-job", "test-ns")
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, "aibom-postprocess:latest")
+	w := New(client, "aibom-postprocess:latest", "")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -656,7 +664,7 @@ func TestFinalizerAddedToAnnotatedJob(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, "busybox:latest")
+	w := New(client, "busybox:latest", "")
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -676,7 +684,7 @@ func TestPodFinalizerAddedToGPUPod(t *testing.T) {
 	pod := instrumentedBarePod("predictor-pod", "test-ns")
 
 	client := fake.NewSimpleClientset(ns, pod)
-	w := New(client, "busybox:latest")
+	w := New(client, "busybox:latest", "")
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
@@ -726,7 +734,7 @@ func TestPostprocessReadsStorageInfoFromDiscoveryData(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, pod, dataConfigMap)
-	w := New(client, "aibom-postprocess:latest")
+	w := New(client, "aibom-postprocess:latest", "")
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
@@ -816,7 +824,7 @@ func TestPostprocessDropsForgedDiscoveryData(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, pod, dataConfigMap, secret)
-	w := New(client, "aibom-postprocess:latest")
+	w := New(client, "aibom-postprocess:latest", "")
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
@@ -855,7 +863,7 @@ func TestPostprocessKeepsValidlySignedDiscoveryData(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, pod, dataConfigMap, secret)
-	w := New(client, "aibom-postprocess:latest")
+	w := New(client, "aibom-postprocess:latest", "")
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
@@ -893,7 +901,7 @@ func TestPostprocessKeepsUnverifiedDiscoveryWhenNoSigningKeyConfigured(t *testin
 
 	// Deliberately no discoverySigningSecret in the fake clientset.
 	client := fake.NewSimpleClientset(ns, pod, dataConfigMap)
-	w := New(client, "aibom-postprocess:latest")
+	w := New(client, "aibom-postprocess:latest", "")
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
@@ -935,7 +943,7 @@ func TestPostprocessDropsForgedStorageData(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, pod, dataConfigMap, secret)
-	w := New(client, "aibom-postprocess:latest")
+	w := New(client, "aibom-postprocess:latest", "")
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
@@ -973,7 +981,7 @@ func TestPostprocessKeepsValidlySignedStorageData(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, pod, dataConfigMap, secret)
-	w := New(client, "aibom-postprocess:latest")
+	w := New(client, "aibom-postprocess:latest", "")
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
@@ -1009,7 +1017,7 @@ func TestPostprocessKeepsUnverifiedStorageWhenNoSigningKeyConfigured(t *testing.
 
 	// Deliberately no discoverySigningSecret in the fake clientset.
 	client := fake.NewSimpleClientset(ns, pod, dataConfigMap)
-	w := New(client, "aibom-postprocess:latest")
+	w := New(client, "aibom-postprocess:latest", "")
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
@@ -1038,7 +1046,7 @@ func TestPostprocessDefaultsStorageInfoWhenAbsent(t *testing.T) {
 	pod.DeletionTimestamp = &now
 
 	client := fake.NewSimpleClientset(ns, pod)
-	w := New(client, "aibom-postprocess:latest")
+	w := New(client, "aibom-postprocess:latest", "")
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
@@ -1067,7 +1075,7 @@ func TestPodFinalizerNotAddedToNonGPUPod(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, pod)
-	w := New(client, "busybox:latest")
+	w := New(client, "busybox:latest", "")
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
@@ -1096,7 +1104,7 @@ func TestPodFinalizerAddedToAnnotatedPod(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, pod)
-	w := New(client, "busybox:latest")
+	w := New(client, "busybox:latest", "")
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
@@ -1119,7 +1127,7 @@ func TestPostprocessOnPodDeletion(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, pod)
-	w := New(client, "aibom-postprocess:latest")
+	w := New(client, "aibom-postprocess:latest", "")
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
@@ -1161,7 +1169,7 @@ func TestOnPodEvent_JobOwnedPod_Skipped(t *testing.T) {
 	pod.Finalizers = []string{podFinalizerName}
 
 	client := fake.NewSimpleClientset(ns, pod)
-	w := New(client, "busybox:latest")
+	w := New(client, "busybox:latest", "")
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
@@ -1197,7 +1205,7 @@ func TestOnPodEvent_NotInstrumented_Skipped(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, pod)
-	w := New(client, "busybox:latest")
+	w := New(client, "busybox:latest", "")
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
@@ -1243,7 +1251,7 @@ func TestCollectAIBOM(t *testing.T) {
 	ppJob, ppPod, dataConfigMap := newAIBOMPostprocessFixtures("train-job", "test-ns")
 
 	client := fake.NewSimpleClientset(ns, ppJob, ppPod, dataConfigMap)
-	w := New(client, "aibom-postprocess:latest")
+	w := New(client, "aibom-postprocess:latest", "")
 	startWatcher(t, w)
 
 	w.onJobEvent(ppJob)
@@ -1293,7 +1301,7 @@ func TestCollectAIBOM_DeletesWorkloadIdentity(t *testing.T) {
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: identityName, Namespace: "test-ns"}}
 
 	client := fake.NewSimpleClientset(ns, ppJob, ppPod, dataConfigMap, sa, role, roleBinding, secret)
-	w := New(client, "aibom-postprocess:latest")
+	w := New(client, "aibom-postprocess:latest", "")
 	startWatcher(t, w)
 
 	w.onJobEvent(ppJob)

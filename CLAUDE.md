@@ -128,9 +128,16 @@ Whichever source wins is recorded in `source_code.declared_via` (`"annotation"`,
 
 `pip install git+...`'s PEP 610 `direct_url.json` isn't implemented.
 
-## Grafana Telemetry Retries
+## Prometheus Telemetry
 
-`postprocess.py` queries Grafana immediately after the workload's pod completes. On some observability backends (e.g. a federated/multi-tenant Prometheus setup) there's a delay between a metric being scraped and it becoming queryable, so a summary query fired this soon can race that delay and come back empty even though the identical query succeeds moments later — this shows up as `resource_utilization` averages being present on some AIBOMs and missing on others for no apparent reason, even though the Grafana Explore link (built from the same time range) always shows the underlying data once it lands.
+`postprocess.py` queries Prometheus/Thanos Querier directly (`PROMETHEUS_URL`, defaulting to OpenShift's `https://thanos-querier.openshift-monitoring.svc:9091` — see `charts/aibom-webhook/values.yaml`'s `prometheus.url`) rather than going through Grafana. There's no datasource to discover and no separate credential to provision: auth and TLS trust are both automatic, mirroring gpu-quota-operator's `metrics.Client` (`metrics/prometheus.go`) exactly —
+
+- **Auth**: the postprocess Job's own ServiceAccount token (`/var/run/secrets/kubernetes.io/serviceaccount/token`, auto-mounted and rotated in place by Kubernetes) is read fresh on every request and sent as a Bearer token. Authorization on the Thanos Querier side comes from a `cluster-monitoring-view` ClusterRoleBinding that `charts/aibom-workload-namespace/templates/monitoring.yaml` creates per opted-in namespace (`monitoringAccess.enabled`, default `true` — see `just setup-namespace`'s `skip_monitoring_access` flag for accounts without cluster-scoped RBAC permission).
+- **TLS**: the cluster's service-serving CA bundle is injected into the `aibom-service-ca` ConfigMap (`service.beta.openshift.io/inject-cabundle` annotation, same chart) and mounted into the postprocess Job as *optional* — on a cluster with no service-ca operator, or a plain-HTTP dev Prometheus that doesn't need TLS at all (e.g. `mock-openshift-cluster`'s), the mount resolves to an empty directory and the client falls back to the system trust store rather than erroring.
+
+Neither file being present is a hard requirement in either direction — a missing token means requests just go out unauthenticated, and a missing CA bundle means the system trust store is used instead. Both fall back gracefully rather than failing the Job.
+
+`postprocess.py` queries this immediately after the workload's pod completes. On some observability backends (e.g. a federated/multi-tenant Prometheus setup) there's a delay between a metric being scraped and it becoming queryable, so a summary query fired this soon can race that delay and come back empty even though the identical query succeeds moments later — this shows up as `resource_utilization` averages being present on some AIBOMs and missing on others for no apparent reason.
 
 To absorb this, missing summary metrics are retried with a delay (`AIBOM_TELEMETRY_RETRY_ATTEMPTS`, default `3`; `AIBOM_TELEMETRY_RETRY_DELAY_S`, default `45` seconds between attempts) before being recorded as unavailable — only the metrics still missing on a given attempt are re-queried, not the whole batch.
 

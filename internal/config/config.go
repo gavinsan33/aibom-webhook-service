@@ -8,4 +8,5 @@ type Config struct {
 	DatasetDetection bool
 	EnableWatcher    bool
 	PostprocessImage string
+	PrometheusURL    string
 }

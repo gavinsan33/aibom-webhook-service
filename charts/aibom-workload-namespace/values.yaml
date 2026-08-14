@@ -3,6 +3,17 @@
 # granted from the image's own namespace, not the consuming namespace).
 aibomSystemNamespace: aibom-system
 
+# Grants the aibom-postprocess ServiceAccount a ClusterRoleBinding to
+# cluster-monitoring-view, letting it query OpenShift's Prometheus/Thanos
+# Querier directly for telemetry (see templates/monitoring.yaml). Unlike every
+# other resource in this chart, this requires cluster-scoped RBAC permission
+# to create — set to false if your account doesn't have it (telemetry
+# collection then just comes back empty for this namespace instead of the
+# install failing) and have a cluster-admin apply that ClusterRoleBinding
+# directly, once, instead.
+monitoringAccess:
+  enabled: true
+
 # Populate via --set-file at install time, e.g.:
 #   helm install aibom-ns-<team> ./charts/aibom-workload-namespace -n <team> \
 #     --set-file scripts.generateSnapshot=scripts/aibom-scripts/generate_snapshot.py \

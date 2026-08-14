@@ -1,0 +1,48 @@
+# Lets the aibom-postprocess Job query Prometheus/Thanos Querier directly
+# (see postprocess.py) instead of going through Grafana. Mirrors
+# gpu-quota-operator's manager/deploy/service-ca-configmap.yaml and
+# manager/bootstrap/monitoring_rolebinding.yaml.
+#
+# The service-ca operator injects the cluster's service-serving CA bundle into
+# any ConfigMap annotated like this (populating a "service-ca.crt" key).
+# watcher.go mounts this into the postprocess Job as optional: on a cluster
+# with no service-ca operator (e.g. a plain-HTTP dev Prometheus), the mount
+# resolves to an empty directory and postprocess.py falls back to the system
+# trust store instead of erroring.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aibom-service-ca
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    service.beta.openshift.io/inject-cabundle: "true"
+{{- if .Values.monitoringAccess.enabled }}
+---
+# Grants read access to OpenShift's built-in Prometheus/Thanos Querier.
+# cluster-monitoring-view is a ClusterRole shipped by OpenShift's cluster
+# monitoring operator, not something this chart defines. Bound to the specific
+# aibom-postprocess ServiceAccount (not the whole namespace's SA group, unlike
+# the other RoleBindings in rbac.yaml) since read access to cluster-wide
+# platform metrics is broader than what any other workload in this namespace
+# needs.
+#
+# Unlike everything else in this chart, a ClusterRoleBinding requires
+# cluster-scoped create/patch permission — the same requirement
+# charts/aibom-webhook's build.yaml/CRD install has, and the same fix: set
+# monitoringAccess.enabled=false (values.yaml) if your account doesn't have
+# it, and have a cluster-admin apply this file directly once instead. Without
+# it, telemetry collection just stays disabled for this namespace (postprocess.py
+# still runs — see PROMETHEUS_URL gating in main()) rather than the Job failing.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: aibom-postprocess-monitoring-view-{{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-monitoring-view
+subjects:
+  - kind: ServiceAccount
+    name: aibom-postprocess
+    namespace: {{ .Release.Namespace }}
+{{- end }}
