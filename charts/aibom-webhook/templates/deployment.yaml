@@ -42,6 +42,7 @@ spec:
             - --port=8443
             - --postprocess-image={{ .Values.image.postprocess.repository }}:{{ .Values.image.postprocess.tag }}
             - --enable-watcher={{ .Values.watcher.enabled }}
+            - --prometheus-url={{ .Values.prometheus.url }}
           volumeMounts:
             - name: certs
               mountPath: /certs
