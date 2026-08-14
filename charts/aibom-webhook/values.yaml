@@ -44,3 +44,11 @@ build:
 
 watcher:
   enabled: true
+
+# Prometheus/Thanos endpoint the postprocess Job queries directly for telemetry.
+# Auth (bearer ServiceAccount token) and TLS trust (the service-ca ConfigMap
+# aibom-workload-namespace creates per opted-in namespace, or the system trust
+# store if that's absent) are always automatic — see postprocess.py. Empty
+# disables telemetry collection entirely.
+prometheus:
+  url: https://thanos-querier.openshift-monitoring.svc:9091

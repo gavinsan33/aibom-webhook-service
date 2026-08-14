@@ -185,8 +185,12 @@ undeploy: _check-auth
 # ImagePullBackOff since the image never actually landed on its node.
 # build.enabled is set to false on deploy (that template is OpenShift-only)
 # and image.*.repository/tag point at the locally-loaded tags instead of the
-# in-cluster registry. Requires the kind cluster to already be up with
-# cert-manager installed (templates/certificates.yaml still needs it).
+# in-cluster registry. prometheus.url points at mock-openshift-cluster's plain
+# HTTP Prometheus (manifests/prometheus) instead of the default Thanos Querier
+# route — no auth/TLS needed there, which postprocess.py already tolerates
+# (see SERVICE_ACCOUNT_TOKEN_FILE/SERVICE_CA_CERT_FILE's missing-file
+# fallbacks). Requires the kind cluster to already be up with cert-manager
+# installed (templates/certificates.yaml still needs it).
 
 kind_cluster_name := "mock-openshift"
 kind_webhook_img := "localhost/aibom-webhook-service:dev"
@@ -220,7 +224,8 @@ kind-deploy: kind-image
         --set build.enabled=false \
         --set image.webhook.repository=localhost/aibom-webhook-service --set image.webhook.tag=dev \
         --set image.postprocess.repository=localhost/aibom-postprocess --set image.postprocess.tag=dev \
-        --set image.pullPolicy=IfNotPresent
+        --set image.pullPolicy=IfNotPresent \
+        --set prometheus.url=http://prometheus.monitoring.svc:9090
     kubectl --context kind-{{ kind_cluster_name }} -n {{ webhook_namespace }} rollout restart deployment/aibom-webhook
     kubectl --context kind-{{ kind_cluster_name }} -n {{ webhook_namespace }} rollout status deployment/aibom-webhook --timeout=120s
 
@@ -235,14 +240,25 @@ kind-undeploy:
 # Opt an existing namespace into webhook instrumentation by labeling it aibom.io/enabled=true.
 # Pass skip_label=true to leave the namespace label alone (e.g. it's already labeled, or
 # labeling is managed elsewhere).
+#
+# skip_monitoring_access=true is for accounts without cluster-scoped create/patch
+# permission on ClusterRoleBindings — same problem as `deploy --skip-crds`, different
+# resource. It skips the cluster-monitoring-view ClusterRoleBinding that lets the
+# postprocess Job query Prometheus/Thanos Querier directly; a cluster-admin can apply
+# charts/aibom-workload-namespace/templates/monitoring.yaml's ClusterRoleBinding once
+# instead. Telemetry collection just comes back empty for this namespace until then,
+# rather than the install failing.
 [group('deploy')]
-setup-namespace namespace skip_label="false": _check-auth
+setup-namespace namespace skip_label="false" skip_monitoring_access="false": _check-auth
     #!/usr/bin/env bash
     set -euo pipefail
     if [ "{{ skip_label }}" != "true" ]; then
         oc label namespace {{ namespace }} aibom.io/enabled=true --overwrite
     fi
+    monitoring_args=()
+    [ "{{ skip_monitoring_access }}" = "true" ] && monitoring_args=(--set monitoringAccess.enabled=false)
     helm upgrade --install aibom-ns-{{ namespace }} charts/aibom-workload-namespace -n {{ namespace }} \
+        "${monitoring_args[@]}" \
         --set-file scripts.generateSnapshot=scripts/aibom-scripts/generate_snapshot.py \
         --set-file scripts.runtimeDetector=scripts/aibom-scripts/runtime_detector.py \
         --set-file scripts.k8sApi=scripts/aibom-scripts/k8s_api.py

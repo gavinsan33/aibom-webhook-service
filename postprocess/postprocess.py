@@ -3,13 +3,14 @@
 
 Runs as a Kubernetes Job after an instrumented workload completes.
 Reads discovery and dataset data from a ConfigMap mount, optionally
-queries Grafana for telemetry, and produces an AIBOM JSON document.
+queries Prometheus for telemetry, and produces an AIBOM JSON document.
 """
 
 import json
 import os
 import re
 import shlex
+import ssl
 import sys
 import time
 from datetime import datetime, timezone
@@ -27,9 +28,18 @@ import k8s_api
 INPUT_DIR = os.environ.get("AIBOM_INPUT_DIR", "/data/input")
 JOB_NAME = os.environ.get("AIBOM_JOB_NAME", "")
 JOB_NAMESPACE = os.environ.get("AIBOM_JOB_NAMESPACE", "")
-GRAFANA_URL = os.environ.get("GRAFANA_URL", "")
-GRAFANA_API_TOKEN = os.environ.get("GRAFANA_API_TOKEN", "")
-GRAFANA_DATASOURCE_UID = os.environ.get("GRAFANA_DATASOURCE_UID", "")
+PROMETHEUS_URL = os.environ.get("PROMETHEUS_URL", "")
+
+# Auth is always automatic, never configured per-query: the postprocess Job's own
+# ServiceAccount token (Kubernetes auto-mounts and rotates this in place, roughly
+# hourly) is read fresh on every request and sent as a Bearer token; the cluster's
+# service-serving CA bundle (injected into a ConfigMap by the service-ca operator,
+# see watcher.go's serviceCAConfigMapName) is trusted for TLS if present. Either
+# file being absent (a plain-HTTP dev Prometheus, or running outside a pod) falls
+# back to no Authorization header / the system trust store rather than erroring —
+# mirrors gpu-quota-operator's metrics.Client (metrics/prometheus.go).
+SERVICE_ACCOUNT_TOKEN_FILE = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+SERVICE_CA_CERT_FILE = "/etc/aibom-postprocess/service-ca/service-ca.crt"
 
 # The observability backend can lag behind real time before freshly-scraped
 # samples become queryable, so a summary query fired immediately after the
@@ -612,49 +622,31 @@ def detect_dataset_from_containers(containers):
 # ---------------------------------------------------------------------------
 
 
-def discover_datasource_uid(grafana_url, api_token):
-    try:
-        req = urllib.request.Request(
-            f"{grafana_url}/api/datasources",
-            headers={"Authorization": f"Bearer {api_token}"},
-        )
-        with urllib.request.urlopen(req, timeout=10) as response:
-            datasources = json.loads(response.read())
-            for ds in datasources:
-                if ds.get("type") == "prometheus":
-                    return ds.get("uid")
-        print("WARNING: No Prometheus datasource found", file=sys.stderr)
-        return None
-    except Exception as e:
-        print(f"WARNING: Could not auto-discover datasource: {e}", file=sys.stderr)
-        return None
+def _prometheus_ssl_context():
+    # Falls back to the default context (system trust store) if the service-ca
+    # bundle isn't mounted, e.g. a plain-HTTP dev Prometheus (mock-openshift-cluster)
+    # that doesn't need TLS at all — matches gpu-quota-operator's buildTransport().
+    if os.path.exists(SERVICE_CA_CERT_FILE):
+        return ssl.create_default_context(cafile=SERVICE_CA_CERT_FILE)
+    return None
 
 
-def query_grafana(grafana_url, api_token, datasource_uid, promql, start_ms, end_ms, instant=False):
-    payload = {
-        "queries": [
-            {
-                "datasource": {"uid": datasource_uid},
-                "expr": promql,
-                "refId": "A",
-                "instant": instant,
-                "range": not instant,
-                "maxDataPoints": 1000,
-            }
-        ],
-        "from": str(start_ms),
-        "to": str(end_ms),
-    }
+def _prometheus_auth_headers():
+    # Read fresh on every call rather than once at startup: Kubernetes rotates a
+    # projected ServiceAccount token in place roughly hourly, so caching it would
+    # risk auth silently failing partway through a long-running postprocess Job.
     try:
-        req = urllib.request.Request(
-            f"{grafana_url}/api/ds/query",
-            data=json.dumps(payload).encode(),
-            headers={
-                "Authorization": f"Bearer {api_token}",
-                "Content-Type": "application/json",
-            },
-        )
-        with urllib.request.urlopen(req, timeout=30) as response:
+        with open(SERVICE_ACCOUNT_TOKEN_FILE) as f:
+            return {"Authorization": f"Bearer {f.read().strip()}"}
+    except FileNotFoundError:
+        return {}
+
+
+def _query_prometheus(path, params, timeout):
+    url = f"{PROMETHEUS_URL}{path}?{urllib.parse.urlencode(params)}"
+    try:
+        req = urllib.request.Request(url, headers=_prometheus_auth_headers())
+        with urllib.request.urlopen(req, timeout=timeout, context=_prometheus_ssl_context()) as response:
             return json.loads(response.read())
     except urllib.error.HTTPError as e:
         print(f"HTTP Error {e.code}: {e.read().decode()}", file=sys.stderr)
@@ -664,57 +656,57 @@ def query_grafana(grafana_url, api_token, datasource_uid, promql, start_ms, end_
         return None
 
 
-def build_grafana_explore_url(grafana_url, datasource_uid, named_queries, start_ms, end_ms):
-    end_ms_padded = end_ms + SCRAPE_INTERVAL_MS  # pad to capture the final scrape interval
-    # Metrics span wildly different scales (%, MiB, watts, cores, bytes), so
-    # plotting all of them by default produces an unreadable graph. Only the
-    # first metric starts visible; the rest are hidden but still present as
-    # toggleable query rows (Grafana persists a query's "hide" state in the
-    # URL itself, so this stays shareable/bookmarkable).
-    queries = [
+def _range_step_seconds(start_ms, end_ms, max_points=1000):
+    span_s = max((end_ms - start_ms) / 1000, 1)
+    return max(int(span_s / max_points), 15)
+
+
+def query_prometheus_range(promql, start_ms, end_ms):
+    return _query_prometheus(
+        "/api/v1/query_range",
         {
-            "refId": chr(65 + i),
-            "expr": promql,
-            "datasource": {"uid": datasource_uid},
-            "hide": i != 0,
-        }
-        for i, (_, promql) in enumerate(named_queries)
-    ]
-    explore_state = {
-        "datasource": datasource_uid,
-        "queries": queries,
-        "range": {"from": str(start_ms), "to": str(end_ms_padded)},
-    }
-    return f"{grafana_url}/explore?left={urllib.parse.quote(json.dumps(explore_state))}"
+            "query": promql,
+            "start": start_ms / 1000,
+            "end": end_ms / 1000,
+            "step": _range_step_seconds(start_ms, end_ms),
+        },
+        timeout=30,
+    )
 
 
-def parse_grafana_response(response):
-    if not response or "results" not in response:
+def query_prometheus_instant(promql, time_ms):
+    return _query_prometheus(
+        "/api/v1/query",
+        {"query": promql, "time": time_ms / 1000},
+        timeout=30,
+    )
+
+
+def parse_range_response(response):
+    if not response or response.get("status") != "success":
         return []
     results = []
-    for result_data in response["results"].values():
-        for frame in result_data.get("frames", []):
-            data_points = frame.get("data", {}).get("values", [])
-            if len(data_points) >= 2:
-                for ts, val in zip(data_points[0], data_points[1]):
-                    results.append(
-                        {
-                            "timestamp": datetime.fromtimestamp(ts / 1000).isoformat(),
-                            "value": val,
-                        }
-                    )
+    for series in response.get("data", {}).get("result", []):
+        for ts, val in series.get("values", []):
+            results.append(
+                {
+                    "timestamp": datetime.fromtimestamp(ts).isoformat(),
+                    "value": float(val),
+                }
+            )
     return results
 
 
 def parse_instant_value(response):
-    if not response or "results" not in response:
+    if not response or response.get("status") != "success":
         return None
-    for result_data in response["results"].values():
-        for frame in result_data.get("frames", []):
-            data_points = frame.get("data", {}).get("values", [])
-            if len(data_points) >= 2 and data_points[1]:
-                return data_points[1][-1]
-    return None
+    # Only the first series, matching the pre-Prometheus-native behavior: a
+    # multi-GPU pod can return one series per GPU-index label, and this has never
+    # summed/averaged across them (the underlying queries aren't pre-aggregated).
+    result = response.get("data", {}).get("result", [])
+    if not result or "value" not in result[0]:
+        return None
+    return float(result[0]["value"][1])
 
 
 def ms_to_promql_duration(ms):
@@ -725,23 +717,11 @@ def ms_to_promql_duration(ms):
 
 
 def collect_telemetry(discoveries):
-    grafana_url = GRAFANA_URL
-    api_token = GRAFANA_API_TOKEN
-    datasource_uid = GRAFANA_DATASOURCE_UID
-
-    if not datasource_uid:
-        print("  Auto-discovering Prometheus datasource...")
-        datasource_uid = discover_datasource_uid(grafana_url, api_token)
-        if not datasource_uid:
-            print("ERROR: Could not find Prometheus datasource", file=sys.stderr)
-            return None
-
     print(f"  Processing {len(discoveries)} pod(s)")
 
     telemetry_summary = {
         "collected_at": datetime.utcnow().isoformat() + "Z",
-        "grafana_url": grafana_url,
-        "datasource_uid": datasource_uid,
+        "prometheus_url": PROMETHEUS_URL,
         "pods": [],
     }
 
@@ -782,18 +762,13 @@ def collect_telemetry(discoveries):
             "pod_name": pod_name,
             "start_time": start_time,
             "metrics": {},
-            "grafana_explore_url": build_grafana_explore_url(
-                grafana_url, datasource_uid, list(metrics.items()), start_ms, end_ms
-            ),
         }
 
         for metric_name, promql in metrics.items():
             print(f"    Querying {metric_name}...")
-            response = query_grafana(
-                grafana_url, api_token, datasource_uid, promql, start_ms, end_ms
-            )
+            response = query_prometheus_range(promql, start_ms, end_ms)
             if response:
-                data_points = parse_grafana_response(response)
+                data_points = parse_range_response(response)
                 pod_telemetry["metrics"][metric_name] = {
                     "data_point_count": len(data_points),
                 }
@@ -837,10 +812,7 @@ def collect_telemetry(discoveries):
                         .replace("{pod_name}", pod_name)
                         .replace("{duration}", duration)
                     )
-                    response = query_grafana(
-                        grafana_url, api_token, datasource_uid, promql,
-                        summary_start_ms, end_ms, instant=True,
-                    )
+                    response = query_prometheus_instant(promql, end_ms)
                     value = parse_instant_value(response)
                     if value is not None:
                         aggregated[sq_name] = {
@@ -1114,12 +1086,6 @@ def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, tel
                     avg *= scale
                 utilization[field_name] = round(avg, 2)
 
-        utilization["grafana_links"] = [
-            {"pod_name": p["pod_name"], "explore_url": p["grafana_explore_url"]}
-            for p in telemetry["pods"]
-            if p.get("grafana_explore_url")
-        ]
-
         # True if any pod's run was too short to exclude the cold-start
         # window, meaning the averages above may include a period of
         # stale/zero readings before the first scrape landed.
@@ -1222,7 +1188,7 @@ def main():
 
     # Telemetry
     telemetry = None
-    if GRAFANA_API_TOKEN:
+    if PROMETHEUS_URL:
         print("--- Phase 1: Telemetry Collection ---")
         try:
             telemetry = collect_telemetry(discoveries)
@@ -1230,7 +1196,7 @@ def main():
             print(f"WARNING: Telemetry collection failed: {e}", file=sys.stderr)
         print()
     else:
-        print("--- Phase 1: Skipped (no GRAFANA_API_TOKEN) ---")
+        print("--- Phase 1: Skipped (no PROMETHEUS_URL) ---")
         print()
 
     # AIBOM compilation
