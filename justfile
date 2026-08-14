@@ -174,6 +174,61 @@ deploy *args: _check-auth
 undeploy: _check-auth
     helm uninstall aibom-webhook -n {{ webhook_namespace }}
 
+# --- Local kind cluster --------------------------------------------------------
+#
+# Not OpenShift — no BuildConfig/ImageStream, no oc. Provider (docker vs podman)
+# is auto-detected the same way mock-openshift-cluster's scripts/lib.sh picks it
+# for `just up`/`just down`: docker unless its daemon is unreachable. This has
+# to match exactly — kind tracks clusters per-provider, so loading images via
+# the wrong provider silently creates/targets a second, empty "mock-openshift"
+# cluster instead of erroring, and every pod on the real one sits in
+# ImagePullBackOff since the image never actually landed on its node.
+# build.enabled is set to false on deploy (that template is OpenShift-only)
+# and image.*.repository/tag point at the locally-loaded tags instead of the
+# in-cluster registry. Requires the kind cluster to already be up with
+# cert-manager installed (templates/certificates.yaml still needs it).
+
+kind_cluster_name := "mock-openshift"
+kind_webhook_img := "localhost/aibom-webhook-service:dev"
+kind_postprocess_img := "localhost/aibom-postprocess:dev"
+
+[group('kind')]
+kind-image:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -z "${KIND_EXPERIMENTAL_PROVIDER:-}" ] && ! docker info >/dev/null 2>&1 && command -v podman >/dev/null 2>&1; then
+        export KIND_EXPERIMENTAL_PROVIDER=podman
+    fi
+    engine=podman
+    command -v docker >/dev/null 2>&1 && [ "${KIND_EXPERIMENTAL_PROVIDER:-}" != "podman" ] && engine=docker
+    "$engine" build -t {{ kind_webhook_img }} .
+    "$engine" build -t {{ kind_postprocess_img }} -f postprocess/Dockerfile .
+    tar_webhook="$(mktemp -t aibom-webhook-kind-XXXXXX.tar)"
+    tar_postprocess="$(mktemp -t aibom-postprocess-kind-XXXXXX.tar)"
+    trap 'rm -f "$tar_webhook" "$tar_postprocess"' EXIT
+    "$engine" save {{ kind_webhook_img }} -o "$tar_webhook"
+    "$engine" save {{ kind_postprocess_img }} -o "$tar_postprocess"
+    kind load image-archive "$tar_webhook" --name {{ kind_cluster_name }}
+    kind load image-archive "$tar_postprocess" --name {{ kind_cluster_name }}
+
+# Build+load both images, then install/upgrade the webhook chart against them.
+# Requires the kind cluster to already be up.
+[group('kind')]
+kind-deploy: kind-image
+    helm upgrade --install aibom-webhook charts/aibom-webhook -n {{ webhook_namespace }} --create-namespace \
+        --kube-context kind-{{ kind_cluster_name }} \
+        --set build.enabled=false \
+        --set image.webhook.repository=localhost/aibom-webhook-service --set image.webhook.tag=dev \
+        --set image.postprocess.repository=localhost/aibom-postprocess --set image.postprocess.tag=dev \
+        --set image.pullPolicy=IfNotPresent
+    kubectl --context kind-{{ kind_cluster_name }} -n {{ webhook_namespace }} rollout restart deployment/aibom-webhook
+    kubectl --context kind-{{ kind_cluster_name }} -n {{ webhook_namespace }} rollout status deployment/aibom-webhook --timeout=120s
+
+[group('kind')]
+[confirm("Uninstall the aibom-webhook release from the kind cluster?")]
+kind-undeploy:
+    helm uninstall aibom-webhook -n {{ webhook_namespace }} --kube-context kind-{{ kind_cluster_name }}
+
 # Namespace must already exist. Installs RBAC + the aibom-scripts ConfigMap via the
 # aibom-workload-namespace chart.
 #
