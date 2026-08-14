@@ -61,3 +61,11 @@ prometheus:
 grafana:
   url: ""
   datasourceUid: ""
+
+# debug.keepPostprocessJobs skips the usual cleanup of a succeeded (or failed)
+# postprocess Job/data ConfigMap, for inspecting postprocess pod logs/exit
+# state or the data ConfigMap's contents after the fact. Leaves one Job and
+# one ConfigMap behind per completed workload indefinitely — a debugging aid,
+# not something to leave on in production.
+debug:
+  keepPostprocessJobs: false

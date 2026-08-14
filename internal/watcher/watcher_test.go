@@ -994,6 +994,32 @@ func TestCollectAIBOM(t *testing.T) {
 	}
 }
 
+// TestCollectAIBOM_DebugKeepPostprocessJobs verifies the debug escape hatch:
+// with it set, the postprocess Job/data ConfigMap survive collection (still
+// annotated as collected, so a resync doesn't try to collect it again) instead
+// of being deleted — for inspecting postprocess pod logs/state after the fact.
+func TestCollectAIBOM_DebugKeepPostprocessJobs(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	ppJob, ppPod, dataConfigMap := newAIBOMPostprocessFixtures("train-job", "test-ns")
+
+	client := fake.NewSimpleClientset(ns, ppJob, ppPod, dataConfigMap)
+	w := New(client, Config{PostprocessImage: "aibom-postprocess:latest", DebugKeepPostprocessJobs: true})
+	startWatcher(t, w)
+
+	w.onJobEvent(ppJob)
+
+	gotJob, err := client.BatchV1().Jobs("test-ns").Get(context.TODO(), "train-job-aibom-postprocess", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("expected postprocess job to survive collection, got err=%v", err)
+	}
+	if gotJob.Annotations[AnnotationAIBOMCollected] == "" {
+		t.Error("expected postprocess job to still be annotated as collected")
+	}
+	if _, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), "train-job-aibom-postprocess-data", metav1.GetOptions{}); err != nil {
+		t.Errorf("expected postprocess data configmap to survive collection, got err=%v", err)
+	}
+}
+
 func TestJobNameTruncation(t *testing.T) {
 	longName := strings.Repeat("a", 60)
 	result := postprocessJobName(longName)
