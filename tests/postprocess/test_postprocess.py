@@ -525,6 +525,39 @@ def test_ms_to_promql_duration_minutes_and_hours():
 
 
 # ---------------------------------------------------------------------------
+# collect_telemetry GPU-skip / debug override
+# ---------------------------------------------------------------------------
+
+
+def _no_gpu_discovery():
+    return {
+        "pod_metadata": {
+            "uid": "pod-uid-1",
+            "name": "web-pod",
+            "start_time": "2026-01-01T00:00:00Z",
+        },
+        "gpu": {"gpu_count": 0},
+    }
+
+
+def test_collect_telemetry_skips_pod_with_no_gpu(monkeypatch):
+    monkeypatch.setattr(pp, "DEBUG_TELEMETRY_ALL_PODS", False)
+    summary = pp.collect_telemetry([_no_gpu_discovery()])
+    assert summary["pods"] == []
+
+
+def test_collect_telemetry_debug_flag_includes_pod_with_no_gpu(monkeypatch):
+    monkeypatch.setattr(pp, "DEBUG_TELEMETRY_ALL_PODS", True)
+    monkeypatch.setattr(pp, "query_prometheus_range", lambda *a, **k: None)
+    monkeypatch.setattr(pp, "query_prometheus_instant", lambda *a, **k: None)
+    # Avoid the real ingestion-delay retry/sleep loop when summary queries
+    # keep returning no data (there's no live Prometheus in this test).
+    monkeypatch.setattr(pp, "TELEMETRY_RETRY_ATTEMPTS", 1)
+    summary = pp.collect_telemetry([_no_gpu_discovery()])
+    assert [p["pod_name"] for p in summary["pods"]] == ["web-pod"]
+
+
+# ---------------------------------------------------------------------------
 # compile_aibom reconciliation
 # ---------------------------------------------------------------------------
 

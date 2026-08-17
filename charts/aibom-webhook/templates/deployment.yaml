@@ -45,6 +45,8 @@ spec:
             - --prometheus-url={{ .Values.prometheus.url }}
             - --grafana-url={{ .Values.grafana.url }}
             - --grafana-datasource-uid={{ .Values.grafana.datasourceUid }}
+            - --debug-keep-postprocess-jobs={{ .Values.debug.keepPostprocessJobs }}
+            - --debug-telemetry-all-pods={{ .Values.debug.telemetryAllPods }}
           volumeMounts:
             - name: certs
               mountPath: /certs
