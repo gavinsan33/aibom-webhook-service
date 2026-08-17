@@ -87,12 +87,6 @@ type Config struct {
 	// of each per completed workload indefinitely; not meant for routine
 	// production use.
 	DebugKeepPostprocessJobs bool
-	// DebugPostprocessAllPods bypasses the nvidia.com/gpu resource check in
-	// shouldPostprocess/shouldPostprocessPod, so every instrumented pod qualifies
-	// for postprocessing regardless of GPU requests. Intended for local testing
-	// against a mock cluster (e.g. kind) where nvidia-smi/GPU resources aren't
-	// available at all, so the normal GPU-request signal never fires.
-	DebugPostprocessAllPods bool
 }
 
 type Watcher struct {
@@ -102,7 +96,6 @@ type Watcher struct {
 	grafanaURL               string
 	grafanaDatasourceUID     string
 	debugKeepPostprocessJobs bool
-	debugPostprocessAllPods  bool
 	factory                  informers.SharedInformerFactory
 	// podFactory is a separate, server-side label-selector-scoped factory for the Pod
 	// informer. Unlike Jobs (which have no label capturing "qualifies for
@@ -121,7 +114,6 @@ func New(clientset kubernetes.Interface, cfg Config) *Watcher {
 		grafanaURL:               cfg.GrafanaURL,
 		grafanaDatasourceUID:     cfg.GrafanaDatasourceUID,
 		debugKeepPostprocessJobs: cfg.DebugKeepPostprocessJobs,
-		debugPostprocessAllPods:  cfg.DebugPostprocessAllPods,
 		factory:                  informers.NewSharedInformerFactory(clientset, resyncPeriod),
 		podFactory: informers.NewSharedInformerFactoryWithOptions(
 			clientset, resyncPeriod,
@@ -291,7 +283,7 @@ func (w *Watcher) onPodEvent(obj interface{}) {
 		if hasPodFinalizer(pod) {
 			return
 		}
-		if !w.shouldPostprocessPod(pod) {
+		if !shouldPostprocessPod(pod) {
 			return
 		}
 		if err := w.addPodFinalizer(context.TODO(), pod); err != nil {
@@ -313,7 +305,7 @@ func (w *Watcher) onPodEvent(obj interface{}) {
 		return
 	}
 
-	if !w.shouldPostprocessPod(pod) {
+	if !shouldPostprocessPod(pod) {
 		w.removePodFinalizer(context.TODO(), pod)
 		return
 	}
@@ -341,11 +333,11 @@ func (w *Watcher) shouldPostprocess(job *batchv1.Job) bool {
 	if err != nil || len(pods) == 0 {
 		return false
 	}
-	return w.debugPostprocessAllPods || podsRequestGPU(pods) || len(collectAIBOMAnnotations(job.Annotations)) > 0
+	return podsRequestGPU(pods) || len(collectAIBOMAnnotations(job.Annotations)) > 0
 }
 
-func (w *Watcher) shouldPostprocessPod(pod *corev1.Pod) bool {
-	return w.debugPostprocessAllPods || podsRequestGPU([]corev1.Pod{*pod}) || len(collectAIBOMAnnotations(pod.Annotations)) > 0
+func shouldPostprocessPod(pod *corev1.Pod) bool {
+	return podsRequestGPU([]corev1.Pod{*pod}) || len(collectAIBOMAnnotations(pod.Annotations)) > 0
 }
 
 func hasFinalizer(job *batchv1.Job) bool {

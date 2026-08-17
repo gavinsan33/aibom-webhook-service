@@ -34,7 +34,6 @@ func main() {
 	flag.StringVar(&cfg.GrafanaURL, "grafana-url", "", "Grafana base URL, used only to build a clickable Explore link in the AIBOM (telemetry itself always queries prometheus-url directly); empty omits the link")
 	flag.StringVar(&cfg.GrafanaDatasourceUID, "grafana-datasource-uid", "", "UID of the Grafana datasource pointing at prometheus-url, needed to build the Explore link above")
 	flag.BoolVar(&cfg.DebugKeepPostprocessJobs, "debug-keep-postprocess-jobs", false, "skip deleting succeeded postprocess Jobs/data ConfigMaps, for inspecting their logs/state after the fact (leaks one of each per completed workload — not for routine production use)")
-	flag.BoolVar(&cfg.DebugPostprocessAllPods, "debug-postprocess-all-pods", false, "postprocess every instrumented pod regardless of GPU requests, bypassing the nvidia.com/gpu qualification check (for local testing on clusters with no GPU resources, e.g. kind — not for routine production use)")
 	flag.Parse()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -82,7 +81,6 @@ func main() {
 					GrafanaURL:               cfg.GrafanaURL,
 					GrafanaDatasourceUID:     cfg.GrafanaDatasourceUID,
 					DebugKeepPostprocessJobs: cfg.DebugKeepPostprocessJobs,
-					DebugPostprocessAllPods:  cfg.DebugPostprocessAllPods,
 				})
 				go func() {
 					if err := w.Start(ctx); err != nil {
