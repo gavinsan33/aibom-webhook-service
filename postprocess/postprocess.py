@@ -55,6 +55,13 @@ SERVICE_CA_CERT_FILE = "/etc/aibom-postprocess/service-ca/service-ca.crt"
 TELEMETRY_RETRY_ATTEMPTS = int(os.environ.get("AIBOM_TELEMETRY_RETRY_ATTEMPTS", "3"))
 TELEMETRY_RETRY_DELAY_S = int(os.environ.get("AIBOM_TELEMETRY_RETRY_DELAY_S", "45"))
 
+# Normally a pod with no detected GPU (gpu_count 0/missing, e.g. nvidia-smi found
+# nothing) is skipped for telemetry entirely -- there's no GPU utilization to query.
+# On a mock cluster (e.g. kind) with no real GPU hardware at all, that means every
+# pod gets skipped and telemetry never gets exercised. Debug-only escape hatch to
+# query telemetry for every pod regardless of detected GPU count.
+DEBUG_TELEMETRY_ALL_PODS = os.environ.get("AIBOM_DEBUG_TELEMETRY_ALL_PODS", "").lower() == "true"
+
 TELEMETRY_QUERIES = {
     "gpu_utilization": 'nerc:dcgm_gpu_util:avg5m{exported_pod="{pod_name}"}',
     "gpu_memory_used": 'nerc:dcgm_fb_used:avg5m{exported_pod="{pod_name}"}',
@@ -769,7 +776,7 @@ def collect_telemetry(discoveries):
             continue
 
         gpu_count = discovery.get("gpu", {}).get("gpu_count")
-        if not gpu_count or str(gpu_count) == "0":
+        if (not gpu_count or str(gpu_count) == "0") and not DEBUG_TELEMETRY_ALL_PODS:
             print(f"  Skipping {pod_name} (no GPUs)")
             continue
 

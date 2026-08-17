@@ -81,15 +81,29 @@ type Config struct {
 	// empty just omits the link for that pod's telemetry rather than erroring.
 	GrafanaURL           string
 	GrafanaDatasourceUID string
+	// DebugKeepPostprocessJobs skips the usual cleanup of a succeeded postprocess
+	// Job/data ConfigMap (see collectAIBOM) — for inspecting postprocess pod
+	// logs/exit state or the data ConfigMap's contents after the fact. Leaks one
+	// of each per completed workload indefinitely; not meant for routine
+	// production use.
+	DebugKeepPostprocessJobs bool
+	// DebugTelemetryAllPods is passed through to the postprocess Job as
+	// AIBOM_DEBUG_TELEMETRY_ALL_PODS, bypassing postprocess.py's "skip pods with
+	// no detected GPU" telemetry check. Intended for local testing against a mock
+	// cluster (e.g. kind) with no real GPU hardware, where nvidia-smi always
+	// reports zero GPUs and telemetry collection would otherwise never run.
+	DebugTelemetryAllPods bool
 }
 
 type Watcher struct {
-	clientset            kubernetes.Interface
-	postprocessImage     string
-	prometheusURL        string
-	grafanaURL           string
-	grafanaDatasourceUID string
-	factory              informers.SharedInformerFactory
+	clientset                kubernetes.Interface
+	postprocessImage         string
+	prometheusURL            string
+	grafanaURL               string
+	grafanaDatasourceUID     string
+	debugKeepPostprocessJobs bool
+	debugTelemetryAllPods    bool
+	factory                  informers.SharedInformerFactory
 	// podFactory is a separate, server-side label-selector-scoped factory for the Pod
 	// informer. Unlike Jobs (which have no label capturing "qualifies for
 	// postprocessing", so watch-everything-then-filter is unavoidable), pods are far
@@ -101,12 +115,14 @@ type Watcher struct {
 
 func New(clientset kubernetes.Interface, cfg Config) *Watcher {
 	w := &Watcher{
-		clientset:            clientset,
-		postprocessImage:     cfg.PostprocessImage,
-		prometheusURL:        cfg.PrometheusURL,
-		grafanaURL:           cfg.GrafanaURL,
-		grafanaDatasourceUID: cfg.GrafanaDatasourceUID,
-		factory:              informers.NewSharedInformerFactory(clientset, resyncPeriod),
+		clientset:                clientset,
+		postprocessImage:         cfg.PostprocessImage,
+		prometheusURL:            cfg.PrometheusURL,
+		grafanaURL:               cfg.GrafanaURL,
+		grafanaDatasourceUID:     cfg.GrafanaDatasourceUID,
+		debugKeepPostprocessJobs: cfg.DebugKeepPostprocessJobs,
+		debugTelemetryAllPods:    cfg.DebugTelemetryAllPods,
+		factory:                  informers.NewSharedInformerFactory(clientset, resyncPeriod),
 		podFactory: informers.NewSharedInformerFactoryWithOptions(
 			clientset, resyncPeriod,
 			informers.WithTweakListOptions(func(opts *metav1.ListOptions) {
@@ -768,6 +784,7 @@ func (w *Watcher) createPostprocessJobCore(ctx context.Context, namespace, trigg
 								{Name: "PROMETHEUS_URL", Value: w.prometheusURL},
 								{Name: "GRAFANA_URL", Value: w.grafanaURL},
 								{Name: "GRAFANA_DATASOURCE_UID", Value: w.grafanaDatasourceUID},
+								{Name: "AIBOM_DEBUG_TELEMETRY_ALL_PODS", Value: strconv.FormatBool(w.debugTelemetryAllPods)},
 							},
 							VolumeMounts: []corev1.VolumeMount{
 								{
@@ -909,6 +926,11 @@ func (w *Watcher) collectAIBOM(ctx context.Context, job *batchv1.Job) {
 	patch := fmt.Sprintf(`{"metadata":{"annotations":{"%s":"%s"}}}`, AnnotationAIBOMCollected, time.Now().UTC().Format(time.RFC3339))
 	if _, err := w.clientset.BatchV1().Jobs(job.Namespace).Patch(ctx, job.Name, types.MergePatchType, []byte(patch), metav1.PatchOptions{}); err != nil {
 		log.Printf("warning: could not annotate postprocess job %s/%s as collected: %v", job.Namespace, job.Name, err)
+	}
+
+	if w.debugKeepPostprocessJobs {
+		log.Printf("debug-keep-postprocess-jobs set: leaving postprocess job %s/%s and its data configmap in place", job.Namespace, job.Name)
+		return
 	}
 
 	background := metav1.DeletePropagationBackground
