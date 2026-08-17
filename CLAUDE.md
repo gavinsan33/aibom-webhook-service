@@ -19,7 +19,7 @@ Dataset detector's `k8s_api` import is wrapped in a soft `try/except ImportError
 
 ### Workload Selection and Grouping
 
-**Which jobs get postprocessed?** A job in an `aibom.io/enabled` namespace qualifies if any of its pods request `nvidia.com/gpu` resources (limits or requests > 0), or the job has any `aibom.io/*` annotations. Internal labels (`aibom.io/instrumented`, `aibom.io/postprocess-job`) are excluded from this check. Jobs that are themselves postprocess jobs (labeled `aibom.io/postprocess-for`) are always skipped.
+**Which jobs get postprocessed?** A job in an `aibom.io/enabled` namespace qualifies if any of its pods request `nvidia.com/gpu` resources (limits or requests > 0), or the job has any `aibom.io/*` annotations. Internal labels (`aibom.io/instrumented`, `aibom.io/postprocess-job`) are excluded from this check. Jobs that are themselves postprocess jobs (labeled `aibom.io/postprocess-for`) are always skipped. `--debug-postprocess-all-pods` (`debug.postprocessAllPods` chart value) bypasses the GPU-request half of this check entirely (for both Jobs and the bare-pod path below), so every instrumented pod qualifies regardless of GPU requests — for local testing against a mock cluster (e.g. kind) with no real GPU resources/device plugin, where the GPU-request signal never fires; not for routine production use.
 
 **When does postprocessing trigger?** On Job completion (`JobComplete` condition), or on Job deletion (`DeletionTimestamp` set — the finalizer path, used for JobSet server pods killed rather than completing naturally). Each job is postprocessed at most once; after the postprocess job is created, the original job is annotated `aibom.io/postprocess-job` and subsequent events are skipped.
 

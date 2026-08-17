@@ -109,8 +109,19 @@ func TestShouldPostprocessPod_NoQualifyingSignal(t *testing.T) {
 	pod := instrumentedBarePod("web-pod", "gavin-test")
 	pod.Spec.Containers[0].Resources = corev1.ResourceRequirements{}
 
-	if shouldPostprocessPod(pod) {
+	w := New(fake.NewSimpleClientset(), Config{})
+	if w.shouldPostprocessPod(pod) {
 		t.Error("expected pod with no GPU request or annotations to be skipped")
+	}
+}
+
+func TestShouldPostprocessPod_DebugPostprocessAllPods(t *testing.T) {
+	pod := instrumentedBarePod("web-pod", "gavin-test")
+	pod.Spec.Containers[0].Resources = corev1.ResourceRequirements{}
+
+	w := New(fake.NewSimpleClientset(), Config{DebugPostprocessAllPods: true})
+	if !w.shouldPostprocessPod(pod) {
+		t.Error("expected debug-postprocess-all-pods to qualify a pod with no GPU request or annotations")
 	}
 }
 

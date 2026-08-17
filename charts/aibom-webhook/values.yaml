@@ -67,5 +67,11 @@ grafana:
 # state or the data ConfigMap's contents after the fact. Leaves one Job and
 # one ConfigMap behind per completed workload indefinitely — a debugging aid,
 # not something to leave on in production.
+#
+# debug.postprocessAllPods bypasses the nvidia.com/gpu qualification check, so
+# every instrumented pod is postprocessed regardless of GPU requests. Intended
+# for local testing on clusters with no real GPU resources (e.g. kind), where
+# the GPU-request signal never fires — not something to leave on in production.
 debug:
   keepPostprocessJobs: false
+  postprocessAllPods: false
