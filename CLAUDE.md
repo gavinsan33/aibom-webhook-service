@@ -115,6 +115,8 @@ Neither file being present is a hard requirement in either direction — a missi
 
 To absorb this, missing summary metrics are retried with a delay (`AIBOM_TELEMETRY_RETRY_ATTEMPTS`, default `3`; `AIBOM_TELEMETRY_RETRY_DELAY_S`, default `45` seconds between attempts) before being recorded as unavailable — only the metrics still missing on a given attempt are re-queried, not the whole batch.
 
+A pod with no detected GPU (`gpu_count` 0 or missing in its discovery data, e.g. `nvidia-smi` found no hardware) is skipped for telemetry entirely — there's no GPU utilization to query, so it's omitted rather than querying anyway. On a mock cluster (e.g. kind) with no real GPU hardware, `nvidia-smi` always reports zero GPUs, so every pod gets skipped and telemetry collection never runs at all. `--debug-telemetry-all-pods` (`debug.telemetryAllPods` chart value, plumbed to the postprocess Job as `AIBOM_DEBUG_TELEMETRY_ALL_PODS`) bypasses this check so telemetry is queried for every pod regardless of detected GPU count — for local testing only, not routine production use.
+
 ## Deploy Versioning (`--version`)
 
 `--version` is the single source of truth for what `just deploy` builds and how it's labeled: it sets the BuildConfig output ImageStreamTag, the Deployment's image reference, and (unless it's `latest`) `build.gitRef` — so the BuildConfig actually checks out and builds that exact commit, instead of always building whatever `build.gitRef`'s branch currently points to regardless of the tag name.

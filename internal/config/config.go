@@ -17,4 +17,9 @@ type Config struct {
 	// this leaks a Job+ConfigMap per completed workload indefinitely; not meant for
 	// routine production use.
 	DebugKeepPostprocessJobs bool
+	// DebugTelemetryAllPods is passed through to the postprocess Job, bypassing
+	// postprocess.py's "skip pods with no detected GPU" telemetry check. Intended
+	// for local testing against a mock cluster (e.g. kind) with no real GPU
+	// hardware, where nvidia-smi always reports zero GPUs.
+	DebugTelemetryAllPods bool
 }

@@ -67,5 +67,13 @@ grafana:
 # state or the data ConfigMap's contents after the fact. Leaves one Job and
 # one ConfigMap behind per completed workload indefinitely — a debugging aid,
 # not something to leave on in production.
+#
+# debug.telemetryAllPods makes postprocess Jobs query Prometheus telemetry for
+# every pod regardless of detected GPU count (postprocess.py normally skips a
+# pod with gpu_count 0/missing, since there's no GPU utilization to query).
+# Intended for local testing on clusters with no real GPU hardware (e.g. kind),
+# where nvidia-smi always reports zero GPUs and telemetry would otherwise never
+# run at all — not something to leave on in production.
 debug:
   keepPostprocessJobs: true
+  telemetryAllPods: false

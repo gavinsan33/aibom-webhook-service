@@ -87,6 +87,12 @@ type Config struct {
 	// of each per completed workload indefinitely; not meant for routine
 	// production use.
 	DebugKeepPostprocessJobs bool
+	// DebugTelemetryAllPods is passed through to the postprocess Job as
+	// AIBOM_DEBUG_TELEMETRY_ALL_PODS, bypassing postprocess.py's "skip pods with
+	// no detected GPU" telemetry check. Intended for local testing against a mock
+	// cluster (e.g. kind) with no real GPU hardware, where nvidia-smi always
+	// reports zero GPUs and telemetry collection would otherwise never run.
+	DebugTelemetryAllPods bool
 }
 
 type Watcher struct {
@@ -96,6 +102,7 @@ type Watcher struct {
 	grafanaURL               string
 	grafanaDatasourceUID     string
 	debugKeepPostprocessJobs bool
+	debugTelemetryAllPods    bool
 	factory                  informers.SharedInformerFactory
 	// podFactory is a separate, server-side label-selector-scoped factory for the Pod
 	// informer. Unlike Jobs (which have no label capturing "qualifies for
@@ -114,6 +121,7 @@ func New(clientset kubernetes.Interface, cfg Config) *Watcher {
 		grafanaURL:               cfg.GrafanaURL,
 		grafanaDatasourceUID:     cfg.GrafanaDatasourceUID,
 		debugKeepPostprocessJobs: cfg.DebugKeepPostprocessJobs,
+		debugTelemetryAllPods:    cfg.DebugTelemetryAllPods,
 		factory:                  informers.NewSharedInformerFactory(clientset, resyncPeriod),
 		podFactory: informers.NewSharedInformerFactoryWithOptions(
 			clientset, resyncPeriod,
@@ -776,6 +784,7 @@ func (w *Watcher) createPostprocessJobCore(ctx context.Context, namespace, trigg
 								{Name: "PROMETHEUS_URL", Value: w.prometheusURL},
 								{Name: "GRAFANA_URL", Value: w.grafanaURL},
 								{Name: "GRAFANA_DATASOURCE_UID", Value: w.grafanaDatasourceUID},
+								{Name: "AIBOM_DEBUG_TELEMETRY_ALL_PODS", Value: strconv.FormatBool(w.debugTelemetryAllPods)},
 							},
 							VolumeMounts: []corev1.VolumeMount{
 								{
