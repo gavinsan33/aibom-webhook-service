@@ -51,6 +51,11 @@ func (m *Mutator) Mutate(pod *corev1.Pod) ([]PatchOperation, error) {
 	// can't be relied on for containers this webhook adds.
 	patches = appendVolume(patches, pod, buildTokenVolume())
 
+	// Add the discovery signing key volume — mounted only into the discovery
+	// init container below (buildDiscoveryInitContainer), never into an app
+	// container, so the workload's own code never has access to it.
+	patches = appendVolume(patches, pod, buildDiscoverySigningKeyVolume())
+
 	// Add discovery init container
 	initContainer := m.buildDiscoveryInitContainer(pod)
 	if len(pod.Spec.InitContainers) == 0 {
@@ -225,6 +230,7 @@ func (m *Mutator) buildDiscoveryInitContainer(pod *corev1.Pod) corev1.Container 
 			{Name: "aibom-data", MountPath: "/tmp/result"},
 			{Name: "aibom-scripts", MountPath: "/scripts", ReadOnly: true},
 			aibomTokenVolumeMount(),
+			discoverySigningKeyVolumeMount(),
 		},
 	}
 
@@ -441,6 +447,32 @@ func aibomTokenVolumeMount() corev1.VolumeMount {
 	return corev1.VolumeMount{
 		Name:      "aibom-token",
 		MountPath: "/var/run/secrets/kubernetes.io/serviceaccount",
+		ReadOnly:  true,
+	}
+}
+
+// buildDiscoverySigningKeyVolume is mounted as optional: a namespace that
+// hasn't been upgraded to a chart version carrying signing.yaml yet simply
+// has no such Secret, and generate_snapshot.py falls back to writing
+// unsigned discovery data (see its own missing-key handling) rather than
+// the pod failing to start.
+func buildDiscoverySigningKeyVolume() corev1.Volume {
+	optional := true
+	return corev1.Volume{
+		Name: "aibom-discovery-signing-key",
+		VolumeSource: corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{
+				SecretName: aibomdata.DiscoverySigningKeySecretName,
+				Optional:   &optional,
+			},
+		},
+	}
+}
+
+func discoverySigningKeyVolumeMount() corev1.VolumeMount {
+	return corev1.VolumeMount{
+		Name:      "aibom-discovery-signing-key",
+		MountPath: "/var/run/secrets/aibom/discovery-signing",
 		ReadOnly:  true,
 	}
 }
