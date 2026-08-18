@@ -22,6 +22,16 @@ rules:
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["list", "watch", "create", "patch", "delete"]
+  # secrets: get only, restricted by name via resourceNames to the per-namespace
+  # discovery signing key (aibom-workload-namespace's signing.yaml) -- used to
+  # verify a discovery-<pod>.json entry's HMAC signature before trusting it
+  # enough to merge into the aggregate discovery.json (see watcher.go's
+  # verifyDiscoverySignature). This identity can never read any other Secret,
+  # in this or any other namespace, regardless of name.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+    resourceNames: ["aibom-discovery-hmac-key"]
   # No serving.kserve.io permission here deliberately: resolving an
   # InferenceService's storage.path/storageUri for model identity is done by
   # the aibom-discovery init container itself, using the workload's own
