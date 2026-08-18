@@ -603,6 +603,11 @@ def _install_transformers_hook():
         model = _orig_from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs)
         try:
             info = {"model_name": str(pretrained_model_name_or_path)}
+
+            device_map = kwargs.get("device_map")
+            if device_map is not None:
+                info["model_device_map"] = str(device_map)
+
             config = getattr(model, "config", None)
             architectures = getattr(config, "architectures", None) if config else None
             if architectures:

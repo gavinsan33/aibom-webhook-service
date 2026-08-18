@@ -503,6 +503,20 @@ def detect_parallelization_from_command(tokens):
     return {"parallelization_strategy": strategy} if strategy else None
 
 
+def _parallelization_strategy_from_device_map(device_map):
+    """Fallback for in-script sharding with no CLI/launcher/accelerate-config
+    signal at all -- e.g. a raw transformers.Trainer or inference script that
+    passes `device_map="auto"` (or another multi-device map) directly to
+    `from_pretrained`, sharding the model across GPUs within a single
+    process. Lowest-priority signal: any explicit launcher/CLI/accelerate
+    detection is more authoritative than this heuristic."""
+    if not device_map:
+        return None
+    if device_map in ("cpu", "cuda", "cuda:0"):
+        return None
+    return "model_parallel"
+
+
 def detect_model_from_storage(storage):
     """Detect model identity from a KServe InferenceService's declared
     storage.path/storageUri (see watcher.go's resolveInferenceServiceStorage
@@ -1016,6 +1030,7 @@ def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, tel
                 annotations.get("parallelization-strategy")
                 or runtime_info.get("parallelization_strategy")
                 or dm.get("parallelization_strategy")
+                or _parallelization_strategy_from_device_map(runtime_info.get("model_device_map"))
             ),
         }
 
