@@ -343,6 +343,26 @@ def test_transformers_hook_no_quantization_config_leaves_fields_unset(fake_trans
     assert "quantization_bits" not in rd._runtime_info
 
 
+def test_transformers_hook_captures_device_map(fake_transformers_module):
+    rd.install_hooks()
+    import transformers
+
+    transformers.PreTrainedModel.from_pretrained(
+        "some-model", config=FakeModelConfig(), device_map="auto"
+    )
+
+    assert rd._runtime_info["model_device_map"] == "auto"
+
+
+def test_transformers_hook_no_device_map_leaves_field_unset(fake_transformers_module):
+    rd.install_hooks()
+    import transformers
+
+    transformers.PreTrainedModel.from_pretrained("some-model", config=FakeModelConfig())
+
+    assert "model_device_map" not in rd._runtime_info
+
+
 # ---------------------------------------------------------------------------
 # peft.LoraConfig
 # ---------------------------------------------------------------------------

@@ -229,6 +229,18 @@ def test_detect_parallelization_single_gpu_returns_none():
     assert pp.detect_parallelization_from_command(tokens) is None
 
 
+def test_parallelization_strategy_from_device_map_auto():
+    assert pp._parallelization_strategy_from_device_map("auto") == "model_parallel"
+
+
+def test_parallelization_strategy_from_device_map_single_device_returns_none():
+    assert pp._parallelization_strategy_from_device_map("cuda:0") is None
+
+
+def test_parallelization_strategy_from_device_map_none_returns_none():
+    assert pp._parallelization_strategy_from_device_map(None) is None
+
+
 def test_detect_parallelization_no_signal_returns_none():
     assert pp.detect_parallelization_from_command(["python", "train.py"]) is None
     assert pp.detect_parallelization_from_command([]) is None
@@ -425,3 +437,23 @@ def test_compile_aibom_uses_runtime_info_for_training_and_fine_tuning():
     assert aibom["fine_tuning"]["adaptation_method"] == "qlora"
     assert aibom["fine_tuning"]["lora_rank"] == 16
     assert aibom["fine_tuning"]["lora_alpha"] == 32
+
+
+def test_compile_aibom_falls_back_to_device_map_for_parallelization_strategy():
+    runtime_info = {"model_device_map": "auto"}
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info=runtime_info,
+        annotations={"experiment-intent": "training"}, telemetry=None,
+    )
+    assert aibom["training"]["parallelization_strategy"] == "model_parallel"
+
+
+def test_compile_aibom_cli_detected_strategy_overrides_device_map_fallback():
+    runtime_info = {"model_device_map": "auto"}
+    detected_model = {"parallelization_strategy": "data_parallel"}
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info=runtime_info,
+        annotations={"experiment-intent": "training"}, telemetry=None,
+        detected_model=detected_model,
+    )
+    assert aibom["training"]["parallelization_strategy"] == "data_parallel"

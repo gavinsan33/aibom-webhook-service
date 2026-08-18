@@ -61,7 +61,7 @@ Other serving engines (TGI, SGLang, TensorRT-LLM) and other fine-tuning tools (A
 | `--speculative-model` + `--num-speculative-tokens` (legacy), or `--speculative-config` (modern, JSON or `key=value` list) | `model.speculative_decoding` |
 | `--override-generation-config` (JSON or `key=value` list) | `inference.temperature`, `inference.top_p`, `inference.top_k` |
 
-Sampling parameters set per-request by a benchmark client (e.g. temperature in an HTTP request body) aren't visible here — this only sees what's baked into the server's own startup command.
+Sampling parameters set per-request by a benchmark client (e.g. temperature in an HTTP request body) aren't visible here — this only sees what's baked into the server's own startup command. This is an architectural limitation, not a gap slated to close: the request body lives on the wire between the client and an already-running vLLM server, which neither the discovery init container nor the runtime hooks (both scoped to a single container's own process) ever observe. Closing it would require something structurally different — e.g. a sidecar/proxy in front of the server's traffic — which is out of scope here.
 
 **trl CLI arguments** (`trl sft`/`trl dpo`-style):
 
@@ -84,7 +84,7 @@ Sampling parameters set per-request by a benchmark client (e.g. temperature in a
 
 The `--accelerate_config` file is read from inside the training container itself, by `runtime_detector.py` (the same in-container hook that detects datasets) — `postprocess.py` has no access to the training container's filesystem after the fact. This requires PyYAML in the training image (a hard dependency of `accelerate` itself); if unavailable, or the config's `distributed_type` isn't one of the four listed, detection falls back to guessing from the config filename against known preset names (`fsdp1`/`fsdp2`/`zero1`/`zero2`/`zero3`/`multi_gpu`/`single_gpu`) — a much weaker heuristic that only works if the file is named exactly one of those.
 
-In-script sharding (e.g. `device_map="auto"` set directly in Python, common in QLoRA scripts) isn't visible and isn't detected — only parallelism baked into the command or a referenced accelerate config's content.
+In-script sharding with no command/accelerate-config signal at all — e.g. `device_map="auto"` passed directly to `from_pretrained` in Python, common in raw `transformers.Trainer`/QLoRA scripts with no CLI launcher — is covered by a lowest-priority fallback: the `transformers.PreTrainedModel.from_pretrained` runtime hook (`runtime_detector.py`) captures the `device_map` kwarg, and `postprocess.py` maps a multi-device value (anything other than a single `cpu`/`cuda`/`cuda:N` device) to `model_parallel` only if none of the above command/accelerate-config signals produced a strategy first.
 
 ## Dataset Declaration and Reconciliation
 
