@@ -21,6 +21,9 @@ spec:
           properties:
             spec:
               type: object
+              x-kubernetes-validations:
+                - rule: "self == oldSelf"
+                  message: "spec is immutable once created"
               required:
                 - jobName
                 - collectedAt

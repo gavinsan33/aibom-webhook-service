@@ -267,6 +267,8 @@ Completed AIBOMs are stored as namespaced `AIBOM` custom resources (`aiboms.aibo
 
 Because `AIBOM` is a namespaced resource, it inherits ordinary Kubernetes RBAC: a user granted `get`/`list` on `aiboms` in namespace `team-a` cannot see `team-b`'s AIBOMs.
 
+`spec` is immutable once created — the CRD rejects any `UPDATE` that changes it, even from a user holding `update`/`patch` RBAC on `aiboms.aibom.io`, so a compiled AIBOM can't be silently altered after the fact. This doesn't prevent deletion; that's still governed by ordinary `delete` RBAC on `aiboms.aibom.io`, same as any other namespaced resource.
+
 ```bash
 # List AIBOMs in a namespace (only visible to users with RBAC on aiboms.aibom.io there)
 oc get aiboms -n gavin-test
