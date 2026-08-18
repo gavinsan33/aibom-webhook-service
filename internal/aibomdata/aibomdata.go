@@ -25,6 +25,18 @@ const (
 	// that InferenceService to resolve model identity for storage.key/path-based
 	// (S3/MinIO data-connection) deployments, which carry no CLI args to parse.
 	LabelKServeInferenceService = "serving.kserve.io/inferenceservice"
+
+	// DiscoverySigningKeySecretName is created per workload namespace by the
+	// aibom-workload-namespace chart (templates/signing.yaml). The webhook
+	// mounts it only into the discovery init container (never an app
+	// container) so generate_snapshot.py can HMAC-sign discovery-<pod>.json;
+	// the watcher reads the same Secret (via RBAC scoped to this exact name,
+	// see clusterrole.yaml) to verify that signature before trusting a pod's
+	// hardware data enough to merge it into the aggregate discovery.json.
+	DiscoverySigningKeySecretName = "aibom-discovery-hmac-key"
+
+	// DiscoverySigningKeyDataKey is the key within that Secret's data map.
+	DiscoverySigningKeyDataKey = "hmac-key"
 )
 
 // PostprocessJobName returns the deterministic postprocess Job name for a
