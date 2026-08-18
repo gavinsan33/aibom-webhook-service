@@ -44,3 +44,36 @@ build:
 
 watcher:
   enabled: true
+
+# Prometheus/Thanos endpoint the postprocess Job queries directly for telemetry.
+# Auth (bearer ServiceAccount token) and TLS trust (the service-ca ConfigMap
+# aibom-workload-namespace creates per opted-in namespace, or the system trust
+# store if that's absent) are always automatic — see postprocess.py. Empty
+# disables telemetry collection entirely.
+prometheus:
+  url: https://thanos-querier.openshift-monitoring.svc:9091
+
+# Optional, purely for a clickable Grafana Explore deep link in the AIBOM
+# (resource_utilization.grafana_links) — actual telemetry queries always go
+# straight to prometheus.url above, never through Grafana. datasourceUid is
+# the UID of the Grafana datasource pointing at that same Prometheus. Leave
+# both empty to omit the link entirely.
+grafana:
+  url: ""
+  datasourceUid: ""
+
+# debug.keepPostprocessJobs skips the usual cleanup of a succeeded (or failed)
+# postprocess Job/data ConfigMap, for inspecting postprocess pod logs/exit
+# state or the data ConfigMap's contents after the fact. Leaves one Job and
+# one ConfigMap behind per completed workload indefinitely — a debugging aid,
+# not something to leave on in production.
+#
+# debug.telemetryAllPods makes postprocess Jobs query Prometheus telemetry for
+# every pod regardless of detected GPU count (postprocess.py normally skips a
+# pod with gpu_count 0/missing, since there's no GPU utilization to query).
+# Intended for local testing on clusters with no real GPU hardware (e.g. kind),
+# where nvidia-smi always reports zero GPUs and telemetry would otherwise never
+# run at all — not something to leave on in production.
+debug:
+  keepPostprocessJobs: false
+  telemetryAllPods: false
