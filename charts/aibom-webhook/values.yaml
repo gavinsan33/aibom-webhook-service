@@ -75,5 +75,5 @@ grafana:
 # where nvidia-smi always reports zero GPUs and telemetry would otherwise never
 # run at all — not something to leave on in production.
 debug:
-  keepPostprocessJobs: false
-  telemetryAllPods: false
+  keepPostprocessJobs: true
+  telemetryAllPods: true
