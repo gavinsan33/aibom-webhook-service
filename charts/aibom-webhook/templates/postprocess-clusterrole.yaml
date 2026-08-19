@@ -1,0 +1,18 @@
+# Cluster-scoped: OpenShift's image.openshift.io/v1 Image object has no
+# namespace, so it can't be granted via a namespaced Role (see
+# aibom-workload-namespace's rbac.yaml, which binds this from each workload
+# namespace's own aibom-postprocess ServiceAccount). Installed once here,
+# alongside the other cluster-level RBAC, rather than per-namespace.
+#
+# Read-only and limited to Images: lets the postprocess Job resolve the
+# io.openshift.build.commit.* labels an OpenShift BuildConfig bakes onto an
+# image at build time, for git-provenance detection (see CLAUDE.md). No
+# broader image.openshift.io permissions (ImageStreams, etc.) are needed.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: aibom-postprocess-images
+rules:
+  - apiGroups: ["image.openshift.io"]
+    resources: ["images"]
+    verbs: ["get"]

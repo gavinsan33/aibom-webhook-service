@@ -77,6 +77,26 @@ subjects:
     apiGroup: rbac.authorization.k8s.io
     name: system:serviceaccounts:{{ .Release.Namespace }}
 ---
+# Binds this namespace's aibom-postprocess ServiceAccount to the
+# cluster-scoped aibom-postprocess-images ClusterRole (installed once by the
+# aibom-webhook chart -- see its postprocess-clusterrole.yaml), giving the
+# postprocess Job read access to OpenShift's cluster-scoped Image objects for
+# git-provenance detection. Named per-namespace, like the image-puller
+# RoleBinding below, since ClusterRoleBindings are themselves cluster-scoped
+# and each namespace needs its own.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: aibom-postprocess-images-{{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: aibom-postprocess-images
+subjects:
+  - kind: ServiceAccount
+    name: aibom-postprocess
+    namespace: {{ .Release.Namespace }}
+---
 # Grants pods in this namespace pull access to images in the aibom-system
 # namespace. OpenShift's system:image-puller role must be bound from the
 # image's own namespace, so this RoleBinding is deliberately created in
