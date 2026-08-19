@@ -645,6 +645,59 @@ def detect_dataset_from_containers(containers):
 
 
 # ---------------------------------------------------------------------------
+# Git provenance detection (from OpenShift BuildConfig commit labels)
+# ---------------------------------------------------------------------------
+
+_BUILD_LABEL_COMMIT = "io.openshift.build.commit.id"
+_BUILD_LABEL_REF = "io.openshift.build.commit.ref"
+_BUILD_LABEL_SOURCE = "io.openshift.build.source-location"
+
+
+def _image_digest(image_id):
+    """Extract the sha256 digest from a container's imageID
+    ("registry/repo@sha256:..."), or None if it isn't digest-pinned."""
+    if not image_id or "@sha256:" not in image_id:
+        return None
+    return image_id.rsplit("@", 1)[-1]
+
+
+def detect_git_provenance_from_containers(containers):
+    """Best-effort git provenance from OpenShift BuildConfig commit labels
+    baked onto a container's image at build time. Only resolves anything if
+    the image was actually built in-cluster via a BuildConfig -- looked up
+    by the image's digest (containers.json's image_id, from
+    ContainerStatuses, not the mutable image tag) against the cluster-scoped
+    Image object, so a re-tagged image can't spoof the labels. See
+    CLAUDE.md's git provenance section for why this is identification, not
+    an authorization/trust guarantee: it reports what the build controller
+    recorded, not whether the source was vetted.
+    """
+    for container in containers:
+        digest = _image_digest(container.get("image_id"))
+        if not digest:
+            continue
+        try:
+            image = k8s_api.get_cluster_object("image.openshift.io", "v1", "images", digest)
+        except Exception as e:
+            print(f"  WARNING: could not resolve image {digest}: {e}", file=sys.stderr)
+            continue
+        if not image:
+            continue
+        # dockerImageMetadata mirrors Docker's own image config JSON schema
+        # verbatim (capitalized field names), not Kubernetes camelCase.
+        labels = safe_get(image, "dockerImageMetadata", "Config", "Labels") or {}
+        commit = labels.get(_BUILD_LABEL_COMMIT)
+        if not commit:
+            continue
+        return {
+            "git_commit": commit,
+            "git_repository": labels.get(_BUILD_LABEL_SOURCE),
+            "git_branch": labels.get(_BUILD_LABEL_REF),
+        }
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Phase 1: Telemetry collection
 # ---------------------------------------------------------------------------
 
@@ -905,7 +958,7 @@ def safe_get(data, *keys, default=None):
     return data if data != {} else default
 
 
-def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, telemetry, detected_model=None, cli_dataset=None):
+def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, telemetry, detected_model=None, cli_dataset=None, detected_provenance=None):
     print(f"  Discovery files: {len(discoveries)}")
     print(f"  Auto-detected datasets: {len(detected_datasets)}")
     if detected_model:
@@ -924,10 +977,22 @@ def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, tel
     aibom["experiment_name"] = annotations.get("experiment-name") or JOB_NAME or None
     aibom["experiment_description"] = annotations.get("experiment-description")
 
+    # Git provenance: an explicit annotation always wins; otherwise fall back
+    # to what was auto-detected from the image's OpenShift BuildConfig commit
+    # labels (see detect_git_provenance_from_containers). declared_via
+    # records which source won, mirroring dataset.declared.declared_via.
+    dp = detected_provenance or {}
+    declared_via = None
+    if annotations.get("git-commit"):
+        declared_via = "annotation"
+    elif dp.get("git_commit"):
+        declared_via = "openshift_build_label"
+
     aibom["source_code"] = {
-        "git_repository": annotations.get("git-repository"),
-        "git_commit": annotations.get("git-commit"),
-        "git_branch": annotations.get("git-branch"),
+        "git_repository": annotations.get("git-repository") or dp.get("git_repository"),
+        "git_commit": annotations.get("git-commit") or dp.get("git_commit"),
+        "git_branch": annotations.get("git-branch") or dp.get("git_branch"),
+        "declared_via": declared_via,
     }
 
     # Execution metadata from discovery
@@ -1240,6 +1305,13 @@ def main():
     if storage_model:
         detected_model = {**(detected_model or {}), **storage_model}
     cli_dataset = detect_dataset_from_containers(containers)
+    detected_provenance = detect_git_provenance_from_containers(containers)
+    if detected_provenance:
+        print("--- Git Provenance Detection ---")
+        print(f"  Commit: {detected_provenance['git_commit']}")
+        if detected_provenance.get("git_repository"):
+            print(f"  Repository: {detected_provenance['git_repository']}")
+        print()
     if detected_model:
         print(f"--- Model Detection ---")
         print(f"  Engine: {detected_model.get('serving_engine', 'unknown')}")
@@ -1272,6 +1344,7 @@ def main():
         aibom = compile_aibom(
             discoveries, detected_datasets, runtime_info, annotations, telemetry,
             detected_model=detected_model, cli_dataset=cli_dataset,
+            detected_provenance=detected_provenance,
         )
     except Exception as e:
         print(f"ERROR: AIBOM compilation failed: {e}", file=sys.stderr)

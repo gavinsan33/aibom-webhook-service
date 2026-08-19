@@ -227,7 +227,7 @@ See `CLAUDE.md` for the detection internals (CLI-arg parsing, runtime hooks, KSe
 
 When a Job completes or is being deleted (held by the finalizer), the watcher creates an AIBOM postprocess Job that reads/merges the workload's data ConfigMap, removes the holding finalizer, runs `postprocess.py` to compile and create the `AIBOM` custom resource, and cleans up the postprocess Job and ConfigMap on success.
 
-Full rules for which Jobs/pods qualify, how JobSet siblings are merged, model/dataset auto-detection, and Grafana telemetry retries are documented in `CLAUDE.md`.
+Full rules for which Jobs/pods qualify, how JobSet siblings are merged, model/dataset auto-detection, git provenance detection, and Grafana telemetry retries are documented in `CLAUDE.md`.
 
 ### AIBOM Annotations
 
@@ -239,6 +239,9 @@ Users can optionally annotate their Jobs with `aibom.io/*` keys to provide exper
 | `aibom.io/experiment-name` | `experiment_name` |
 | `aibom.io/model-name` | `model.name` |
 | `aibom.io/model-framework` | `model.framework` |
+| `aibom.io/git-repository` | `source_code.git_repository` |
+| `aibom.io/git-commit` | `source_code.git_commit` |
+| `aibom.io/git-branch` | `source_code.git_branch` |
 | `aibom.io/dataset-name` | `dataset.declared.name` |
 | `aibom.io/dataset-source` | `dataset.declared.source` |
 | `aibom.io/dataset-version` | `dataset.declared.version` |
@@ -267,6 +270,8 @@ oc create secret generic aibom-config \
 Completed AIBOMs are stored as namespaced `AIBOM` custom resources (`aiboms.aibom.io`, `charts/aibom-webhook/crds/aibom-crd.yaml`) — one per completed workload, created in the same namespace the workload ran in. `just deploy` registers the CRD; if your account lacks CRD permissions, use `just deploy --skip-crds` instead and have a cluster-admin apply it once via `oc apply -f charts/aibom-webhook/crds/aibom-crd.yaml`.
 
 Because `AIBOM` is a namespaced resource, it inherits ordinary Kubernetes RBAC: a user granted `get`/`list` on `aiboms` in namespace `team-a` cannot see `team-b`'s AIBOMs.
+
+`spec` is immutable once created — the CRD rejects any `UPDATE` that changes it, even from a user holding `update`/`patch` RBAC on `aiboms.aibom.io`, so a compiled AIBOM can't be silently altered after the fact. This doesn't prevent deletion; that's still governed by ordinary `delete` RBAC on `aiboms.aibom.io`, same as any other namespaced resource.
 
 ```bash
 # List AIBOMs in a namespace (only visible to users with RBAC on aiboms.aibom.io there)
