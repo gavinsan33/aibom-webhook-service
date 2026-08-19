@@ -276,7 +276,67 @@ def test_detect_dataset_from_containers_no_match_returns_none():
 
 
 # ---------------------------------------------------------------------------
-# Git provenance detection
+# Git provenance detection: CLI-parsed `git clone`/`checkout`
+# ---------------------------------------------------------------------------
+
+
+def test_detect_git_clone_from_command_basic():
+    tokens = ["git", "clone", "https://github.com/org/repo", "&&", "python", "train.py"]
+    assert pp.detect_git_clone_from_command(tokens) == {
+        "git_repository": "https://github.com/org/repo",
+    }
+
+
+def test_detect_git_clone_from_command_with_checkout_sha():
+    tokens = [
+        "git", "clone", "https://github.com/org/repo", "&&",
+        "cd", "repo", "&&",
+        "git", "checkout", "deadbeefcafe0123", "&&",
+        "python", "train.py",
+    ]
+    result = pp.detect_git_clone_from_command(tokens)
+    assert result["git_repository"] == "https://github.com/org/repo"
+    assert result["git_commit"] == "deadbeefcafe0123"
+
+
+def test_detect_git_clone_from_command_with_checkout_branch():
+    tokens = [
+        "git", "clone", "https://github.com/org/repo", "&&",
+        "git", "checkout", "feature/my-branch",
+    ]
+    result = pp.detect_git_clone_from_command(tokens)
+    assert result["git_branch"] == "feature/my-branch"
+    assert "git_commit" not in result
+
+
+def test_detect_git_clone_from_command_branch_flag():
+    tokens = ["git", "clone", "--branch", "main", "--depth", "1", "https://github.com/org/repo"]
+    result = pp.detect_git_clone_from_command(tokens)
+    assert result == {"git_repository": "https://github.com/org/repo", "git_branch": "main"}
+
+
+def test_detect_git_clone_from_command_no_clone_returns_none():
+    assert pp.detect_git_clone_from_command(["python", "train.py"]) is None
+    assert pp.detect_git_clone_from_command([]) is None
+    assert pp.detect_git_clone_from_command(None) is None
+
+
+def test_detect_git_clone_from_containers_uses_first_match():
+    containers = [
+        {"command": ["python", "sidecar.py"]},
+        {"command": ["sh", "-c"], "args": ["git clone https://github.com/org/repo && python train.py"]},
+    ]
+    result = pp.detect_git_clone_from_containers(containers)
+    assert result["git_repository"] == "https://github.com/org/repo"
+    assert result["detected_via"] == "cli_arg"
+
+
+def test_detect_git_clone_from_containers_no_match_returns_none():
+    assert pp.detect_git_clone_from_containers([{"command": ["python", "train.py"]}]) is None
+
+
+# ---------------------------------------------------------------------------
+# Git provenance detection: OpenShift/OCI image labels
 # ---------------------------------------------------------------------------
 
 
@@ -545,6 +605,20 @@ def test_compile_aibom_annotation_overrides_detected_provenance():
     assert aibom["source_code"]["git_commit"] == "annotated-sha"
     assert aibom["source_code"]["git_repository"] == "annotated-repo"
     assert aibom["source_code"]["declared_via"] == "annotation"
+
+
+def test_compile_aibom_uses_cli_detected_provenance_with_repository_only():
+    # A plain `git clone <url>` with no `checkout` never yields a commit --
+    # declared_via should still resolve off git_repository alone.
+    detected_provenance = {"git_repository": "https://github.com/org/repo", "detected_via": "cli_arg"}
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info={},
+        annotations={"experiment-intent": "training"}, telemetry=None,
+        detected_provenance=detected_provenance,
+    )
+    assert aibom["source_code"]["git_repository"] == "https://github.com/org/repo"
+    assert aibom["source_code"]["git_commit"] is None
+    assert aibom["source_code"]["declared_via"] == "cli_arg"
 
 
 def test_compile_aibom_no_provenance_source_leaves_declared_via_none():
