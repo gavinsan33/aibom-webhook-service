@@ -1,3 +1,7 @@
+import urllib.error
+
+import pytest
+
 import k8s_api
 
 
@@ -24,6 +28,38 @@ def test_resolve_data_configmap_name_empty_when_neither_set(monkeypatch):
     monkeypatch.delenv("AIBOM_DATA_CONFIGMAP", raising=False)
     monkeypatch.delenv("POD_NAME", raising=False)
     assert k8s_api.resolve_data_configmap_name() == ""
+
+
+def test_get_cluster_object_builds_expected_path_and_returns_result(monkeypatch):
+    calls = {}
+
+    def fake_request(method, path, body=None, content_type="application/json"):
+        calls["method"] = method
+        calls["path"] = path
+        return {"kind": "Image"}
+
+    monkeypatch.setattr(k8s_api, "_request", fake_request)
+    result = k8s_api.get_cluster_object("image.openshift.io", "v1", "images", "sha256:abc")
+    assert result == {"kind": "Image"}
+    assert calls == {"method": "GET", "path": "/apis/image.openshift.io/v1/images/sha256:abc"}
+
+
+def test_get_cluster_object_returns_none_on_404_or_403(monkeypatch):
+    for code in (404, 403):
+        def fake_request(method, path, body=None, content_type="application/json", code=code):
+            raise urllib.error.HTTPError(path, code, "error", hdrs=None, fp=None)
+
+        monkeypatch.setattr(k8s_api, "_request", fake_request)
+        assert k8s_api.get_cluster_object("image.openshift.io", "v1", "images", "sha256:missing") is None
+
+
+def test_get_cluster_object_reraises_other_http_errors(monkeypatch):
+    def fake_request(method, path, body=None, content_type="application/json"):
+        raise urllib.error.HTTPError(path, 500, "server error", hdrs=None, fp=None)
+
+    monkeypatch.setattr(k8s_api, "_request", fake_request)
+    with pytest.raises(urllib.error.HTTPError):
+        k8s_api.get_cluster_object("image.openshift.io", "v1", "images", "sha256:x")
 
 
 def test_resolve_data_configmap_name_truncates_long_pod_names(monkeypatch):
