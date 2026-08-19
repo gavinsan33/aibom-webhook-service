@@ -336,6 +336,39 @@ def test_detect_git_clone_from_containers_no_match_returns_none():
 
 
 # ---------------------------------------------------------------------------
+# Git provenance detection: runtime .git-directory read (runtime_info)
+# ---------------------------------------------------------------------------
+
+
+def test_detect_git_provenance_from_runtime_info_basic():
+    runtime_info = {
+        "git_commit": "deadbeef",
+        "git_repository": "https://github.com/org/repo.git",
+        "git_branch": "main",
+        "git_dirty": False,
+    }
+    result = pp.detect_git_provenance_from_runtime_info(runtime_info)
+    assert result == {
+        "git_commit": "deadbeef",
+        "git_repository": "https://github.com/org/repo.git",
+        "git_branch": "main",
+        "detected_via": "git_directory",
+        "git_dirty": False,
+    }
+
+
+def test_detect_git_provenance_from_runtime_info_omits_dirty_when_absent():
+    runtime_info = {"git_commit": "deadbeef"}
+    result = pp.detect_git_provenance_from_runtime_info(runtime_info)
+    assert "git_dirty" not in result
+
+
+def test_detect_git_provenance_from_runtime_info_none_when_no_signal():
+    assert pp.detect_git_provenance_from_runtime_info({}) is None
+    assert pp.detect_git_provenance_from_runtime_info({"learning_rate": 0.1}) is None
+
+
+# ---------------------------------------------------------------------------
 # Git provenance detection: OpenShift/OCI image labels
 # ---------------------------------------------------------------------------
 
@@ -619,6 +652,33 @@ def test_compile_aibom_uses_cli_detected_provenance_with_repository_only():
     assert aibom["source_code"]["git_repository"] == "https://github.com/org/repo"
     assert aibom["source_code"]["git_commit"] is None
     assert aibom["source_code"]["declared_via"] == "cli_arg"
+
+
+def test_compile_aibom_surfaces_dirty_flag_from_runtime_tier():
+    detected_provenance = {
+        "git_commit": "deadbeef",
+        "git_repository": "https://github.com/org/repo",
+        "git_branch": "main",
+        "detected_via": "git_directory",
+        "git_dirty": True,
+    }
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info={},
+        annotations={"experiment-intent": "training"}, telemetry=None,
+        detected_provenance=detected_provenance,
+    )
+    assert aibom["source_code"]["declared_via"] == "git_directory"
+    assert aibom["source_code"]["dirty"] is True
+
+
+def test_compile_aibom_no_dirty_key_when_tier_does_not_report_it():
+    detected_provenance = {"git_commit": "deadbeef", "detected_via": "openshift_build_label"}
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info={},
+        annotations={"experiment-intent": "training"}, telemetry=None,
+        detected_provenance=detected_provenance,
+    )
+    assert "dirty" not in aibom["source_code"]
 
 
 def test_compile_aibom_no_provenance_source_leaves_declared_via_none():

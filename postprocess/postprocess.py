@@ -684,6 +684,24 @@ def detect_git_clone_from_containers(containers):
     return None
 
 
+def detect_git_provenance_from_runtime_info(runtime_info):
+    """Git provenance captured by runtime_detector.py's .git-directory read
+    inside the training container (see its _capture_git_provenance). Ranked
+    above the CLI-parsed `git clone` tier: this reflects the actual final
+    checked-out state, not just the command's stated intent."""
+    if not runtime_info.get("git_commit") and not runtime_info.get("git_repository"):
+        return None
+    result = {
+        "git_commit": runtime_info.get("git_commit"),
+        "git_repository": runtime_info.get("git_repository"),
+        "git_branch": runtime_info.get("git_branch"),
+        "detected_via": "git_directory",
+    }
+    if runtime_info.get("git_dirty") is not None:
+        result["git_dirty"] = runtime_info["git_dirty"]
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Git provenance detection (from commit labels baked onto a container's
 # image at build time -- OpenShift BuildConfig's own labels, or the
@@ -1061,6 +1079,12 @@ def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, tel
         "git_branch": annotations.get("git-branch") or dp.get("git_branch"),
         "declared_via": declared_via,
     }
+    # Only the runtime .git-directory tier can know this -- surfaced
+    # regardless of which source won git_commit/git_repository above, since
+    # it's orthogonal information about whether the actually-executed code
+    # matched what's checked into git, not about the code's identity.
+    if dp.get("git_dirty") is not None:
+        aibom["source_code"]["dirty"] = dp["git_dirty"]
 
     # Execution metadata from discovery
     pods = []
@@ -1371,12 +1395,15 @@ def main():
         detected_model = {**(detected_model or {}), **storage_model}
     cli_dataset = detect_dataset_from_containers(containers)
     # Precedence among auto-detected sources (annotations always override,
-    # handled separately in compile_aibom): a CLI-parsed `git clone` is more
-    # specific to this particular run than a label baked onto the image at
-    # build time, which may just describe the base image's own unrelated
-    # source rather than the code actually cloned and run at pod startup.
+    # handled separately in compile_aibom): the runtime .git-directory read
+    # reflects the actual final checked-out state, ahead of a CLI-parsed
+    # `git clone` (which only reflects the command's stated intent, not
+    # what ended up on disk), ahead of a label baked onto the image at
+    # build time (which may just describe an unrelated base image's own
+    # source rather than the code actually cloned and run at pod startup).
     detected_provenance = (
-        detect_git_clone_from_containers(containers)
+        detect_git_provenance_from_runtime_info(runtime_info)
+        or detect_git_clone_from_containers(containers)
         or detect_git_provenance_from_containers(containers)
     )
     if detected_provenance:
@@ -1388,6 +1415,8 @@ def main():
             print(f"  Branch: {detected_provenance['git_branch']}")
         if detected_provenance.get("git_repository"):
             print(f"  Repository: {detected_provenance['git_repository']}")
+        if detected_provenance.get("git_dirty") is not None:
+            print(f"  Working tree dirty: {detected_provenance['git_dirty']}")
         print()
     if detected_model:
         print(f"--- Model Detection ---")

@@ -216,11 +216,148 @@ def test_capture_accelerate_config_no_flag_is_a_noop(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Git provenance: .git-directory read
+# ---------------------------------------------------------------------------
+
+
+def test_find_git_dir_walks_upward(tmp_path):
+    git_dir = tmp_path / "repo" / ".git"
+    git_dir.mkdir(parents=True)
+    subdir = tmp_path / "repo" / "sub" / "dir"
+    subdir.mkdir(parents=True)
+    assert rd._find_git_dir(str(subdir)) == str(git_dir)
+
+
+def test_find_git_dir_returns_none_when_not_found(tmp_path):
+    assert rd._find_git_dir(str(tmp_path)) is None
+
+
+def test_resolve_git_ref_loose_ref_file(tmp_path):
+    git_dir = tmp_path / ".git"
+    (git_dir / "refs" / "heads").mkdir(parents=True)
+    (git_dir / "refs" / "heads" / "main").write_text("deadbeefcafe0123\n")
+    assert rd._resolve_git_ref(str(git_dir), "ref: refs/heads/main") == "deadbeefcafe0123"
+
+
+def test_resolve_git_ref_falls_back_to_packed_refs(tmp_path):
+    git_dir = tmp_path / ".git"
+    git_dir.mkdir()
+    (git_dir / "packed-refs").write_text(
+        "# pack-refs with: peeled fully-peeled sorted\n"
+        "cafef00dbeef0123 refs/heads/main\n"
+        "0123456789abcdef refs/heads/other\n"
+    )
+    assert rd._resolve_git_ref(str(git_dir), "ref: refs/heads/main") == "cafef00dbeef0123"
+
+
+def test_resolve_git_ref_detached_head_returns_sha_directly(tmp_path):
+    assert rd._resolve_git_ref(str(tmp_path / ".git"), "deadbeefcafe0123") == "deadbeefcafe0123"
+
+
+def test_resolve_git_ref_missing_ref_returns_none(tmp_path):
+    git_dir = tmp_path / ".git"
+    git_dir.mkdir()
+    assert rd._resolve_git_ref(str(git_dir), "ref: refs/heads/missing") is None
+
+
+def test_git_remote_url_reads_origin_from_config(tmp_path):
+    git_dir = tmp_path / ".git"
+    git_dir.mkdir()
+    (git_dir / "config").write_text(
+        '[remote "origin"]\n'
+        "\turl = https://github.com/org/repo.git\n"
+        "\tfetch = +refs/heads/*:refs/remotes/origin/*\n"
+    )
+    assert rd._git_remote_url(str(git_dir)) == "https://github.com/org/repo.git"
+
+
+def test_git_remote_url_missing_config_returns_none(tmp_path):
+    assert rd._git_remote_url(str(tmp_path / ".git")) is None
+
+
+def test_git_dirty_returns_none_when_git_binary_unavailable(monkeypatch):
+    import subprocess
+
+    def fake_run(*args, **kwargs):
+        raise FileNotFoundError("no such file: git")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert rd._git_dirty("/some/path") is None
+
+
+def test_git_dirty_true_when_porcelain_output_nonempty(monkeypatch):
+    import subprocess
+
+    class FakeResult:
+        returncode = 0
+        stdout = " M train.py\n"
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: FakeResult())
+    assert rd._git_dirty("/some/path") is True
+
+
+def test_git_dirty_false_when_porcelain_output_empty(monkeypatch):
+    import subprocess
+
+    class FakeResult:
+        returncode = 0
+        stdout = ""
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: FakeResult())
+    assert rd._git_dirty("/some/path") is False
+
+
+def _write_fake_repo(root):
+    git_dir = root / ".git"
+    (git_dir / "refs" / "heads").mkdir(parents=True)
+    (git_dir / "refs" / "heads" / "main").write_text("deadbeefcafe0123\n")
+    (git_dir / "HEAD").write_text("ref: refs/heads/main\n")
+    (git_dir / "config").write_text(
+        '[remote "origin"]\n\turl = https://github.com/org/repo.git\n'
+    )
+    return git_dir
+
+
+def test_capture_git_provenance_populates_runtime_info(tmp_path, monkeypatch):
+    _write_fake_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(rd, "_git_dirty", lambda worktree_dir: False)
+
+    rd._capture_git_provenance()
+
+    assert rd._runtime_info["git_commit"] == "deadbeefcafe0123"
+    assert rd._runtime_info["git_branch"] == "main"
+    assert rd._runtime_info["git_repository"] == "https://github.com/org/repo.git"
+    assert rd._runtime_info["git_dirty"] is False
+
+
+def test_capture_git_provenance_no_git_dir_is_a_noop(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    rd._capture_git_provenance()
+    assert "git_commit" not in rd._runtime_info
+
+
+def test_capture_git_provenance_omits_dirty_when_undetermined(tmp_path, monkeypatch):
+    _write_fake_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(rd, "_git_dirty", lambda worktree_dir: None)
+
+    rd._capture_git_provenance()
+
+    assert "git_dirty" not in rd._runtime_info
+    assert rd._runtime_info["git_commit"] == "deadbeefcafe0123"
+
+
+# ---------------------------------------------------------------------------
 # flush()
 # ---------------------------------------------------------------------------
 
 
 def test_flush_writes_datasets_and_runtime_info(tmp_path, monkeypatch):
+    # Isolate from this repo's own .git -- otherwise _capture_git_provenance
+    # (invoked by flush()) would walk up from the real CWD and pick up this
+    # project's actual commit, polluting runtime_info.
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(rd, "_OUTPUT_PATH", str(tmp_path / "dataset_detected.json"))
     monkeypatch.setattr("sys.argv", ["train.py"])
     rd._record({"dataset_name": "tatsu-lab/alpaca", "source": "datasets.load_dataset"})
@@ -235,6 +372,7 @@ def test_flush_writes_datasets_and_runtime_info(tmp_path, monkeypatch):
 
 
 def test_flush_merges_with_existing_file_without_duplicating(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     output_path = tmp_path / "dataset_detected.json"
     output_path.write_text(json.dumps({
         "datasets": [{"dataset_name": "tatsu-lab/alpaca", "source": "datasets.load_dataset"}]
@@ -254,6 +392,7 @@ def test_flush_merges_with_existing_file_without_duplicating(tmp_path, monkeypat
 
 
 def test_flush_with_nothing_detected_does_not_write(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     output_path = tmp_path / "dataset_detected.json"
     monkeypatch.setattr(rd, "_OUTPUT_PATH", str(output_path))
     monkeypatch.setattr("sys.argv", ["train.py"])
