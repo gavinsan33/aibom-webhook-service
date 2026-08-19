@@ -645,12 +645,102 @@ def detect_dataset_from_containers(containers):
 
 
 # ---------------------------------------------------------------------------
-# Git provenance detection (from OpenShift BuildConfig commit labels)
+# Git provenance detection: a `git clone`/`checkout` invocation in a
+# container's own command/args -- covers workloads that pull their training
+# code at runtime (e.g. `sh -c "git clone <url> && python train.py"`) rather
+# than baking it into the image. Independent of, and a fallback below, the
+# .git-directory runtime hook in runtime_detector.py, which reflects the
+# actual final checked-out state rather than just the command's stated intent.
+# ---------------------------------------------------------------------------
+
+_COMMIT_SHA_RE = re.compile(r"[0-9a-fA-F]{7,40}")
+# Matches a plausible git remote URL, not just "the first bare token after
+# clone" -- `git clone` accepts value-taking flags before the repo
+# (--depth 1, --origin upstream, ...) whose values would otherwise be
+# mistaken for the repo itself.
+_GIT_URL_RE = re.compile(r"^(?:https?|git|ssh)://|^[\w.-]+@[\w.-]+:|\.git$")
+_SHELL_SEPARATORS = {"&&", "||", ";", "|"}
+
+
+def detect_git_clone_from_command(tokens):
+    if not tokens:
+        return None
+    repo = None
+    ref = None
+    for i, tok in enumerate(tokens):
+        if tok == "git" and i + 1 < len(tokens) and tokens[i + 1] == "clone":
+            clone_args = []
+            for t in tokens[i + 2:]:
+                if t in _SHELL_SEPARATORS:
+                    break
+                clone_args.append(t)
+            for t in clone_args:
+                if not t.startswith("-") and _GIT_URL_RE.search(t):
+                    repo = t
+                    break
+            branch = _find_flag_value(clone_args, ("-b", "--branch"))
+            if branch:
+                ref = branch
+        elif tok == "git" and i + 2 < len(tokens) and tokens[i + 1] == "checkout":
+            ref = tokens[i + 2]
+
+    if not repo:
+        return None
+    result = {"git_repository": repo}
+    if ref:
+        # A bare hex string of plausible SHA length is almost certainly a
+        # commit; anything else (a branch or tag name) is reported as such.
+        if _COMMIT_SHA_RE.fullmatch(ref):
+            result["git_commit"] = ref
+        else:
+            result["git_branch"] = ref
+    return result
+
+
+def detect_git_clone_from_containers(containers):
+    for container in containers:
+        tokens = _flatten_container_command(container)
+        result = detect_git_clone_from_command(tokens)
+        if result:
+            result["detected_via"] = "cli_arg"
+            return result
+    return None
+
+
+def detect_git_provenance_from_runtime_info(runtime_info):
+    """Git provenance captured by runtime_detector.py's .git-directory read
+    inside the training container (see its _capture_git_provenance). Ranked
+    above the CLI-parsed `git clone` tier: this reflects the actual final
+    checked-out state, not just the command's stated intent."""
+    if not runtime_info.get("git_commit") and not runtime_info.get("git_repository"):
+        return None
+    result = {
+        "git_commit": runtime_info.get("git_commit"),
+        "git_repository": runtime_info.get("git_repository"),
+        "git_branch": runtime_info.get("git_branch"),
+        "detected_via": "git_directory",
+    }
+    if runtime_info.get("git_dirty") is not None:
+        result["git_dirty"] = runtime_info["git_dirty"]
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Git provenance detection (from commit labels baked onto a container's
+# image at build time -- OpenShift BuildConfig's own labels, or the
+# vendor-neutral OCI equivalent set by other CI systems)
 # ---------------------------------------------------------------------------
 
 _BUILD_LABEL_COMMIT = "io.openshift.build.commit.id"
 _BUILD_LABEL_REF = "io.openshift.build.commit.ref"
 _BUILD_LABEL_SOURCE = "io.openshift.build.source-location"
+
+# Vendor-neutral fallback: populated by tooling other than an OpenShift
+# BuildConfig (GitHub Actions' docker/metadata-action, `docker buildx build
+# --label`, Cloud Native Buildpacks, ko, Jib, ...). No standard OCI label for
+# the branch, so this tier only ever yields commit + repository.
+_OCI_LABEL_REVISION = "org.opencontainers.image.revision"
+_OCI_LABEL_SOURCE = "org.opencontainers.image.source"
 
 
 def _image_digest(image_id):
@@ -662,15 +752,15 @@ def _image_digest(image_id):
 
 
 def detect_git_provenance_from_containers(containers):
-    """Best-effort git provenance from OpenShift BuildConfig commit labels
-    baked onto a container's image at build time. Only resolves anything if
-    the image was actually built in-cluster via a BuildConfig -- looked up
-    by the image's digest (containers.json's image_id, from
-    ContainerStatuses, not the mutable image tag) against the cluster-scoped
-    Image object, so a re-tagged image can't spoof the labels. See
-    CLAUDE.md's git provenance section for why this is identification, not
-    an authorization/trust guarantee: it reports what the build controller
-    recorded, not whether the source was vetted.
+    """Best-effort git provenance from commit labels baked onto a
+    container's image at build time. Only resolves anything if the image was
+    actually built in-cluster (so an OpenShift-specific or OCI-standard
+    commit label exists) -- looked up by the image's digest (containers.json's
+    image_id, from ContainerStatuses, not the mutable image tag) against the
+    cluster-scoped Image object, so a re-tagged image can't spoof the labels.
+    See CLAUDE.md's git provenance section for why this is identification,
+    not an authorization/trust guarantee: it reports what the build
+    controller recorded, not whether the source was vetted.
     """
     for container in containers:
         digest = _image_digest(container.get("image_id"))
@@ -686,14 +776,24 @@ def detect_git_provenance_from_containers(containers):
         # dockerImageMetadata mirrors Docker's own image config JSON schema
         # verbatim (capitalized field names), not Kubernetes camelCase.
         labels = safe_get(image, "dockerImageMetadata", "Config", "Labels") or {}
+
         commit = labels.get(_BUILD_LABEL_COMMIT)
-        if not commit:
-            continue
-        return {
-            "git_commit": commit,
-            "git_repository": labels.get(_BUILD_LABEL_SOURCE),
-            "git_branch": labels.get(_BUILD_LABEL_REF),
-        }
+        if commit:
+            return {
+                "git_commit": commit,
+                "git_repository": labels.get(_BUILD_LABEL_SOURCE),
+                "git_branch": labels.get(_BUILD_LABEL_REF),
+                "detected_via": "openshift_build_label",
+            }
+
+        oci_commit = labels.get(_OCI_LABEL_REVISION)
+        if oci_commit:
+            return {
+                "git_commit": oci_commit,
+                "git_repository": labels.get(_OCI_LABEL_SOURCE),
+                "git_branch": None,
+                "detected_via": "oci_image_label",
+            }
     return None
 
 
@@ -978,15 +1078,16 @@ def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, tel
     aibom["experiment_description"] = annotations.get("experiment-description")
 
     # Git provenance: an explicit annotation always wins; otherwise fall back
-    # to what was auto-detected from the image's OpenShift BuildConfig commit
-    # labels (see detect_git_provenance_from_containers). declared_via
-    # records which source won, mirroring dataset.declared.declared_via.
+    # to whatever was auto-detected (a CLI-parsed `git clone`, a runtime
+    # .git read, or an image's build-time commit label -- see
+    # detect_git_clone_from_containers/detect_git_provenance_from_containers).
+    # declared_via records which source won, mirroring dataset.declared.declared_via.
     dp = detected_provenance or {}
     declared_via = None
     if annotations.get("git-commit"):
         declared_via = "annotation"
-    elif dp.get("git_commit"):
-        declared_via = "openshift_build_label"
+    elif dp.get("git_commit") or dp.get("git_repository"):
+        declared_via = dp.get("detected_via")
 
     aibom["source_code"] = {
         "git_repository": annotations.get("git-repository") or dp.get("git_repository"),
@@ -994,6 +1095,12 @@ def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, tel
         "git_branch": annotations.get("git-branch") or dp.get("git_branch"),
         "declared_via": declared_via,
     }
+    # Only the runtime .git-directory tier can know this -- surfaced
+    # regardless of which source won git_commit/git_repository above, since
+    # it's orthogonal information about whether the actually-executed code
+    # matched what's checked into git, not about the code's identity.
+    if dp.get("git_dirty") is not None:
+        aibom["source_code"]["dirty"] = dp["git_dirty"]
 
     # Execution metadata from discovery
     pods = []
@@ -1305,12 +1412,29 @@ def main():
     if storage_model:
         detected_model = {**(detected_model or {}), **storage_model}
     cli_dataset = detect_dataset_from_containers(containers)
-    detected_provenance = detect_git_provenance_from_containers(containers)
+    # Precedence among auto-detected sources (annotations always override,
+    # handled separately in compile_aibom): the runtime .git-directory read
+    # reflects the actual final checked-out state, ahead of a CLI-parsed
+    # `git clone` (which only reflects the command's stated intent, not
+    # what ended up on disk), ahead of a label baked onto the image at
+    # build time (which may just describe an unrelated base image's own
+    # source rather than the code actually cloned and run at pod startup).
+    detected_provenance = (
+        detect_git_provenance_from_runtime_info(runtime_info)
+        or detect_git_clone_from_containers(containers)
+        or detect_git_provenance_from_containers(containers)
+    )
     if detected_provenance:
         print("--- Git Provenance Detection ---")
-        print(f"  Commit: {detected_provenance['git_commit']}")
+        print(f"  Detected via: {detected_provenance.get('detected_via', 'unknown')}")
+        if detected_provenance.get("git_commit"):
+            print(f"  Commit: {detected_provenance['git_commit']}")
+        if detected_provenance.get("git_branch"):
+            print(f"  Branch: {detected_provenance['git_branch']}")
         if detected_provenance.get("git_repository"):
             print(f"  Repository: {detected_provenance['git_repository']}")
+        if detected_provenance.get("git_dirty") is not None:
+            print(f"  Working tree dirty: {detected_provenance['git_dirty']}")
         print()
     if detected_model:
         print(f"--- Model Detection ---")

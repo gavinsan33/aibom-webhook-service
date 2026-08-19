@@ -184,9 +184,123 @@ def _capture_accelerate_config():
         _dbg_exc("_capture_accelerate_config")
 
 
+def _find_git_dir(start=None):
+    """Walk upward from `start` (default: CWD) looking for a .git directory,
+    mirroring how `git` itself locates the repo root from any subdirectory
+    -- the training script may not run from the exact directory a wrapper
+    script `cd`'d into after cloning."""
+    path = os.path.abspath(start or os.getcwd())
+    for _ in range(20):  # bound the walk -- avoid looping forever on a broken/circular mount
+        if os.path.isdir(os.path.join(path, ".git")):
+            return os.path.join(path, ".git")
+        parent = os.path.dirname(path)
+        if parent == path:
+            return None
+        path = parent
+    return None
+
+
+def _resolve_git_ref(git_dir, ref):
+    """Resolve "ref: refs/heads/<branch>" to a commit SHA via the loose ref
+    file, falling back to packed-refs (git packs infrequently-updated refs,
+    e.g. right after a shallow clone). A detached HEAD's file already
+    contains the SHA directly."""
+    ref = ref.strip()
+    if not ref.startswith("ref:"):
+        return ref
+    ref_path = ref[len("ref:"):].strip()
+    loose = os.path.join(git_dir, ref_path)
+    if os.path.isfile(loose):
+        with open(loose) as f:
+            return f.read().strip()
+    packed = os.path.join(git_dir, "packed-refs")
+    if os.path.isfile(packed):
+        with open(packed) as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) == 2 and parts[1] == ref_path:
+                    return parts[0]
+    return None
+
+
+def _git_remote_url(git_dir):
+    """Best-effort read of the "origin" remote URL straight out of
+    .git/config, without shelling out to the git binary (which isn't
+    guaranteed to be installed in the training image)."""
+    config_path = os.path.join(git_dir, "config")
+    if not os.path.isfile(config_path):
+        return None
+    try:
+        import configparser
+        parser = configparser.ConfigParser(strict=False)
+        parser.read(config_path)
+        for section in parser.sections():
+            if section.startswith("remote") and "origin" in section:
+                return parser.get(section, "url", fallback=None)
+    except Exception:
+        _dbg_exc("_git_remote_url")
+    return None
+
+
+def _git_dirty(worktree_dir):
+    """Best-effort `git status --porcelain` if the git binary happens to be
+    installed in the training image (not guaranteed). Returns None -- not
+    False -- when it can't be determined, so callers don't misreport a clean
+    tree they never actually checked."""
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=worktree_dir, capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return None
+        return bool(result.stdout.strip())
+    except Exception:
+        return None
+
+
+def _capture_git_provenance():
+    """Best-effort git provenance from a .git directory in the working
+    tree -- covers workloads that `git clone` their training code at
+    runtime rather than baking it into the image (see CLAUDE.md's git
+    provenance section). Ranked above postprocess.py's command-line `git
+    clone` parsing: this reflects the actual final checked-out state
+    (after any `git checkout`/`git pull` beyond the initial clone), not
+    just what the command said it intended to do.
+    """
+    try:
+        git_dir = _find_git_dir()
+        if not git_dir:
+            return
+        head_path = os.path.join(git_dir, "HEAD")
+        if not os.path.isfile(head_path):
+            return
+        with open(head_path) as f:
+            head = f.read().strip()
+        commit = _resolve_git_ref(git_dir, head)
+        if not commit:
+            return
+        info = {"git_commit": commit}
+        if head.startswith("ref:"):
+            info["git_branch"] = head[len("ref:"):].strip().rsplit("/", 1)[-1]
+        remote = _git_remote_url(git_dir)
+        if remote:
+            info["git_repository"] = remote
+        dirty = _git_dirty(os.path.dirname(git_dir))
+        if dirty is not None:
+            info["git_dirty"] = dirty
+        with _lock:
+            _runtime_info.update(info)
+        _dbg(f"Captured git provenance: {info}")
+    except Exception:
+        _dbg_exc("_capture_git_provenance")
+
+
 def _flush():
     _capture_training_args()
     _capture_accelerate_config()
+    _capture_git_provenance()
     with _lock:
         if not _detected_datasets and not _runtime_info:
             _dbg("Flush: nothing detected, skipping write")

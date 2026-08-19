@@ -276,7 +276,100 @@ def test_detect_dataset_from_containers_no_match_returns_none():
 
 
 # ---------------------------------------------------------------------------
-# Git provenance detection
+# Git provenance detection: CLI-parsed `git clone`/`checkout`
+# ---------------------------------------------------------------------------
+
+
+def test_detect_git_clone_from_command_basic():
+    tokens = ["git", "clone", "https://github.com/org/repo", "&&", "python", "train.py"]
+    assert pp.detect_git_clone_from_command(tokens) == {
+        "git_repository": "https://github.com/org/repo",
+    }
+
+
+def test_detect_git_clone_from_command_with_checkout_sha():
+    tokens = [
+        "git", "clone", "https://github.com/org/repo", "&&",
+        "cd", "repo", "&&",
+        "git", "checkout", "deadbeefcafe0123", "&&",
+        "python", "train.py",
+    ]
+    result = pp.detect_git_clone_from_command(tokens)
+    assert result["git_repository"] == "https://github.com/org/repo"
+    assert result["git_commit"] == "deadbeefcafe0123"
+
+
+def test_detect_git_clone_from_command_with_checkout_branch():
+    tokens = [
+        "git", "clone", "https://github.com/org/repo", "&&",
+        "git", "checkout", "feature/my-branch",
+    ]
+    result = pp.detect_git_clone_from_command(tokens)
+    assert result["git_branch"] == "feature/my-branch"
+    assert "git_commit" not in result
+
+
+def test_detect_git_clone_from_command_branch_flag():
+    tokens = ["git", "clone", "--branch", "main", "--depth", "1", "https://github.com/org/repo"]
+    result = pp.detect_git_clone_from_command(tokens)
+    assert result == {"git_repository": "https://github.com/org/repo", "git_branch": "main"}
+
+
+def test_detect_git_clone_from_command_no_clone_returns_none():
+    assert pp.detect_git_clone_from_command(["python", "train.py"]) is None
+    assert pp.detect_git_clone_from_command([]) is None
+    assert pp.detect_git_clone_from_command(None) is None
+
+
+def test_detect_git_clone_from_containers_uses_first_match():
+    containers = [
+        {"command": ["python", "sidecar.py"]},
+        {"command": ["sh", "-c"], "args": ["git clone https://github.com/org/repo && python train.py"]},
+    ]
+    result = pp.detect_git_clone_from_containers(containers)
+    assert result["git_repository"] == "https://github.com/org/repo"
+    assert result["detected_via"] == "cli_arg"
+
+
+def test_detect_git_clone_from_containers_no_match_returns_none():
+    assert pp.detect_git_clone_from_containers([{"command": ["python", "train.py"]}]) is None
+
+
+# ---------------------------------------------------------------------------
+# Git provenance detection: runtime .git-directory read (runtime_info)
+# ---------------------------------------------------------------------------
+
+
+def test_detect_git_provenance_from_runtime_info_basic():
+    runtime_info = {
+        "git_commit": "deadbeef",
+        "git_repository": "https://github.com/org/repo.git",
+        "git_branch": "main",
+        "git_dirty": False,
+    }
+    result = pp.detect_git_provenance_from_runtime_info(runtime_info)
+    assert result == {
+        "git_commit": "deadbeef",
+        "git_repository": "https://github.com/org/repo.git",
+        "git_branch": "main",
+        "detected_via": "git_directory",
+        "git_dirty": False,
+    }
+
+
+def test_detect_git_provenance_from_runtime_info_omits_dirty_when_absent():
+    runtime_info = {"git_commit": "deadbeef"}
+    result = pp.detect_git_provenance_from_runtime_info(runtime_info)
+    assert "git_dirty" not in result
+
+
+def test_detect_git_provenance_from_runtime_info_none_when_no_signal():
+    assert pp.detect_git_provenance_from_runtime_info({}) is None
+    assert pp.detect_git_provenance_from_runtime_info({"learning_rate": 0.1}) is None
+
+
+# ---------------------------------------------------------------------------
+# Git provenance detection: OpenShift/OCI image labels
 # ---------------------------------------------------------------------------
 
 
@@ -314,7 +407,54 @@ def test_detect_git_provenance_from_containers_reads_build_labels(monkeypatch):
         "git_commit": "deadbeef",
         "git_repository": "https://github.com/org/train",
         "git_branch": "main",
+        "detected_via": "openshift_build_label",
     }
+
+
+def test_detect_git_provenance_falls_back_to_oci_labels(monkeypatch):
+    containers = [{"image_id": "quay.io/org/train@sha256:abc123"}]
+    monkeypatch.setattr(
+        pp.k8s_api,
+        "get_cluster_object",
+        lambda *a, **k: {
+            "dockerImageMetadata": {
+                "Config": {
+                    "Labels": {
+                        "org.opencontainers.image.revision": "cafef00d",
+                        "org.opencontainers.image.source": "https://github.com/org/train",
+                    }
+                }
+            }
+        },
+    )
+    result = pp.detect_git_provenance_from_containers(containers)
+    assert result == {
+        "git_commit": "cafef00d",
+        "git_repository": "https://github.com/org/train",
+        "git_branch": None,
+        "detected_via": "oci_image_label",
+    }
+
+
+def test_detect_git_provenance_prefers_openshift_label_over_oci(monkeypatch):
+    containers = [{"image_id": "quay.io/org/train@sha256:abc123"}]
+    monkeypatch.setattr(
+        pp.k8s_api,
+        "get_cluster_object",
+        lambda *a, **k: {
+            "dockerImageMetadata": {
+                "Config": {
+                    "Labels": {
+                        "io.openshift.build.commit.id": "deadbeef",
+                        "org.opencontainers.image.revision": "cafef00d",
+                    }
+                }
+            }
+        },
+    )
+    result = pp.detect_git_provenance_from_containers(containers)
+    assert result["git_commit"] == "deadbeef"
+    assert result["detected_via"] == "openshift_build_label"
 
 
 def test_detect_git_provenance_skips_containers_without_digest(monkeypatch):
@@ -487,6 +627,7 @@ def test_compile_aibom_uses_detected_provenance_when_no_annotation():
         "git_commit": "deadbeef",
         "git_repository": "https://github.com/org/train",
         "git_branch": "main",
+        "detected_via": "openshift_build_label",
     }
     aibom = pp.compile_aibom(
         discoveries=[], detected_datasets=[], runtime_info={},
@@ -499,6 +640,21 @@ def test_compile_aibom_uses_detected_provenance_when_no_annotation():
         "git_branch": "main",
         "declared_via": "openshift_build_label",
     }
+
+
+def test_compile_aibom_uses_oci_label_declared_via():
+    detected_provenance = {
+        "git_commit": "cafef00d",
+        "git_repository": "https://github.com/org/train",
+        "git_branch": None,
+        "detected_via": "oci_image_label",
+    }
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info={},
+        annotations={"experiment-intent": "training"}, telemetry=None,
+        detected_provenance=detected_provenance,
+    )
+    assert aibom["source_code"]["declared_via"] == "oci_image_label"
 
 
 def test_compile_aibom_annotation_overrides_detected_provenance():
@@ -515,6 +671,47 @@ def test_compile_aibom_annotation_overrides_detected_provenance():
     assert aibom["source_code"]["git_commit"] == "annotated-sha"
     assert aibom["source_code"]["git_repository"] == "annotated-repo"
     assert aibom["source_code"]["declared_via"] == "annotation"
+
+
+def test_compile_aibom_uses_cli_detected_provenance_with_repository_only():
+    # A plain `git clone <url>` with no `checkout` never yields a commit --
+    # declared_via should still resolve off git_repository alone.
+    detected_provenance = {"git_repository": "https://github.com/org/repo", "detected_via": "cli_arg"}
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info={},
+        annotations={"experiment-intent": "training"}, telemetry=None,
+        detected_provenance=detected_provenance,
+    )
+    assert aibom["source_code"]["git_repository"] == "https://github.com/org/repo"
+    assert aibom["source_code"]["git_commit"] is None
+    assert aibom["source_code"]["declared_via"] == "cli_arg"
+
+
+def test_compile_aibom_surfaces_dirty_flag_from_runtime_tier():
+    detected_provenance = {
+        "git_commit": "deadbeef",
+        "git_repository": "https://github.com/org/repo",
+        "git_branch": "main",
+        "detected_via": "git_directory",
+        "git_dirty": True,
+    }
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info={},
+        annotations={"experiment-intent": "training"}, telemetry=None,
+        detected_provenance=detected_provenance,
+    )
+    assert aibom["source_code"]["declared_via"] == "git_directory"
+    assert aibom["source_code"]["dirty"] is True
+
+
+def test_compile_aibom_no_dirty_key_when_tier_does_not_report_it():
+    detected_provenance = {"git_commit": "deadbeef", "detected_via": "openshift_build_label"}
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info={},
+        annotations={"experiment-intent": "training"}, telemetry=None,
+        detected_provenance=detected_provenance,
+    )
+    assert "dirty" not in aibom["source_code"]
 
 
 def test_compile_aibom_no_provenance_source_leaves_declared_via_none():
