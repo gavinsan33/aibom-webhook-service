@@ -276,6 +276,80 @@ def test_detect_dataset_from_containers_no_match_returns_none():
 
 
 # ---------------------------------------------------------------------------
+# Git provenance detection
+# ---------------------------------------------------------------------------
+
+
+def test_image_digest_extracts_sha256():
+    image_id = "image-registry.openshift-image-registry.svc:5000/ns/train@sha256:abc123"
+    assert pp._image_digest(image_id) == "sha256:abc123"
+
+
+def test_image_digest_none_when_not_digest_pinned():
+    assert pp._image_digest("quay.io/org/train:latest") is None
+    assert pp._image_digest(None) is None
+    assert pp._image_digest("") is None
+
+
+def test_detect_git_provenance_from_containers_reads_build_labels(monkeypatch):
+    containers = [{"image_id": "quay.io/org/train@sha256:abc123"}]
+
+    def fake_get_cluster_object(group, version, plural, name):
+        assert (group, version, plural, name) == ("image.openshift.io", "v1", "images", "sha256:abc123")
+        return {
+            "dockerImageMetadata": {
+                "Config": {
+                    "Labels": {
+                        "io.openshift.build.commit.id": "deadbeef",
+                        "io.openshift.build.commit.ref": "main",
+                        "io.openshift.build.source-location": "https://github.com/org/train",
+                    }
+                }
+            }
+        }
+
+    monkeypatch.setattr(pp.k8s_api, "get_cluster_object", fake_get_cluster_object)
+    result = pp.detect_git_provenance_from_containers(containers)
+    assert result == {
+        "git_commit": "deadbeef",
+        "git_repository": "https://github.com/org/train",
+        "git_branch": "main",
+    }
+
+
+def test_detect_git_provenance_skips_containers_without_digest(monkeypatch):
+    containers = [{"image_id": "quay.io/org/train:latest"}]
+    monkeypatch.setattr(
+        pp.k8s_api, "get_cluster_object", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not be called"))
+    )
+    assert pp.detect_git_provenance_from_containers(containers) is None
+
+
+def test_detect_git_provenance_none_when_image_lacks_commit_label(monkeypatch):
+    containers = [{"image_id": "quay.io/org/train@sha256:abc123"}]
+    monkeypatch.setattr(
+        pp.k8s_api, "get_cluster_object", lambda *a, **k: {"dockerImageMetadata": {"Config": {"Labels": {}}}}
+    )
+    assert pp.detect_git_provenance_from_containers(containers) is None
+
+
+def test_detect_git_provenance_none_when_image_not_found(monkeypatch):
+    containers = [{"image_id": "quay.io/org/train@sha256:abc123"}]
+    monkeypatch.setattr(pp.k8s_api, "get_cluster_object", lambda *a, **k: None)
+    assert pp.detect_git_provenance_from_containers(containers) is None
+
+
+def test_detect_git_provenance_degrades_quietly_on_error(monkeypatch):
+    containers = [{"image_id": "quay.io/org/train@sha256:abc123"}]
+
+    def raising(*a, **k):
+        raise RuntimeError("no RBAC")
+
+    monkeypatch.setattr(pp.k8s_api, "get_cluster_object", raising)
+    assert pp.detect_git_provenance_from_containers(containers) is None
+
+
+# ---------------------------------------------------------------------------
 # Small helpers
 # ---------------------------------------------------------------------------
 
@@ -373,6 +447,50 @@ def test_compile_aibom_flags_dataset_mismatch():
 
     assert aibom["dataset"]["declared"]["name"] == "tatsu-lab/alpaca"
     assert aibom["dataset"]["auto_detected"][0]["matches_declared"] is False
+
+
+def test_compile_aibom_uses_detected_provenance_when_no_annotation():
+    detected_provenance = {
+        "git_commit": "deadbeef",
+        "git_repository": "https://github.com/org/train",
+        "git_branch": "main",
+    }
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info={},
+        annotations={"experiment-intent": "training"}, telemetry=None,
+        detected_provenance=detected_provenance,
+    )
+    assert aibom["source_code"] == {
+        "git_repository": "https://github.com/org/train",
+        "git_commit": "deadbeef",
+        "git_branch": "main",
+        "declared_via": "openshift_build_label",
+    }
+
+
+def test_compile_aibom_annotation_overrides_detected_provenance():
+    detected_provenance = {"git_commit": "detected-sha", "git_repository": "detected-repo"}
+    annotations = {
+        "experiment-intent": "training",
+        "git-commit": "annotated-sha",
+        "git-repository": "annotated-repo",
+    }
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info={}, annotations=annotations,
+        telemetry=None, detected_provenance=detected_provenance,
+    )
+    assert aibom["source_code"]["git_commit"] == "annotated-sha"
+    assert aibom["source_code"]["git_repository"] == "annotated-repo"
+    assert aibom["source_code"]["declared_via"] == "annotation"
+
+
+def test_compile_aibom_no_provenance_source_leaves_declared_via_none():
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info={},
+        annotations={"experiment-intent": "training"}, telemetry=None,
+    )
+    assert aibom["source_code"]["declared_via"] is None
+    assert aibom["source_code"]["git_commit"] is None
 
 
 def test_compile_aibom_no_telemetry_notes_unavailable():
