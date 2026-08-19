@@ -622,12 +622,21 @@ def detect_dataset_from_containers(containers):
 
 
 # ---------------------------------------------------------------------------
-# Git provenance detection (from OpenShift BuildConfig commit labels)
+# Git provenance detection (from commit labels baked onto a container's
+# image at build time -- OpenShift BuildConfig's own labels, or the
+# vendor-neutral OCI equivalent set by other CI systems)
 # ---------------------------------------------------------------------------
 
 _BUILD_LABEL_COMMIT = "io.openshift.build.commit.id"
 _BUILD_LABEL_REF = "io.openshift.build.commit.ref"
 _BUILD_LABEL_SOURCE = "io.openshift.build.source-location"
+
+# Vendor-neutral fallback: populated by tooling other than an OpenShift
+# BuildConfig (GitHub Actions' docker/metadata-action, `docker buildx build
+# --label`, Cloud Native Buildpacks, ko, Jib, ...). No standard OCI label for
+# the branch, so this tier only ever yields commit + repository.
+_OCI_LABEL_REVISION = "org.opencontainers.image.revision"
+_OCI_LABEL_SOURCE = "org.opencontainers.image.source"
 
 
 def _image_digest(image_id):
@@ -639,15 +648,15 @@ def _image_digest(image_id):
 
 
 def detect_git_provenance_from_containers(containers):
-    """Best-effort git provenance from OpenShift BuildConfig commit labels
-    baked onto a container's image at build time. Only resolves anything if
-    the image was actually built in-cluster via a BuildConfig -- looked up
-    by the image's digest (containers.json's image_id, from
-    ContainerStatuses, not the mutable image tag) against the cluster-scoped
-    Image object, so a re-tagged image can't spoof the labels. See
-    CLAUDE.md's git provenance section for why this is identification, not
-    an authorization/trust guarantee: it reports what the build controller
-    recorded, not whether the source was vetted.
+    """Best-effort git provenance from commit labels baked onto a
+    container's image at build time. Only resolves anything if the image was
+    actually built in-cluster (so an OpenShift-specific or OCI-standard
+    commit label exists) -- looked up by the image's digest (containers.json's
+    image_id, from ContainerStatuses, not the mutable image tag) against the
+    cluster-scoped Image object, so a re-tagged image can't spoof the labels.
+    See CLAUDE.md's git provenance section for why this is identification,
+    not an authorization/trust guarantee: it reports what the build
+    controller recorded, not whether the source was vetted.
     """
     for container in containers:
         digest = _image_digest(container.get("image_id"))
@@ -663,14 +672,24 @@ def detect_git_provenance_from_containers(containers):
         # dockerImageMetadata mirrors Docker's own image config JSON schema
         # verbatim (capitalized field names), not Kubernetes camelCase.
         labels = safe_get(image, "dockerImageMetadata", "Config", "Labels") or {}
+
         commit = labels.get(_BUILD_LABEL_COMMIT)
-        if not commit:
-            continue
-        return {
-            "git_commit": commit,
-            "git_repository": labels.get(_BUILD_LABEL_SOURCE),
-            "git_branch": labels.get(_BUILD_LABEL_REF),
-        }
+        if commit:
+            return {
+                "git_commit": commit,
+                "git_repository": labels.get(_BUILD_LABEL_SOURCE),
+                "git_branch": labels.get(_BUILD_LABEL_REF),
+                "detected_via": "openshift_build_label",
+            }
+
+        oci_commit = labels.get(_OCI_LABEL_REVISION)
+        if oci_commit:
+            return {
+                "git_commit": oci_commit,
+                "git_repository": labels.get(_OCI_LABEL_SOURCE),
+                "git_branch": None,
+                "detected_via": "oci_image_label",
+            }
     return None
 
 
@@ -970,7 +989,7 @@ def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, tel
     if annotations.get("git-commit"):
         declared_via = "annotation"
     elif dp.get("git_commit"):
-        declared_via = "openshift_build_label"
+        declared_via = dp.get("detected_via")
 
     aibom["source_code"] = {
         "git_repository": annotations.get("git-repository") or dp.get("git_repository"),

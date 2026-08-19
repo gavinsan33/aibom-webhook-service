@@ -314,7 +314,54 @@ def test_detect_git_provenance_from_containers_reads_build_labels(monkeypatch):
         "git_commit": "deadbeef",
         "git_repository": "https://github.com/org/train",
         "git_branch": "main",
+        "detected_via": "openshift_build_label",
     }
+
+
+def test_detect_git_provenance_falls_back_to_oci_labels(monkeypatch):
+    containers = [{"image_id": "quay.io/org/train@sha256:abc123"}]
+    monkeypatch.setattr(
+        pp.k8s_api,
+        "get_cluster_object",
+        lambda *a, **k: {
+            "dockerImageMetadata": {
+                "Config": {
+                    "Labels": {
+                        "org.opencontainers.image.revision": "cafef00d",
+                        "org.opencontainers.image.source": "https://github.com/org/train",
+                    }
+                }
+            }
+        },
+    )
+    result = pp.detect_git_provenance_from_containers(containers)
+    assert result == {
+        "git_commit": "cafef00d",
+        "git_repository": "https://github.com/org/train",
+        "git_branch": None,
+        "detected_via": "oci_image_label",
+    }
+
+
+def test_detect_git_provenance_prefers_openshift_label_over_oci(monkeypatch):
+    containers = [{"image_id": "quay.io/org/train@sha256:abc123"}]
+    monkeypatch.setattr(
+        pp.k8s_api,
+        "get_cluster_object",
+        lambda *a, **k: {
+            "dockerImageMetadata": {
+                "Config": {
+                    "Labels": {
+                        "io.openshift.build.commit.id": "deadbeef",
+                        "org.opencontainers.image.revision": "cafef00d",
+                    }
+                }
+            }
+        },
+    )
+    result = pp.detect_git_provenance_from_containers(containers)
+    assert result["git_commit"] == "deadbeef"
+    assert result["detected_via"] == "openshift_build_label"
 
 
 def test_detect_git_provenance_skips_containers_without_digest(monkeypatch):
@@ -454,6 +501,7 @@ def test_compile_aibom_uses_detected_provenance_when_no_annotation():
         "git_commit": "deadbeef",
         "git_repository": "https://github.com/org/train",
         "git_branch": "main",
+        "detected_via": "openshift_build_label",
     }
     aibom = pp.compile_aibom(
         discoveries=[], detected_datasets=[], runtime_info={},
@@ -466,6 +514,21 @@ def test_compile_aibom_uses_detected_provenance_when_no_annotation():
         "git_branch": "main",
         "declared_via": "openshift_build_label",
     }
+
+
+def test_compile_aibom_uses_oci_label_declared_via():
+    detected_provenance = {
+        "git_commit": "cafef00d",
+        "git_repository": "https://github.com/org/train",
+        "git_branch": None,
+        "detected_via": "oci_image_label",
+    }
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info={},
+        annotations={"experiment-intent": "training"}, telemetry=None,
+        detected_provenance=detected_provenance,
+    )
+    assert aibom["source_code"]["declared_via"] == "oci_image_label"
 
 
 def test_compile_aibom_annotation_overrides_detected_provenance():
