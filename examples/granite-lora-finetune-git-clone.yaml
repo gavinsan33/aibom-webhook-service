@@ -1,0 +1,78 @@
+# Single-GPU LoRA fine-tuning example that pulls its training code from
+# GitHub at runtime instead of baking it into the image or invoking a
+# pip-installed CLI -- exercises the git-provenance detection layers
+# described in CLAUDE.md's Git Provenance Detection section, rather than the
+# model/dataset auto-detection the other examples focus on.
+#
+# The container clones huggingface/trl at pod startup and runs its
+# examples/scripts/sft.py directly against the cloned checkout (installed
+# editable, so the code that actually executes is the clone, not a
+# separately pip-installed release). This exercises two of the five
+# precedence tiers:
+#   - detect_git_clone_from_containers (postprocess.py) sees the literal
+#     `git clone https://github.com/huggingface/trl.git` in the container's
+#     command -- declared_via: "cli_arg" if nothing stronger resolves.
+#   - runtime_detector.py's _capture_git_provenance walks up from the
+#     training process's CWD (it `cd`s into the clone before running
+#     python), finds the real .git directory, and reports the actual
+#     resolved commit/branch -- declared_via: "git_directory", ranked above
+#     the CLI-parsed tier since it reflects the real checked-out state, not
+#     just the clone command's stated intent.
+# In practice the runtime tier wins (it's ranked first), so the AIBOM's
+# source_code.declared_via should come back as "git_directory" with
+# source_code.dirty: false.
+#
+# No --branch/-b flag is passed, so this clones the default branch (a real
+# ref, not a detached HEAD) -- unlike a tag/SHA checkout, which would leave
+# .git/HEAD detached and git_branch unset in the runtime tier.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: aibom-granite-lora-finetune-git-clone
+  namespace: gavin-test
+  annotations:
+    aibom.io/experiment-intent: sft
+    aibom.io/experiment-name: granite-lora-sft-git-clone-benchmark
+
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: finetune
+          image: nvcr.io/nvidia/pytorch:26.03-py3
+          command:
+            - sh
+            - -c
+            - |
+              git clone https://github.com/huggingface/trl.git /tmp/trl-repo && \
+              cd /tmp/trl-repo && \
+              pip install --no-cache-dir -e . peft datasets accelerate && \
+              export PATH="$HOME/.local/bin:$PATH" && \
+              python examples/scripts/sft.py \
+                --model_name_or_path ibm-granite/granite-3.3-2b-instruct \
+                --dataset_name tatsu-lab/alpaca \
+                --output_dir /tmp/output \
+                --use_peft true \
+                --lora_r 16 \
+                --lora_alpha 32 \
+                --lora_target_modules q_proj k_proj v_proj o_proj \
+                --per_device_train_batch_size 4 \
+                --gradient_accumulation_steps 4 \
+                --learning_rate 2e-4 \
+                --num_train_epochs 1 \
+                --max_steps 50 \
+                --logging_steps 5 \
+                --bf16 true \
+                --report_to none
+          env:
+            - name: HOME
+              value: /tmp
+          resources:
+            requests:
+              nvidia.com/gpu: "1"
+            limits:
+              nvidia.com/gpu: "1"
