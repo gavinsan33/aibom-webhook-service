@@ -278,3 +278,5 @@ oc get aibom train-job-abc123 -n gavin-test -o yaml
 ```
 
 `spec.jobName`, `spec.modelName`, `spec.experimentIntent`, and `spec.collectedAt` are pulled out as printer-friendly summary fields; `spec.data` holds the complete AIBOM JSON exactly as `postprocess.py` produced it.
+
+For friendlier filtering, inspection, and performance comparison across AIBOMs than raw `oc get`/`-o yaml`, see the [`oc-aibom`](https://github.com/gavinsan33/oc-aibom) `kubectl`/`oc` plugin.
