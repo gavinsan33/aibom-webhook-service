@@ -2,6 +2,8 @@
 
 A Kubernetes mutating admission webhook that automatically instruments AI workloads with AIBOM (AI Bill of Materials) metadata collection. When a pod is created in an opted-in namespace, the webhook injects hardware discovery, dataset detection, and tracking labels — no changes to the user's manifests required.
 
+For filtering, inspecting, and comparing the resulting `AIBOM` custom resources, see the [`oc-aibom`](https://github.com/gavinsan33/oc-aibom) `kubectl`/`oc` plugin.
+
 ## How It Works
 
 1. An admin labels a namespace: `oc label namespace my-ns aibom.io/enabled=true`
@@ -278,5 +280,3 @@ oc get aibom train-job-abc123 -n gavin-test -o yaml
 ```
 
 `spec.jobName`, `spec.modelName`, `spec.experimentIntent`, and `spec.collectedAt` are pulled out as printer-friendly summary fields; `spec.data` holds the complete AIBOM JSON exactly as `postprocess.py` produced it.
-
-For friendlier filtering, inspection, and performance comparison across AIBOMs than raw `oc get`/`-o yaml`, see the [`oc-aibom`](https://github.com/gavinsan33/oc-aibom) `kubectl`/`oc` plugin.
