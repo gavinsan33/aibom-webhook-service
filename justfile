@@ -174,6 +174,61 @@ deploy *args: _check-auth
 undeploy: _check-auth
     helm uninstall aibom-webhook -n {{ webhook_namespace }}
 
+# Build both images locally and push them to quay.io, then install/upgrade the
+# chart with build.enabled=false so the Deployment pulls those pushed images
+# instead of the in-cluster BuildConfig path `just deploy` uses. Useful for
+# iterating without a git-push round trip, or on a cluster with no route to
+# the source repo. Unlike OpenShift's own internal registry (not reachable
+# from outside the cluster without a cluster-admin exposing its route — not a
+# safe assumption to make by default), quay.io is reachable from anywhere the
+# caller already has push access, with no cluster-side permission needed.
+#
+# repo is the quay.io org/user to push under, e.g. quay.io/<your-org> — the
+# two image names (aibom-webhook-service, aibom-postprocess) are appended
+# automatically. Requires the caller already logged in (`docker login quay.io`
+# / `podman login quay.io`) with push access to that repo.
+#
+# Defaults to the local working tree's short SHA, suffixed "-dirty" if there
+# are uncommitted changes — unlike `just deploy`, there's no git remote tip to
+# resolve here, since this builds whatever's on disk right now.
+# --skip-crds behaves the same as in `just deploy`.
+# Usage: just deploy-local <repo> [--version=<tag>] [--skip-crds]
+[group('deploy')]
+deploy-local repo *args: _check-auth
+    #!/usr/bin/env bash
+    set -euo pipefail
+    engine=docker
+    command -v docker >/dev/null 2>&1 || engine=podman
+    version=""
+    skip_crds=false
+    for arg in {{ args }}; do
+        case "$arg" in
+            --skip-crds) skip_crds=true ;;
+            --version=*) version="${arg#--version=}" ;;
+            *) echo "error: unknown argument '$arg' (expected --version=<tag> or --skip-crds)" >&2; exit 1 ;;
+        esac
+    done
+    if [[ -z "$version" ]]; then
+        version="$(git rev-parse --short HEAD)"
+        git diff --quiet HEAD || version="${version}-dirty"
+    fi
+    webhook_ref="{{ repo }}/aibom-webhook-service:${version}"
+    postprocess_ref="{{ repo }}/aibom-postprocess:${version}"
+    "$engine" build -t "$webhook_ref" .
+    "$engine" build -t "$postprocess_ref" -f postprocess/Dockerfile .
+    "$engine" push "$webhook_ref"
+    "$engine" push "$postprocess_ref"
+    ns_flag="--create-namespace"
+    [[ "$skip_crds" = true ]] && ns_flag="--skip-crds"
+    helm upgrade --install aibom-webhook charts/aibom-webhook -n {{ webhook_namespace }} "$ns_flag" \
+        --set build.enabled=false \
+        --set image.webhook.repository="{{ repo }}/aibom-webhook-service" \
+        --set image.postprocess.repository="{{ repo }}/aibom-postprocess" \
+        --set image.webhook.tag="$version" --set image.postprocess.tag="$version"
+    oc -n {{ webhook_namespace }} rollout restart deployment/aibom-webhook
+    oc -n {{ webhook_namespace }} rollout status deployment/aibom-webhook --timeout=120s
+    echo "NOTE: run 'just setup-namespace <namespace>' for each workload namespace"
+
 # --- Local kind cluster --------------------------------------------------------
 #
 # Not OpenShift — no BuildConfig/ImageStream, no oc. Provider (docker vs podman)

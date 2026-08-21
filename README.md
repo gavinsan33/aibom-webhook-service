@@ -79,7 +79,11 @@ just deploy --version=latest
 # Roll back: rebuilds and redeploys that exact historical commit
 just deploy --version=<older-sha>
 
-# Or, to use externally built/pushed images instead of the in-cluster BuildConfig:
+# Or, build locally and push to quay.io instead of using the in-cluster BuildConfig
+# (handles the build/push/deploy loop for you):
+just deploy-local quay.io/<your-org>
+
+# ...which is equivalent to:
 helm upgrade --install aibom-webhook charts/aibom-webhook \
   --set build.enabled=false \
   --set image.webhook.repository=quay.io/<your-org>/aibom-webhook-service \
