@@ -2,6 +2,9 @@ package watcher
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -465,14 +468,52 @@ func (w *Watcher) getInstrumentedPods(job *batchv1.Job) ([]corev1.Pod, error) {
 // "discovery-<pod-name>.json"/"dataset-<pod-name>.json"/"storage-<pod-name>.json"
 // rather than scraped from logs — dataCM is nil if the ConfigMap doesn't exist
 // yet (e.g. none of them have run/flushed yet).
-func extractDataFromPod(pod *corev1.Pod, dataCM *corev1.ConfigMap) (discoveryJSON, datasetJSON, storageJSON string) {
+func extractDataFromPod(pod *corev1.Pod, dataCM *corev1.ConfigMap) (discoveryJSON, discoverySig, datasetJSON, storageJSON string) {
 	if dataCM != nil {
 		discoveryJSON = dataCM.Data[fmt.Sprintf("discovery-%s.json", pod.Name)]
+		discoverySig = dataCM.Data[fmt.Sprintf("discovery-%s.sig", pod.Name)]
 		datasetJSON = dataCM.Data[fmt.Sprintf("dataset-%s.json", pod.Name)]
 		storageJSON = dataCM.Data[fmt.Sprintf("storage-%s.json", pod.Name)]
 	}
 
-	return discoveryJSON, datasetJSON, storageJSON
+	return discoveryJSON, discoverySig, datasetJSON, storageJSON
+}
+
+// fetchDiscoverySigningKey reads the per-namespace HMAC key (see
+// aibomdata.DiscoverySigningKeySecretName) that generate_snapshot.py signs
+// discovery-<pod>.json with. A missing Secret (nil, nil) means the namespace
+// hasn't been upgraded to a chart version carrying signing.yaml yet —
+// callers treat that as "verification unavailable" and pass discovery data
+// through unverified, rather than dropping it outright, so this is a
+// gradual rollout, not a hard requirement.
+func (w *Watcher) fetchDiscoverySigningKey(ctx context.Context, namespace string) ([]byte, error) {
+	secret, err := w.clientset.CoreV1().Secrets(namespace).Get(ctx, aibomdata.DiscoverySigningKeySecretName, metav1.GetOptions{})
+	if err != nil {
+		if errors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return secret.Data[aibomdata.DiscoverySigningKeyDataKey], nil
+}
+
+// verifyDiscoverySignature reports whether sigHex is a valid HMAC-SHA256 of
+// payload under key. An empty/missing signature never verifies — a pod
+// whose application container overwrote discovery-<pod>.json without also
+// producing a valid discovery-<pod>.sig (impossible without the key, which
+// is never mounted into an app container) is exactly the forgery this
+// exists to catch.
+func verifyDiscoverySignature(key []byte, payload, sigHex string) bool {
+	if sigHex == "" {
+		return false
+	}
+	sig, err := hex.DecodeString(sigHex)
+	if err != nil {
+		return false
+	}
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(payload))
+	return hmac.Equal(sig, mac.Sum(nil))
 }
 
 // internalAnnotationKeys holds aibom.io/ annotation keys (prefix stripped) that are
@@ -626,8 +667,17 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 		dataCM = nil
 	}
 
+	signingKey, err := w.fetchDiscoverySigningKey(ctx, namespace)
+	if err != nil {
+		log.Printf("warning: could not read discovery signing key in namespace %s: %v", namespace, err)
+	}
+
 	for _, pod := range pods {
-		disc, ds, storage := extractDataFromPod(&pod, dataCM)
+		disc, discSig, ds, storage := extractDataFromPod(&pod, dataCM)
+		if disc != "" && signingKey != nil && !verifyDiscoverySignature(signingKey, disc, discSig) {
+			log.Printf("warning: dropping unverified discovery data for pod %s/%s (missing or invalid signature)", namespace, pod.Name)
+			disc = ""
+		}
 		discoveries = append(discoveries, disc)
 		datasets = append(datasets, ds)
 		if storageJSON == "" && storage != "" {

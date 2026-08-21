@@ -2,6 +2,9 @@ package watcher
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -738,6 +741,176 @@ func TestPostprocessReadsStorageInfoFromDiscoveryData(t *testing.T) {
 	if got["storage_path"] != "models/tinyllama-1.1b-chat" {
 		t.Errorf("storage_path = %q, want %q", got["storage_path"], "models/tinyllama-1.1b-chat")
 	}
+}
+
+// --- Discovery signature verification ---
+
+func discoverySigningSecret(namespace string, key []byte) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      aibomdata.DiscoverySigningKeySecretName,
+			Namespace: namespace,
+		},
+		Data: map[string][]byte{aibomdata.DiscoverySigningKeyDataKey: key},
+	}
+}
+
+func TestVerifyDiscoverySignature_ValidSignatureVerifies(t *testing.T) {
+	key := []byte("test-key")
+	payload := `{"gpu":{"gpu_count":"2"}}`
+	sig := hmacHex(t, key, payload)
+	if !verifyDiscoverySignature(key, payload, sig) {
+		t.Error("expected valid signature to verify")
+	}
+}
+
+func TestVerifyDiscoverySignature_WrongKeyFails(t *testing.T) {
+	payload := `{"gpu":{"gpu_count":"2"}}`
+	sig := hmacHex(t, []byte("real-key"), payload)
+	if verifyDiscoverySignature([]byte("wrong-key"), payload, sig) {
+		t.Error("expected signature under a different key to fail verification")
+	}
+}
+
+func TestVerifyDiscoverySignature_TamperedPayloadFails(t *testing.T) {
+	key := []byte("test-key")
+	sig := hmacHex(t, key, `{"gpu":{"gpu_count":"2"}}`)
+	if verifyDiscoverySignature(key, `{"gpu":{"gpu_count":"8"}}`, sig) {
+		t.Error("expected a payload that doesn't match the signed one to fail verification")
+	}
+}
+
+func TestVerifyDiscoverySignature_EmptySignatureFails(t *testing.T) {
+	if verifyDiscoverySignature([]byte("key"), "payload", "") {
+		t.Error("expected an empty signature to never verify")
+	}
+}
+
+// TestPostprocessDropsForgedDiscoveryData is the core regression test for
+// #30/#29: a pod whose discovery-<pod>.json was overwritten by something
+// other than the discovery init container (no valid matching .sig, since
+// the app container never has the signing key) must not have that data
+// merged into the aggregate discovery.json the AIBOM gets compiled from.
+func TestPostprocessDropsForgedDiscoveryData(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	now := metav1.Now()
+	pod := instrumentedBarePod("web-pod", "test-ns")
+	pod.Finalizers = []string{podFinalizerName}
+	pod.DeletionTimestamp = &now
+
+	key := []byte("shared-secret")
+	secret := discoverySigningSecret("test-ns", key)
+	forgedDiscovery := `{"gpu":{"gpu_count":"8"}}`
+	dataConfigMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pod.Name + "-aibom-postprocess-data",
+			Namespace: "test-ns",
+		},
+		Data: map[string]string{
+			fmt.Sprintf("discovery-%s.json", pod.Name): forgedDiscovery,
+			// No matching .sig -- or one that doesn't verify against the
+			// real key -- either way this must be treated as unsigned.
+			fmt.Sprintf("discovery-%s.sig", pod.Name): "not-a-real-signature",
+		},
+	}
+
+	client := fake.NewSimpleClientset(ns, pod, dataConfigMap, secret)
+	w := New(client, "aibom-postprocess:latest")
+	startWatcher(t, w)
+
+	w.onPodEvent(pod)
+
+	cm, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), pod.Name+"-aibom-postprocess-data", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("data configmap not found: %v", err)
+	}
+	if cm.Data["discovery.json"] != "[]" {
+		t.Errorf("expected forged discovery data to be dropped, got discovery.json = %q", cm.Data["discovery.json"])
+	}
+}
+
+// TestPostprocessKeepsValidlySignedDiscoveryData is the companion positive
+// case: genuine discovery data with a signature that verifies against the
+// namespace's own key must still make it into the compiled AIBOM inputs.
+func TestPostprocessKeepsValidlySignedDiscoveryData(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	now := metav1.Now()
+	pod := instrumentedBarePod("web-pod", "test-ns")
+	pod.Finalizers = []string{podFinalizerName}
+	pod.DeletionTimestamp = &now
+
+	key := []byte("shared-secret")
+	secret := discoverySigningSecret("test-ns", key)
+	genuineDiscovery := `{"gpu":{"gpu_count":"2"}}`
+	dataConfigMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pod.Name + "-aibom-postprocess-data",
+			Namespace: "test-ns",
+		},
+		Data: map[string]string{
+			fmt.Sprintf("discovery-%s.json", pod.Name): genuineDiscovery,
+			fmt.Sprintf("discovery-%s.sig", pod.Name):  hmacHex(t, key, genuineDiscovery),
+		},
+	}
+
+	client := fake.NewSimpleClientset(ns, pod, dataConfigMap, secret)
+	w := New(client, "aibom-postprocess:latest")
+	startWatcher(t, w)
+
+	w.onPodEvent(pod)
+
+	cm, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), pod.Name+"-aibom-postprocess-data", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("data configmap not found: %v", err)
+	}
+	if cm.Data["discovery.json"] != "["+genuineDiscovery+"]" {
+		t.Errorf("expected genuine discovery data to survive verification, got discovery.json = %q", cm.Data["discovery.json"])
+	}
+}
+
+// TestPostprocessKeepsUnverifiedDiscoveryWhenNoSigningKeyConfigured covers
+// the gradual-rollout case: a namespace whose aibom-workload-namespace chart
+// install predates signing.yaml has no Secret to verify against at all, so
+// discovery data passes through unverified rather than being dropped.
+func TestPostprocessKeepsUnverifiedDiscoveryWhenNoSigningKeyConfigured(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	now := metav1.Now()
+	pod := instrumentedBarePod("web-pod", "test-ns")
+	pod.Finalizers = []string{podFinalizerName}
+	pod.DeletionTimestamp = &now
+
+	unsignedDiscovery := `{"gpu":{"gpu_count":"2"}}`
+	dataConfigMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pod.Name + "-aibom-postprocess-data",
+			Namespace: "test-ns",
+		},
+		Data: map[string]string{
+			fmt.Sprintf("discovery-%s.json", pod.Name): unsignedDiscovery,
+		},
+	}
+
+	// Deliberately no discoverySigningSecret in the fake clientset.
+	client := fake.NewSimpleClientset(ns, pod, dataConfigMap)
+	w := New(client, "aibom-postprocess:latest")
+	startWatcher(t, w)
+
+	w.onPodEvent(pod)
+
+	cm, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), pod.Name+"-aibom-postprocess-data", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("data configmap not found: %v", err)
+	}
+	if cm.Data["discovery.json"] != "["+unsignedDiscovery+"]" {
+		t.Errorf("expected unsigned discovery data to pass through when no signing key is configured, got discovery.json = %q", cm.Data["discovery.json"])
+	}
+}
+
+func hmacHex(t *testing.T, key []byte, payload string) string {
+	t.Helper()
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(payload))
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 func TestPostprocessDefaultsStorageInfoWhenAbsent(t *testing.T) {

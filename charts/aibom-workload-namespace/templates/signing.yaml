@@ -1,0 +1,55 @@
+# HMAC-SHA256 key used to sign discovery-<pod-name>.json before it's written
+# to the data ConfigMap by the aibom-discovery init container, and verified
+# by the watcher (granted get access to this Secret by name only via the
+# namespaced Role/RoleBinding below) before that pod's hardware data is
+# trusted enough to merge into the aggregate discovery.json. Mounted only
+# into the discovery init container (see mutator.go's
+# buildDiscoverySigningKeyVolume) -- never into the workload's own
+# application container, which must not be able to produce a validly-signed
+# forgery of its own hardware claims.
+#
+# Preserved across `helm upgrade --install` re-runs via lookup, the same way
+# a cert-manager-issued cert wouldn't be regenerated on every upgrade --
+# rotating this key would invalidate verification of any discovery data
+# already written by pods mid-flight when the rotation happens.
+{{- $secretName := "aibom-discovery-hmac-key" }}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace $secretName }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $secretName }}
+  namespace: {{ .Release.Namespace }}
+type: Opaque
+data:
+  hmac-key: {{ if $existing }}{{ index $existing.data "hmac-key" }}{{ else }}{{ randAlphaNum 48 | b64enc }}{{ end }}
+---
+# Grants the aibom-webhook watcher (running in .Values.aibomSystemNamespace,
+# not this namespace) get access to this exact Secret only, so it can verify
+# a discovery-<pod>.json entry's HMAC signature. Namespace-scoped rather than
+# a cluster-wide ClusterRole/ClusterRoleBinding: this identity's read access
+# to the signing key is limited to namespaces that installed this chart,
+# instead of covering a same-named Secret in every namespace on the cluster.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: aibom-discovery-hmac-key-reader
+  namespace: {{ .Release.Namespace }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+    resourceNames: [{{ $secretName }}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: aibom-webhook-discovery-hmac-key-reader
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: aibom-discovery-hmac-key-reader
+subjects:
+  - kind: ServiceAccount
+    name: aibom-webhook
+    namespace: {{ .Values.aibomSystemNamespace }}

@@ -1,5 +1,7 @@
 # Taken from coldpress's discovery script in 'user_snapshot.yaml' and modified.
 
+import hashlib
+import hmac
 import subprocess
 import json
 import time
@@ -255,13 +257,48 @@ def resolve_inference_service_storage(namespace):
     return result
 
 
+_SIGNING_KEY_PATH = "/var/run/secrets/aibom/discovery-signing/hmac-key"
+
+
+def sign_discovery_payload(payload):
+    """HMAC-SHA256 the discovery payload's canonical bytes with the
+    per-namespace signing key, so the watcher can later verify that a
+    discovery-<pod>.json entry genuinely came from this (platform-controlled)
+    discovery container rather than being fabricated or overwritten by the
+    workload's own application container, which is never given this key.
+
+    Returns None (unsigned) if the key isn't mounted -- e.g. a namespace
+    whose aibom-workload-namespace chart install predates signing.yaml --
+    so a missing key degrades to "unverifiable" rather than failing pod
+    startup. The watcher treats an unsigned discovery payload as untrusted
+    once a per-namespace key does exist, but passes it through unverified if
+    the whole namespace has no key configured yet.
+    """
+    try:
+        with open(_SIGNING_KEY_PATH, "rb") as f:
+            key = f.read().strip()
+    except OSError:
+        return None
+    if not key:
+        return None
+    return hmac.new(key, payload.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
 # Write directly into the AIBOM data ConfigMap the webhook told us about,
 # rather than printing to stdout for the watcher to scrape from pod logs.
 pod_name = os.environ.get("POD_NAME", "")
 pod_namespace = os.environ.get("POD_NAMESPACE", "")
 configmap_name = k8s_api.resolve_data_configmap_name() if k8s_api else ""
 
-data_updates = {f"discovery-{pod_name}.json": json.dumps(snapshot)}
+# Canonical (sorted-key, no incidental whitespace) serialization: this exact
+# string is what gets signed and later re-hashed by the watcher, so it must
+# be reproduced byte-for-byte, not just semantically equivalent JSON.
+discovery_payload = json.dumps(snapshot, sort_keys=True, separators=(",", ":"))
+data_updates = {f"discovery-{pod_name}.json": discovery_payload}
+signature = sign_discovery_payload(discovery_payload)
+if signature:
+    data_updates[f"discovery-{pod_name}.sig"] = signature
+
 storage_info = resolve_inference_service_storage(pod_namespace)
 if storage_info:
     data_updates[f"storage-{pod_name}.json"] = json.dumps(storage_info)

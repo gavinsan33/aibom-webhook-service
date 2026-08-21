@@ -22,6 +22,12 @@ rules:
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["list", "watch", "create", "patch", "delete"]
+  # secrets: intentionally absent here. Read access to a namespace's discovery
+  # signing key (aibom-discovery-hmac-key) is granted per-namespace via a
+  # namespaced Role/RoleBinding created by aibom-workload-namespace's
+  # signing.yaml, not by this cluster-wide ClusterRole -- so this identity's
+  # blast radius is limited to namespaces that actually installed that chart,
+  # not every namespace on the cluster.
   # No serving.kserve.io permission here deliberately: resolving an
   # InferenceService's storage.path/storageUri for model identity is done by
   # the aibom-discovery init container itself, using the workload's own

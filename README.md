@@ -57,7 +57,7 @@ just setup-namespace my-ai-workloads
 
 `just setup-namespace`:
 1. Labels the namespace `aibom.io/enabled=true` — opts it into webhook instrumentation
-2. Runs `helm upgrade --install aibom-ns-<namespace> charts/aibom-workload-namespace -n <namespace>`, which creates the image-puller RoleBinding, the `aibom-scripts` ConfigMap, the `aibom-postprocess` ServiceAccount/RBAC, and the `aibom-workload-data` RBAC (see `charts/aibom-workload-namespace/templates/`)
+2. Runs `helm upgrade --install aibom-ns-<namespace> charts/aibom-workload-namespace -n <namespace>`, which creates the image-puller RoleBinding, the `aibom-scripts` ConfigMap, the `aibom-postprocess` ServiceAccount/RBAC, the `aibom-workload-data` RBAC, and the `aibom-discovery-hmac-key` Secret used to sign discovery data (see `charts/aibom-workload-namespace/templates/`)
 
 **Upgrading an existing namespace**: re-run `just setup-namespace <ns>` any time `scripts/aibom-scripts/*.py` changes — `helm upgrade --install` is idempotent. A stale `aibom-scripts` ConfigMap can fail *pod startup* for every instrumented workload in the namespace (not just silently skip dataset detection), since the dataset detector hook mounts `k8s_api.py` via a `subPath` volume mount.
 
@@ -214,6 +214,7 @@ When the webhook mutates a pod, it adds:
 - Captures: CPU model/cores/cache, GPU model/count/VRAM/CUDA version, memory, network (RDMA), storage, kernel config, cgroup limits
 - Runs benchmarks: CPU compute (MFLOPS), memory bandwidth, disk I/O throughput, context switch latency
 - Writes the result directly into the workload's data ConfigMap (key `discovery-<pod-name>.json`) via `k8s_api.py`, an in-cluster REST helper using only the Python stdlib
+- Signs that data with a per-namespace HMAC key mounted only into this init container — never into the application container — so the watcher can reject a forged or overwritten entry before it's trusted; see `CLAUDE.md`
 
 **Runtime detector (into each application container):**
 - Mounts `runtime_detector.py` as `usercustomize.py` on `PYTHONPATH`, plus `k8s_api.py` alongside it

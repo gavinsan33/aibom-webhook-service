@@ -267,13 +267,50 @@ func TestMutate_InjectsInitContainer(t *testing.T) {
 			if len(containers[0].Env) != 6 {
 				t.Errorf("expected 6 env vars, got %d", len(containers[0].Env))
 			}
-			if len(containers[0].VolumeMounts) != 3 {
-				t.Errorf("expected 3 volume mounts (aibom-data + aibom-scripts + aibom-token), got %d", len(containers[0].VolumeMounts))
+			if len(containers[0].VolumeMounts) != 4 {
+				t.Errorf("expected 4 volume mounts (aibom-data + aibom-scripts + aibom-token + aibom-discovery-signing-key), got %d", len(containers[0].VolumeMounts))
 			}
 			return
 		}
 	}
 	t.Error("initContainers patch not found")
+}
+
+// TestMutate_DiscoverySigningKeyMountedOnlyInInitContainer guards the whole
+// point of #30: the workload's own application container must never have
+// access to the key used to sign discovery data, or it could produce a
+// validly-signed forgery of its own hardware claims.
+func TestMutate_DiscoverySigningKeyMountedOnlyInInitContainer(t *testing.T) {
+	m := newTestMutator()
+	patches, err := m.Mutate(podWithOwner("Job"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	foundInInit := false
+	for _, p := range patches {
+		if p.Path == "/spec/initContainers" {
+			containers, ok := p.Value.([]corev1.Container)
+			if !ok {
+				t.Fatal("initContainers patch value is not []Container")
+			}
+			for _, mount := range containers[0].VolumeMounts {
+				if mount.Name == "aibom-discovery-signing-key" {
+					foundInInit = true
+				}
+			}
+		}
+	}
+	if !foundInInit {
+		t.Fatal("expected aibom-discovery-signing-key mount on the discovery init container")
+	}
+
+	appMounts := collectContainerVolumeMountPatches(patches, 0)
+	for _, mount := range appMounts {
+		if mount.Name == "aibom-discovery-signing-key" {
+			t.Fatal("aibom-discovery-signing-key must never be mounted into an application container")
+		}
+	}
 }
 
 func TestMutate_JobOwnedPod_HasStaticDataConfigMapEnv(t *testing.T) {
