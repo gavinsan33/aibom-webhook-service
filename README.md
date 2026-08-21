@@ -63,33 +63,37 @@ just setup-namespace my-ai-workloads
 
 ## Cluster Deployment
 
-Deployment is a Helm chart (`charts/aibom-webhook`), covering the `aibom-system` namespace, RBAC, cert-manager `Issuer`/`Certificate`, the webhook `Deployment`/`Service`, the `MutatingWebhookConfiguration`, and the OpenShift `BuildConfig`/`ImageStream` pair used to build both images in-cluster from source. `just deploy` requires cert-manager to already be installed — it issues the webhook's TLS certificate and keeps it renewed automatically.
+Deployment is a Helm chart (`charts/aibom-webhook`), covering the `aibom-system` namespace, RBAC, cert-manager `Issuer`/`Certificate`, the webhook `Deployment`/`Service`, the `MutatingWebhookConfiguration`, and (opt-in) the OpenShift `BuildConfig`/`ImageStream` pair used to build both images in-cluster from source. Every `just deploy*` recipe requires cert-manager to already be installed — it issues the webhook's TLS certificate and keeps it renewed automatically.
 
-`just deploy` always installs/upgrades the chart, builds both images in-cluster from source, and rolls out the result. `--version` controls what gets built and deployed, defaulting to the short SHA of the remote tip of `build.gitRepo`/`build.gitRef` (not your local `HEAD`). Each build lands on its own ImageStreamTag, so `just deploy --version=<older-sha>` rebuilds and redeploys that exact historical commit as a rollback. See `CLAUDE.md` for the reasoning behind this versioning scheme.
+There are three ways to get images into the cluster — pick whichever fits:
 
-If your account doesn't have cluster-scoped permission to create/patch CRDs, pass `--skip-crds`; the `aiboms.aibom.io` CRD and `aibom-system` namespace must then already exist (created once via `oc apply -f charts/aibom-webhook/crds/aibom-crd.yaml` and `oc create namespace aibom-system`).
+| Situation | Recipe |
+|---|---|
+| Default — Quay's GitHub build triggers already build both images on every push to `master` | `just deploy` |
+| No egress to quay.io, or no external registry account | `just deploy-buildconfig` (in-cluster OpenShift BuildConfig) |
+| Iterating locally, don't want to wait on Quay or a git push | `just deploy-local <repo>` |
+
+If your account doesn't have cluster-scoped permission to create/patch CRDs, pass `--skip-crds` to any of the three; the `aiboms.aibom.io` CRD and `aibom-system` namespace must then already exist (created once via `oc apply -f charts/aibom-webhook/crds/aibom-crd.yaml` and `oc create namespace aibom-system`).
 
 ```bash
-# Build both images in-cluster from source and roll out the result
+# Default: pull whatever Quay's build triggers most recently built and pushed
 just deploy
 
-# Or, overwrite the "latest" tag in place instead of using the resolved commit SHA
-just deploy --version=latest
+# Pin to an immutable SHA tag instead of the mutable "latest" Quay keeps overwriting
+just deploy --version=<sha>
+
+# Point at a different quay.io org/user than the values.yaml default
+just deploy quay.io/<your-org>
+
+# Or, build both images in-cluster from source instead (no quay.io dependency)
+just deploy-buildconfig
 
 # Roll back: rebuilds and redeploys that exact historical commit
-just deploy --version=<older-sha>
+just deploy-buildconfig --version=<older-sha>
 
-# Or, build locally and push to quay.io instead of using the in-cluster BuildConfig
-# (handles the build/push/deploy loop for you):
+# Or, build locally and push to quay.io yourself — for iterating without
+# waiting on Quay's build trigger or pushing a commit
 just deploy-local quay.io/<your-org>
-
-# ...which is equivalent to:
-helm upgrade --install aibom-webhook charts/aibom-webhook \
-  --set build.enabled=false \
-  --set image.webhook.repository=quay.io/<your-org>/aibom-webhook-service \
-  --set image.webhook.tag=latest \
-  --set image.postprocess.repository=quay.io/<your-org>/aibom-postprocess \
-  --set image.postprocess.tag=latest
 
 # Set up a workload namespace (label, image pull access, scripts ConfigMap)
 just setup-namespace my-ai-workloads
@@ -104,6 +108,17 @@ oc get pod <pod-name> -n my-ai-workloads -o jsonpath='{.spec.containers[0].env[*
 ```
 
 To remove the deployment: `just undeploy` (runs `helm uninstall aibom-webhook`, after a confirmation prompt). Helm installs CRDs once but never upgrades or removes them automatically — schema changes to `aiboms.aibom.io` need a manual `oc apply -f charts/aibom-webhook/crds/aibom-crd.yaml`, and `helm uninstall` leaves the CRD (and any AIBOM custom resources) in place.
+
+### Setting Up Quay Auto-Build
+
+One-time setup, done in the Quay web UI (not scriptable — it requires a GitHub OAuth authorization). Repeat for both `aibom-webhook-service` and `aibom-postprocess` repos on quay.io:
+
+1. Repo → **Builds** tab → **Add Build Trigger** → **GitHub Repository Push**, authorizing Quay against GitHub if prompted
+2. Source repo: this repo; branch filter restricted to `master` only
+3. Dockerfile location: `/Dockerfile` for `aibom-webhook-service`, `/postprocess/Dockerfile` for `aibom-postprocess`; context `/` for both (the postprocess Dockerfile `COPY`s files from outside its own directory)
+4. Tagging options: add a template so each build produces both `latest` and a short-commit-SHA tag, keeping rollback ("redeploy an older SHA") consistent with `just deploy-buildconfig`'s path
+
+Once set up, every push to `master` produces new `latest` and `<sha>` tags automatically — `just deploy` (no arguments) always deploys whatever was built most recently.
 
 ## Local Testing (without a cluster)
 
