@@ -642,16 +642,27 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 		PodName string   `json:"pod_name"`
 		Name    string   `json:"name"`
 		Image   string   `json:"image"`
+		ImageID string   `json:"image_id"`
 		Command []string `json:"command"`
 		Args    []string `json:"args"`
 	}
 	var containers []containerInfo
 	for _, pod := range pods {
+		// ImageID (the resolved digest, e.g. "registry/repo@sha256:...") comes from
+		// ContainerStatuses, not Spec.Containers -- Spec only has the mutable tag the
+		// pod was created with. Git-provenance detection in postprocess.py keys off
+		// this digest specifically so a re-tagged image can't spoof the commit labels
+		// baked onto the original build (see CLAUDE.md's git provenance section).
+		imageIDs := make(map[string]string, len(pod.Status.ContainerStatuses))
+		for _, cs := range pod.Status.ContainerStatuses {
+			imageIDs[cs.Name] = cs.ImageID
+		}
 		for _, c := range pod.Spec.Containers {
 			containers = append(containers, containerInfo{
 				PodName: pod.Name,
 				Name:    c.Name,
 				Image:   c.Image,
+				ImageID: imageIDs[c.Name],
 				Command: c.Command,
 				Args:    c.Args,
 			})

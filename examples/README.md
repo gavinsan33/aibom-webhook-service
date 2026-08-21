@@ -59,3 +59,14 @@ The script also tokenizes the dataset via `.map()` before handing it to `Trainer
 # Deploy the example (namespace must be set up first)
 oc apply -f examples/granite-lora-finetune-raw-trainer.yaml
 ```
+
+## Example: Git-Clone LoRA Fine-Tuning (Git Provenance Detection)
+
+The `examples/granite-lora-finetune-git-clone.yaml` file runs the same LoRA fine-tune again, but this time the training code is pulled from GitHub at pod startup (`git clone https://github.com/huggingface/trl.git`, then `python examples/scripts/sft.py` run directly against that checkout) rather than baked into the image or invoked via a pip-installed CLI. It exercises the git-provenance detection layers described in [Git Provenance Detection](../CLAUDE.md#git-provenance-detection), which the other examples never touch since their code is either baked into the image or installed as a release package.
+
+Two of the five precedence tiers are exercised here: `detect_git_clone_from_containers` (`postprocess.py`) sees the literal `git clone` in the container's command (`declared_via: "cli_arg"`), and `runtime_detector.py`'s `.git`-directory read finds the real `.git` checkout at the training process's CWD and reports the actual resolved commit (`declared_via: "git_directory"`). The runtime tier is ranked first, so in practice it wins — the resulting AIBOM's `source_code.declared_via` should come back as `"git_directory"` with `source_code.dirty: false`, and `source_code.git_commit` should match whatever commit `main` resolved to at clone time (not a value pinned in this file, since no `--branch`/`-b` flag is passed).
+
+```bash
+# Deploy the example (namespace must be set up first)
+oc apply -f examples/granite-lora-finetune-git-clone.yaml
+```

@@ -101,6 +101,23 @@ def get_custom_object(namespace, group, version, plural, name):
         raise
 
 
+def get_cluster_object(group, version, plural, name):
+    """GET a cluster-scoped resource, e.g. an OpenShift Image
+    (image.openshift.io/v1, whose object name is the digest itself,
+    "sha256:..."). Returns None on 404/403 rather than raising, since callers
+    use this for best-effort enrichment (git-provenance detection from
+    BuildConfig commit labels) that should degrade quietly if the image
+    wasn't built in-cluster or the caller lacks RBAC for it.
+    """
+    path = f"/apis/{group}/{version}/{plural}/{name}"
+    try:
+        return _request("GET", path)
+    except urllib.error.HTTPError as e:
+        if e.code in (404, 403):
+            return None
+        raise
+
+
 def _postprocess_job_name(trigger_name):
     max_base = _MAX_JOB_NAME_LENGTH - len(_POSTPROCESS_SUFFIX)
     trigger_name = trigger_name[:max_base].rstrip("-")

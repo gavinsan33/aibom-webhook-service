@@ -228,7 +228,7 @@ See `CLAUDE.md` for the detection internals (CLI-arg parsing, runtime hooks, KSe
 
 When a Job completes or is being deleted (held by the finalizer), the watcher creates an AIBOM postprocess Job that reads/merges the workload's data ConfigMap, removes the holding finalizer, runs `postprocess.py` to compile and create the `AIBOM` custom resource, and cleans up the postprocess Job and ConfigMap on success.
 
-Full rules for which Jobs/pods qualify, how JobSet siblings are merged, model/dataset auto-detection, and Grafana telemetry retries are documented in `CLAUDE.md`.
+Full rules for which Jobs/pods qualify, how JobSet siblings are merged, model/dataset auto-detection, git provenance detection, and Grafana telemetry retries are documented in `CLAUDE.md`.
 
 ### AIBOM Annotations
 
@@ -240,6 +240,9 @@ Users can optionally annotate their Jobs with `aibom.io/*` keys to provide exper
 | `aibom.io/experiment-name` | `experiment_name` |
 | `aibom.io/model-name` | `model.name` |
 | `aibom.io/model-framework` | `model.framework` |
+| `aibom.io/git-repository` | `source_code.git_repository` |
+| `aibom.io/git-commit` | `source_code.git_commit` |
+| `aibom.io/git-branch` | `source_code.git_branch` |
 | `aibom.io/dataset-name` | `dataset.declared.name` |
 | `aibom.io/dataset-source` | `dataset.declared.source` |
 | `aibom.io/dataset-version` | `dataset.declared.version` |
