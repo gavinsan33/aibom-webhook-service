@@ -1,13 +1,19 @@
+# Defaults to the Quay build triggers that auto-build both images on every push
+# to master (see README's Cluster Deployment section) — the seamless, no-cluster-
+# permission-needed path. `just deploy` (build.enabled=true) overrides both
+# repositories to the in-cluster registry path instead, since that's where its
+# BuildConfig actually writes; see justfile.
+#
 # When build.enabled=true, tag also names the ImageStreamTag the in-cluster
 # BuildConfig writes to (see templates/build.yaml) — the two must move together.
 # Override both to a commit SHA (justfile `tag` recipe arg) for immutable, rollback-able
 # builds instead of always overwriting "latest" in place.
 image:
   webhook:
-    repository: image-registry.openshift-image-registry.svc:5000/aibom-system/aibom-webhook-service
+    repository: quay.io/gsanders/aibom-webhook-service
     tag: latest
   postprocess:
-    repository: image-registry.openshift-image-registry.svc:5000/aibom-system/aibom-postprocess
+    repository: quay.io/gsanders/aibom-postprocess
     tag: latest
   pullPolicy: Always
 
@@ -35,10 +41,11 @@ webhook:
     value: "true"
 
 # OpenShift BuildConfig/ImageStream resources that build the webhook and
-# postprocess images from source in-cluster. Disable if images are built and
-# pushed externally instead.
+# postprocess images from source in-cluster. Opt-in (via `just deploy`) for
+# clusters that specifically want in-cluster builds instead of pulling
+# Quay-built images — e.g. no egress to quay.io, or no external registry account.
 build:
-  enabled: true
+  enabled: false
   gitRepo: https://github.com/gavinsan33/aibom-webhook-service.git
   gitRef: master
 

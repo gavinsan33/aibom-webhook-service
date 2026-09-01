@@ -100,6 +100,13 @@ _check-auth:
 # on its *initial* creation, never on later edits (e.g. a new tag) — so relying on
 # the trigger alone would leave subsequent deploys pointing at an unbuilt tag.
 #
+# The opt-in path for clusters that specifically want in-cluster builds instead of
+# pulling Quay-built images (`just deploy` is the seamless default — see there).
+# values.yaml defaults to build.enabled=false, so this recipe explicitly sets
+# build.enabled=true and points image.*.repository back at the in-cluster registry
+# path the BuildConfig actually writes to — the two must move together, or the
+# Deployment ends up pointed at an image the BuildConfig never produced.
+#
 # With no arguments, deploys build.gitRef from values.yaml (master) at its current
 # remote tip — NOT your local checkout or branch, which this recipe never inspects.
 # --branch[=<name>] deploys a different branch instead: defaults to whatever branch
@@ -107,9 +114,9 @@ _check-auth:
 # tip SHA via remote-build-sha.sh (erroring if it hasn't been pushed), and uses that
 # SHA the same way --version would — so it's still pinned to immutable content, not
 # a mutable branch name that could move between resolving and building it.
-# Usage: just deploy [--version=<sha> | --branch[=<name>]] [--skip-crds]
+# Usage: just deploy-buildconfig [--version=<sha> | --branch[=<name>]] [--skip-crds]
 [group('deploy')]
-deploy *args: _check-auth
+deploy-buildconfig *args: _check-auth
     #!/usr/bin/env bash
     set -euo pipefail
     version=""
@@ -139,6 +146,9 @@ deploy *args: _check-auth
     first_install=false
     helm status aibom-webhook -n {{ webhook_namespace }} >/dev/null 2>&1 || first_install=true
     helm upgrade --install aibom-webhook charts/aibom-webhook -n {{ webhook_namespace }} "$ns_flag" \
+        --set build.enabled=true \
+        --set image.webhook.repository="image-registry.openshift-image-registry.svc:5000/{{ webhook_namespace }}/aibom-webhook-service" \
+        --set image.postprocess.repository="image-registry.openshift-image-registry.svc:5000/{{ webhook_namespace }}/aibom-postprocess" \
         --set image.webhook.tag="$version" --set image.postprocess.tag="$version" "${gitref_args[@]}"
     if [[ "$first_install" = true ]]; then
         # The BuildConfigs' ConfigChange trigger already auto-fired an initial build the
@@ -173,6 +183,96 @@ deploy *args: _check-auth
 [confirm("Uninstall the aibom-webhook release? This removes the webhook, RBAC, and Deployment (the CRD and any AIBOM resources are left in place).")]
 undeploy: _check-auth
     helm uninstall aibom-webhook -n {{ webhook_namespace }}
+
+# Build both images locally and push them to quay.io, then install/upgrade the
+# chart with build.enabled=false so the Deployment pulls those pushed images
+# instead of the in-cluster BuildConfig path `just deploy-buildconfig` uses. Useful for
+# iterating without a git-push round trip, or on a cluster with no route to
+# the source repo. Unlike OpenShift's own internal registry (not reachable
+# from outside the cluster without a cluster-admin exposing its route — not a
+# safe assumption to make by default), quay.io is reachable from anywhere the
+# caller already has push access, with no cluster-side permission needed.
+#
+# repo is the quay.io org/user to push under, e.g. quay.io/<your-org> — the
+# two image names (aibom-webhook-service, aibom-postprocess) are appended
+# automatically. Requires the caller already logged in (`docker login quay.io`
+# / `podman login quay.io`) with push access to that repo.
+#
+# Defaults to the local working tree's short SHA, suffixed "-dirty" if there
+# are uncommitted changes — unlike `just deploy-buildconfig`, there's no git
+# remote tip to resolve here, since this builds whatever's on disk right now.
+# --skip-crds behaves the same as in `just deploy-buildconfig`.
+# Usage: just deploy-local <repo> [--version=<tag>] [--skip-crds]
+[group('deploy')]
+deploy-local repo *args: _check-auth
+    #!/usr/bin/env bash
+    set -euo pipefail
+    engine=docker
+    command -v docker >/dev/null 2>&1 || engine=podman
+    version=""
+    skip_crds=false
+    for arg in {{ args }}; do
+        case "$arg" in
+            --skip-crds) skip_crds=true ;;
+            --version=*) version="${arg#--version=}" ;;
+            *) echo "error: unknown argument '$arg' (expected --version=<tag> or --skip-crds)" >&2; exit 1 ;;
+        esac
+    done
+    if [[ -z "$version" ]]; then
+        version="$(git rev-parse --short HEAD)"
+        git diff --quiet HEAD || version="${version}-dirty"
+    fi
+    webhook_ref="{{ repo }}/aibom-webhook-service:${version}"
+    postprocess_ref="{{ repo }}/aibom-postprocess:${version}"
+    "$engine" build -t "$webhook_ref" .
+    "$engine" build -t "$postprocess_ref" -f postprocess/Dockerfile .
+    "$engine" push "$webhook_ref"
+    "$engine" push "$postprocess_ref"
+    ns_flag="--create-namespace"
+    [[ "$skip_crds" = true ]] && ns_flag="--skip-crds"
+    helm upgrade --install aibom-webhook charts/aibom-webhook -n {{ webhook_namespace }} "$ns_flag" \
+        --set build.enabled=false \
+        --set image.webhook.repository="{{ repo }}/aibom-webhook-service" \
+        --set image.postprocess.repository="{{ repo }}/aibom-postprocess" \
+        --set image.webhook.tag="$version" --set image.postprocess.tag="$version"
+    oc -n {{ webhook_namespace }} rollout restart deployment/aibom-webhook
+    oc -n {{ webhook_namespace }} rollout status deployment/aibom-webhook --timeout=120s
+    echo "NOTE: run 'just setup-namespace <namespace>' for each workload namespace"
+
+# The seamless default: install/upgrade the chart against images Quay already
+# built — no build, no push, just a helm install pointing at a tag. Works once
+# Quay's GitHub build triggers are set up (see README) to auto-build both
+# images on every push to master: nothing runs locally at all, this just tells
+# the cluster where to pull from. Also matches values.yaml's own defaults
+# (quay.io/gsanders, tag latest), so `just deploy` with no arguments is
+# equivalent to a plain `helm upgrade --install` with no --set overrides —
+# repo/version only matter when deploying a different quay org or pinning to
+# an immutable SHA tag instead of the mutable "latest" Quay's master trigger
+# keeps overwriting. For in-cluster builds instead, see `just deploy-buildconfig`.
+# Usage: just deploy [<repo>] [--version=<tag>] [--skip-crds]
+[group('deploy')]
+deploy repo="quay.io/gsanders" *args: _check-auth
+    #!/usr/bin/env bash
+    set -euo pipefail
+    version="latest"
+    skip_crds=false
+    for arg in {{ args }}; do
+        case "$arg" in
+            --skip-crds) skip_crds=true ;;
+            --version=*) version="${arg#--version=}" ;;
+            *) echo "error: unknown argument '$arg' (expected --version=<tag> or --skip-crds)" >&2; exit 1 ;;
+        esac
+    done
+    ns_flag="--create-namespace"
+    [[ "$skip_crds" = true ]] && ns_flag="--skip-crds"
+    helm upgrade --install aibom-webhook charts/aibom-webhook -n {{ webhook_namespace }} "$ns_flag" \
+        --set build.enabled=false \
+        --set image.webhook.repository="{{ repo }}/aibom-webhook-service" \
+        --set image.postprocess.repository="{{ repo }}/aibom-postprocess" \
+        --set image.webhook.tag="$version" --set image.postprocess.tag="$version"
+    oc -n {{ webhook_namespace }} rollout restart deployment/aibom-webhook
+    oc -n {{ webhook_namespace }} rollout status deployment/aibom-webhook --timeout=120s
+    echo "NOTE: run 'just setup-namespace <namespace>' for each workload namespace"
 
 # --- Local kind cluster --------------------------------------------------------
 #
