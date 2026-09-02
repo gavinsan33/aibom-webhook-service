@@ -81,8 +81,12 @@ TELEMETRY_QUERIES = {
         "query": 'nerc:dcgm_power_usage:avg5m{exported_pod="{pod_name}"}',
         "unit": "watts",
     },
+    # rate()'s [5m] window matches what the pre-segmented-stats avg_* fields
+    # used (a separate avg_over_time(rate(...[5m])[...]) summary query) --
+    # keep it tight rather than widening it, since a wider window smooths out
+    # exactly the mid-run detail compute_metric_stats' segments exist to show.
     "cpu_usage": {
-        "query": 'rate(container_cpu_usage_seconds_total{pod="{pod_name}", container!="POD", container!=""}[10m])',
+        "query": 'rate(container_cpu_usage_seconds_total{pod="{pod_name}", container!="POD", container!=""}[5m])',
         "unit": "cores",
     },
     "memory_usage": {
@@ -90,11 +94,11 @@ TELEMETRY_QUERIES = {
         "unit": "bytes",
     },
     "network_receive": {
-        "query": 'rate(container_network_receive_bytes_total{pod="{pod_name}"}[10m])',
+        "query": 'rate(container_network_receive_bytes_total{pod="{pod_name}"}[5m])',
         "unit": "bytes_per_sec",
     },
     "network_transmit": {
-        "query": 'rate(container_network_transmit_bytes_total{pod="{pod_name}"}[10m])',
+        "query": 'rate(container_network_transmit_bytes_total{pod="{pod_name}"}[5m])',
         "unit": "bytes_per_sec",
     },
 }
@@ -1254,19 +1258,23 @@ def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, tel
 
     # Resource utilization from telemetry
     if telemetry and telemetry.get("pods"):
+        # display_unit reflects the *scaled* value stored below, not the raw
+        # per_pod_stats unit collect_telemetry recorded (e.g. "bytes") -- the
+        # two diverge for memory/network, where scale converts bytes to
+        # GB/Mbps.
         unit_map = {
-            "gpu_utilization": ("avg_gpu_utilization_pct", None),
-            "gpu_memory_used": ("avg_gpu_memory_used_mib", None),
-            "gpu_power": ("avg_gpu_power_watts", None),
-            "cpu_usage": ("avg_cpu_usage_cores", None),
-            "memory_usage": ("avg_memory_usage_gb", 1 / (1024**3)),
-            "network_receive": ("avg_network_receive_mbps", 8 / (1024 * 1024)),
-            "network_transmit": ("avg_network_transmit_mbps", 8 / (1024 * 1024)),
+            "gpu_utilization": ("avg_gpu_utilization_pct", None, "percent"),
+            "gpu_memory_used": ("avg_gpu_memory_used_mib", None, "MiB"),
+            "gpu_power": ("avg_gpu_power_watts", None, "watts"),
+            "cpu_usage": ("avg_cpu_usage_cores", None, "cores"),
+            "memory_usage": ("avg_memory_usage_gb", 1 / (1024**3), "GB"),
+            "network_receive": ("avg_network_receive_mbps", 8 / (1024 * 1024), "Mbps"),
+            "network_transmit": ("avg_network_transmit_mbps", 8 / (1024 * 1024), "Mbps"),
         }
 
         utilization = {"collected_at": telemetry.get("collected_at")}
         metric_details = {}
-        for metric_name, (field_name, scale) in unit_map.items():
+        for metric_name, (field_name, scale, display_unit) in unit_map.items():
             scale = scale or 1
             per_pod_stats = [
                 p["metrics"][metric_name] for p in telemetry["pods"] if p.get("metrics", {}).get(metric_name)
@@ -1284,7 +1292,7 @@ def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, tel
                 seg_values = [s["segments"][seg] for s in per_pod_stats if s["segments"][seg] is not None]
                 segments[seg] = round(_chunk_avg(seg_values) * scale, 2) if seg_values else None
             metric_details[metric_name] = {
-                "unit": per_pod_stats[0]["unit"],
+                "unit": display_unit,
                 "min": round(min(s["min"] for s in per_pod_stats) * scale, 2),
                 "max": round(max(s["max"] for s in per_pod_stats) * scale, 2),
                 "avg": utilization[field_name],
