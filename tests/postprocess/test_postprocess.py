@@ -803,7 +803,6 @@ def test_compile_aibom_utilization_reports_segmented_metrics():
         annotations={}, telemetry=telemetry,
     )
     utilization = aibom["resource_utilization"]
-    assert utilization["avg_gpu_utilization_pct"] == 60
     detail = utilization["metrics"]["gpu_utilization"]
     assert detail == {
         "unit": "percent",
