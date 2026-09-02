@@ -1263,18 +1263,18 @@ def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, tel
         # two diverge for memory/network, where scale converts bytes to
         # GB/Mbps.
         unit_map = {
-            "gpu_utilization": ("avg_gpu_utilization_pct", None, "percent"),
-            "gpu_memory_used": ("avg_gpu_memory_used_mib", None, "MiB"),
-            "gpu_power": ("avg_gpu_power_watts", None, "watts"),
-            "cpu_usage": ("avg_cpu_usage_cores", None, "cores"),
-            "memory_usage": ("avg_memory_usage_gb", 1 / (1024**3), "GB"),
-            "network_receive": ("avg_network_receive_mbps", 8 / (1024 * 1024), "Mbps"),
-            "network_transmit": ("avg_network_transmit_mbps", 8 / (1024 * 1024), "Mbps"),
+            "gpu_utilization": (None, "percent"),
+            "gpu_memory_used": (None, "MiB"),
+            "gpu_power": (None, "watts"),
+            "cpu_usage": (None, "cores"),
+            "memory_usage": (1 / (1024**3), "GB"),
+            "network_receive": (8 / (1024 * 1024), "Mbps"),
+            "network_transmit": (8 / (1024 * 1024), "Mbps"),
         }
 
         utilization = {"collected_at": telemetry.get("collected_at")}
         metric_details = {}
-        for metric_name, (field_name, scale, display_unit) in unit_map.items():
+        for metric_name, (scale, display_unit) in unit_map.items():
             scale = scale or 1
             per_pod_stats = [
                 p["metrics"][metric_name] for p in telemetry["pods"] if p.get("metrics", {}).get(metric_name)
@@ -1286,7 +1286,6 @@ def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, tel
             # approximation -- true cross-pod percentiles would need the raw
             # series from every pod); min/max take the true extreme across all
             # of them, since a single pod's outlier is still real.
-            utilization[field_name] = round(_chunk_avg([s["avg"] for s in per_pod_stats]) * scale, 2)
             segments = {}
             for seg in ("first_third", "middle_third", "last_third"):
                 seg_values = [s["segments"][seg] for s in per_pod_stats if s["segments"][seg] is not None]
@@ -1295,7 +1294,7 @@ def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, tel
                 "unit": display_unit,
                 "min": round(min(s["min"] for s in per_pod_stats) * scale, 2),
                 "max": round(max(s["max"] for s in per_pod_stats) * scale, 2),
-                "avg": utilization[field_name],
+                "avg": round(_chunk_avg([s["avg"] for s in per_pod_stats]) * scale, 2),
                 "p95": round(_chunk_avg([s["p95"] for s in per_pod_stats]) * scale, 2),
                 "segments": segments,
             }
@@ -1498,9 +1497,9 @@ def main():
     ds = aibom.get("dataset", {})
     if ds.get("auto_detected"):
         print(f"  Datasets detected: {len(ds['auto_detected'])}")
-    util = aibom.get("resource_utilization", {})
-    if util.get("avg_gpu_utilization_pct") is not None:
-        print(f"  Avg GPU utilization: {util['avg_gpu_utilization_pct']}%")
+    gpu_util = aibom.get("resource_utilization", {}).get("metrics", {}).get("gpu_utilization")
+    if gpu_util is not None:
+        print(f"  Avg GPU utilization: {gpu_util['avg']}%")
     print()
 
     print("=" * 60)
