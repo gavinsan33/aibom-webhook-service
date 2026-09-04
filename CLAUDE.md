@@ -141,6 +141,20 @@ Neither file being present is a hard requirement in either direction — a missi
 
 `postprocess.py` queries this immediately after the workload's pod completes. On some observability backends (e.g. a federated/multi-tenant Prometheus setup) there's a delay between a metric being scraped and it becoming queryable, so a summary query fired this soon can race that delay and come back empty even though the identical query succeeds moments later — this shows up as `resource_utilization` averages being present on some AIBOMs and missing on others for no apparent reason.
 
+## Grafana Telemetry Retries
+
+`postprocess.py` queries Grafana immediately after the workload's pod completes. On some observability backends (e.g. a federated/multi-tenant Prometheus setup) there's a delay between a metric being scraped and it becoming queryable, so a query fired this soon can race that delay and come back empty even though the identical query succeeds moments later — this shows up as `resource_utilization` metrics being present on some AIBOMs and missing on others for no apparent reason, even though the Grafana Explore link (built from the same time range) always shows the underlying data once it lands.
+
+To absorb this, metrics with no data points are retried with a delay (`AIBOM_TELEMETRY_RETRY_ATTEMPTS`, default `3`; `AIBOM_TELEMETRY_RETRY_DELAY_S`, default `45` seconds between attempts) before being recorded as unavailable — only the metrics still missing on a given attempt are re-queried, not the whole batch.
+
+### Segmented Performance Stats
+
+Each telemetry metric (`gpu_utilization`, `gpu_memory_used`, `gpu_power`, `cpu_usage`, `memory_usage`, `network_receive`, `network_transmit`) is queried once as a Grafana **range** query, over the same cold-start-excluded window an averaged summary query would have used — there's no separate instant `avg_over_time` query per metric. `compute_metric_stats` (`postprocess.py`) then reduces that one range response to `min`/`max`/`avg`/`p95`, plus an `avg` over each of the run's first/middle/last thirds (`segments`), instead of collapsing straight to a single average. A flat average can't tell a run that held steady apart from one that started hot and throttled down, or one with a mid-run stall (a checkpoint pause, a data-loader stutter) — the three segments make that shape visible without storing the full series (which would make `resource_utilization`'s size scale with run duration, a bad fit given `spec` is immutable once the AIBOM CR is created).
+
+This lands in `resource_utilization` as a single `resource_utilization.metrics.<name>` object per metric, carrying the full `min`/`max`/`avg`/`p95`/`segments` breakdown. The earlier pre-segmentation flat fields (`avg_gpu_utilization_pct`, `avg_cpu_usage_cores`, etc.) have been removed from the AIBOM; `oc-aibom`'s sort/filter/diff logic reads `metrics.<name>.avg` instead (see `ResourceUtilization.MetricAvg` in `oc-aibom`). For a JobSet's sibling pods, `min`/`max` take the true extreme across all pods (a single pod's outlier is still real), while `avg`/`p95`/`segments` are averaged across pods — an approximation, since a true cross-pod percentile would need every pod's raw series merged first, which isn't worth the added complexity here.
+
+Full-resolution time-series data is deliberately not stored anywhere in the AIBOM — the Grafana Explore link remains the escape hatch for that level of detail.
+
 A pod with no detected GPU (`gpu_count` 0 or missing in its discovery data, e.g. `nvidia-smi` found no hardware) is skipped for telemetry entirely — there's no GPU utilization to query, so it's omitted rather than querying anyway. On a mock cluster (e.g. kind) with no real GPU hardware, `nvidia-smi` always reports zero GPUs, so every pod gets skipped and telemetry collection never runs at all. `--debug-telemetry-all-pods` (`debug.telemetryAllPods` chart value, plumbed to the postprocess Job as `AIBOM_DEBUG_TELEMETRY_ALL_PODS`) bypasses this check so telemetry is queried for every pod regardless of detected GPU count — for local testing only, not routine production use.
 
 ## Deploy Versioning (`--version`)
