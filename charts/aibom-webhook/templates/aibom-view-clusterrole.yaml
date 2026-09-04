@@ -1,0 +1,15 @@
+# Aggregates read access to AIBOM objects into the built-in view/edit/admin
+# ClusterRoles, so anyone who already has view/edit/admin in a namespace (e.g.
+# an OpenShift project owner) can see AIBOMs there with no separate grant —
+# the CRD carries no aggregation label of its own, so without this ClusterRole
+# a namespace admin has zero access to aiboms.aibom.io by default.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: aibom-view
+  labels:
+    rbac.authorization.k8s.io/aggregate-to-view: "true"
+rules:
+  - apiGroups: ["aibom.io"]
+    resources: ["aiboms"]
+    verbs: ["get", "list", "watch"]
