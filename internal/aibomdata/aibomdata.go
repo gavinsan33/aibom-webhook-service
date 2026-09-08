@@ -37,6 +37,22 @@ const (
 
 	// DiscoverySigningKeyDataKey is the key within that Secret's data map.
 	DiscoverySigningKeyDataKey = "hmac-key"
+
+	// WorkloadIdentitySuffix names the per-job ServiceAccount/Role/
+	// RoleBinding/Secret the webhook provisions at admission time (see
+	// internal/webhook/identity.go's ensureWorkloadIdentity) so the
+	// discovery init container -- and, where the app container's own
+	// standard-path token mount can be safely replaced, the app container
+	// too -- authenticate as an identity scoped via resourceNames to
+	// exactly this job's own data ConfigMap, instead of sharing whatever
+	// ServiceAccount the pod runs as (which also carries any image-pull or
+	// cloud IAM federation that identity needs, so it can't just be
+	// overridden). Only ever created for Job-owned pods, where triggerName
+	// is known at admission; bare GPU pods (e.g. KServe predictors) fall
+	// back to the broader namespace-wide aibom-workload-data Role, since
+	// their final pod name -- and so the ConfigMap this Role would need to
+	// name -- doesn't exist yet at admission time.
+	WorkloadIdentitySuffix = "-aibom-workload-identity"
 )
 
 // PostprocessJobName returns the deterministic postprocess Job name for a
@@ -59,4 +75,19 @@ func ConfigMapName(triggerName string) string {
 		name = strings.TrimRight(name[:253], "-")
 	}
 	return name
+}
+
+// WorkloadIdentityName returns the deterministic name for the per-job
+// ServiceAccount/Role/RoleBinding/Secret quartet, truncated to fit
+// Kubernetes' 63-character name limit (ServiceAccount names, like Job
+// names, are also used as label values elsewhere, so this uses the same
+// stricter limit as PostprocessJobName rather than the 253-character limit
+// ConfigMapName gets away with).
+func WorkloadIdentityName(triggerName string) string {
+	maxBase := MaxJobNameLength - len(WorkloadIdentitySuffix)
+	if len(triggerName) > maxBase {
+		triggerName = triggerName[:maxBase]
+	}
+	triggerName = strings.TrimRight(triggerName, "-")
+	return triggerName + WorkloadIdentitySuffix
 }
