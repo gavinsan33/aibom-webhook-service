@@ -43,11 +43,12 @@ spec:
             - --postprocess-image={{ .Values.image.postprocess.repository }}:{{ .Values.image.postprocess.tag }}
             - --discovery-image={{ .Values.image.discovery.repository }}:{{ .Values.image.discovery.tag }}
             - --enable-watcher={{ .Values.watcher.enabled }}
-            - --prometheus-url={{ .Values.prometheus.url }}
-            - --grafana-url={{ .Values.grafana.url }}
-            - --grafana-datasource-uid={{ .Values.grafana.datasourceUid }}
-            - --debug-keep-postprocess-jobs={{ .Values.debug.keepPostprocessJobs }}
-            - --debug-telemetry-all-pods={{ .Values.debug.telemetryAllPods }}
+            # Matches this Deployment's own serviceAccountName above -- the
+            # watcher (running in this same binary) creates postprocess Jobs
+            # as this identity, so the webhook can verify a Job claiming
+            # aibom.io/postprocess-for was actually created by the watcher
+            # and not a workload spoofing the label. See jobguard.go.
+            - --trusted-watcher-identity=system:serviceaccount:{{ include "aibom-webhook.namespace" . }}:aibom-webhook
           volumeMounts:
             - name: certs
               mountPath: /certs
