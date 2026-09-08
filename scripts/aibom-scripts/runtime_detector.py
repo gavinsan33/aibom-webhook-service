@@ -17,7 +17,14 @@ and peft.LoraConfig -- catching model/training config for scripts that build the
 objects directly in Python, with no corresponding CLI flags for postprocess.py's
 command-line detectors to see.
 
-Writes detected metadata to $AIBOM_DATASET_OUTPUT (default: /results/dataset_detected.json).
+Writes detected metadata to $AIBOM_DATASET_OUTPUT (default: /results/dataset_detected.json)
+only -- this process never talks to the Kubernetes API. The aibom-dataset-sidecar
+container (dataset_sidecar.py) reads and signs that file and performs the actual
+ConfigMap write from a process this application container doesn't control (#47) --
+previously this module wrote directly to the ConfigMap itself using whatever
+credentials the webhook gave the pod, which meant a compromised or malicious
+training script could forge dataset-<pod-name>.json with a syntactically valid
+(if meaningless) write of its own.
 
 All hooks are fault-tolerant — detection failures never interrupt training.
 """
@@ -31,18 +38,10 @@ import threading
 import traceback
 import weakref
 
-try:
-    import k8s_api
-except ImportError:
-    k8s_api = None
-
 _OUTPUT_PATH = os.environ.get(
     "AIBOM_DATASET_OUTPUT", "/results/dataset_detected.json"
 )
 _DEBUG = os.environ.get("AIBOM_DEBUG", "0") == "1"
-_POD_NAME = os.environ.get("POD_NAME", "")
-_POD_NAMESPACE = os.environ.get("POD_NAMESPACE", "")
-_DATA_CONFIGMAP = k8s_api.resolve_data_configmap_name() if k8s_api else ""
 
 
 def _dbg(msg):
@@ -340,21 +339,10 @@ def _flush():
         with open(_OUTPUT_PATH, "w") as f:
             json.dump(output, f, indent=2, default=str)
         _dbg(f"Flush succeeded: {_OUTPUT_PATH} ({len(existing_ds)} datasets)")
-
-        # Write directly into the AIBOM data ConfigMap the webhook told us
-        # about, rather than printing to stdout for the watcher to scrape.
-        if k8s_api and _POD_NAME and _POD_NAMESPACE and _DATA_CONFIGMAP:
-            try:
-                k8s_api.patch_configmap(
-                    _POD_NAMESPACE,
-                    _DATA_CONFIGMAP,
-                    {f"dataset-{_POD_NAME}.json": json.dumps(output, default=str)},
-                )
-                _dbg(f"Wrote dataset data to ConfigMap {_DATA_CONFIGMAP}")
-            except Exception:
-                _dbg_exc("_flush (ConfigMap write)")
-        else:
-            _dbg("POD_NAME/POD_NAMESPACE/AIBOM_DATA_CONFIGMAP not set, skipping ConfigMap write")
+        # The ConfigMap write itself now happens in the aibom-dataset-sidecar
+        # container (dataset_sidecar.py), which watches this file from
+        # outside this process's control and signs what it reads -- see the
+        # module docstring above and #47.
     except Exception:
         _dbg_exc("_flush")
 
