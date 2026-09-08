@@ -36,6 +36,20 @@ func main() {
 	defer cancel()
 
 	mutator := webhook.NewMutator(cfg.DiscoveryImage, cfg.DatasetDetection)
+
+	// Built unconditionally (not gated on cfg.EnableWatcher) since the
+	// mutator itself now needs a clientset too, to provision per-job
+	// workload identities at admission time (see identity.go's
+	// ensureWorkloadIdentity). A failure here degrades both the watcher and
+	// identity provisioning the same way: logged, and Mutate falls back to
+	// each pod's own ServiceAccount rather than blocking admission.
+	clientset, err := buildClientset()
+	if err != nil {
+		log.Printf("WARNING: failed to create Kubernetes clientset, watcher and per-job identity provisioning disabled: %v", err)
+	} else {
+		mutator.Clientset = clientset
+	}
+
 	handler := webhook.NewHandler(mutator)
 
 	mux := http.NewServeMux()
@@ -62,23 +76,13 @@ func main() {
 		}
 	}()
 
-	if cfg.EnableWatcher {
-		restConfig, err := buildRestConfig()
-		if err != nil {
-			log.Printf("WARNING: failed to create Kubernetes client, watcher disabled: %v", err)
-		} else {
-			clientset, err := kubernetes.NewForConfig(restConfig)
-			if err != nil {
-				log.Printf("WARNING: failed to create Kubernetes clientset, watcher disabled: %v", err)
-			} else {
-				w := watcher.New(clientset, cfg.PostprocessImage)
-				go func() {
-					if err := w.Start(ctx); err != nil {
-						log.Printf("watcher error: %v", err)
-					}
-				}()
+	if cfg.EnableWatcher && clientset != nil {
+		w := watcher.New(clientset, cfg.PostprocessImage)
+		go func() {
+			if err := w.Start(ctx); err != nil {
+				log.Printf("watcher error: %v", err)
 			}
-		}
+		}()
 	}
 
 	<-stop
@@ -92,6 +96,14 @@ func main() {
 		log.Fatalf("shutdown error: %v", err)
 	}
 	log.Println("server stopped")
+}
+
+func buildClientset() (*kubernetes.Clientset, error) {
+	restConfig, err := buildRestConfig()
+	if err != nil {
+		return nil, err
+	}
+	return kubernetes.NewForConfig(restConfig)
 }
 
 func buildRestConfig() (*rest.Config, error) {
