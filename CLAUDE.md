@@ -8,6 +8,8 @@ Pods are matched if they are owned by a Job, JobSet, PyTorchJob, or RayJob, **or
 
 For long-running pods with no Job owner (e.g. KServe `InferenceService` predictor pods, owned by a ReplicaSet and never "complete"), the watcher triggers on the pod's deletion via a separate pod-level finalizer instead of Job completion.
 
+Matching never consults an `aibom.io/instrumented` value already present on the incoming pod — only owner kind and GPU resource requests, neither of which a requester can spoof away. The `MutatingWebhookConfiguration` only matches `CREATE` with `reinvocationPolicy: Never`, so there's no legitimate scenario where this label is already `"true"` on a fresh admission; trusting it would let a workload dodge instrumentation entirely just by pre-setting the label the webhook itself would otherwise add. For the same reason, a pod that doesn't qualify has any workload-supplied `aibom.io/instrumented`/`aibom.io/instrumented-by` stripped rather than left in place — otherwise the watcher's `aibom.io/instrumented=true` selector could be tricked into compiling an AIBOM for a workload that was never actually instrumented.
+
 Dataset detector's `k8s_api` import is wrapped in a soft `try/except ImportError` — since it runs inside the user's own application container, a missing/stale mount degrades to "no dataset detection" instead of crashing the user's training process at Python startup.
 
 ### Discovery Data Signing
