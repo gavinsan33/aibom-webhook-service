@@ -11,7 +11,6 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -55,7 +54,7 @@ const workloadIdentityTokenSecretKey = "token"
 // ServiceAccount for this write path (this service fails open -- see
 // failurePolicy: Ignore in the webhook configuration -- so a Kubernetes API
 // hiccup here must never block pod admission).
-func ensureWorkloadIdentity(ctx context.Context, clientset kubernetes.Interface, namespace, triggerName, configMapName string, ownerRef metav1.OwnerReference) (secretName string, err error) {
+func ensureWorkloadIdentity(ctx context.Context, clientset kubernetes.Interface, namespace, triggerName, configMapName string) (secretName string, err error) {
 	name := aibomdata.WorkloadIdentityName(triggerName)
 
 	if err := ensureConfigMap(ctx, clientset, namespace, configMapName); err != nil {
@@ -85,7 +84,7 @@ func ensureWorkloadIdentity(ctx context.Context, clientset kubernetes.Interface,
 		existing = nil
 	}
 
-	token, err := requestServiceAccountToken(ctx, clientset, namespace, name, ownerRef)
+	token, err := requestServiceAccountToken(ctx, clientset, namespace, name)
 	if err != nil {
 		return "", fmt.Errorf("request token for %s/%s: %w", namespace, name, err)
 	}
@@ -160,25 +159,21 @@ func ensureRoleBinding(ctx context.Context, clientset kubernetes.Interface, name
 }
 
 // requestServiceAccountToken mints a token for the given ServiceAccount via
-// the TokenRequest API. BoundObjectRef is set to the pod's owning Job (etc.)
-// purely for audit/descriptive purposes -- Kubernetes only enforces live
-// bound-object-existence checks for Pod/Secret references, not arbitrary
-// Kinds, so this does not by itself invalidate the token when the Job is
-// deleted. What does invalidate it is the ServiceAccount deletion in
-// watcher.go's collectAIBOM: every token's validity is always tied to its
-// issuing ServiceAccount still existing, independent of BoundObjectRef.
-func requestServiceAccountToken(ctx context.Context, clientset kubernetes.Interface, namespace, saName string, ownerRef metav1.OwnerReference) (string, error) {
+// the TokenRequest API, bounded only by WorkloadIdentityTokenTTL -- no
+// BoundObjectRef. The apiserver only accepts BoundObjectRef.Kind values of
+// "Pod" or "Secret" (anything else, including the owning Job this identity
+// is for, is rejected outright: "cannot bind token to object of type
+// batch/v1, Kind=Job"), and the pod doesn't exist as an object we could
+// bind to yet at admission time anyway. Real invalidation instead comes
+// from the ServiceAccount deletion in watcher.go's collectAIBOM: every
+// token's validity is always tied to its issuing ServiceAccount still
+// existing, independent of any BoundObjectRef.
+func requestServiceAccountToken(ctx context.Context, clientset kubernetes.Interface, namespace, saName string) (string, error) {
 	expirationSeconds := int64(WorkloadIdentityTokenTTL.Seconds())
 	tr := &authenticationv1.TokenRequest{
 		ObjectMeta: metav1.ObjectMeta{Name: saName},
 		Spec: authenticationv1.TokenRequestSpec{
 			ExpirationSeconds: &expirationSeconds,
-			BoundObjectRef: &authenticationv1.BoundObjectReference{
-				Kind:       ownerRef.Kind,
-				APIVersion: ownerRef.APIVersion,
-				Name:       ownerRef.Name,
-				UID:        types.UID(ownerRef.UID),
-			},
 		},
 	}
 	result, err := clientset.CoreV1().ServiceAccounts(namespace).CreateToken(ctx, saName, tr, metav1.CreateOptions{})

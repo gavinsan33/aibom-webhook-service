@@ -29,20 +29,11 @@ func newFakeClientsetWithTokens() *fake.Clientset {
 	return clientset
 }
 
-func testOwnerRef() metav1.OwnerReference {
-	return metav1.OwnerReference{
-		APIVersion: "batch/v1",
-		Kind:       "Job",
-		Name:       "train-job",
-		UID:        "job-uid-1",
-	}
-}
-
 func TestEnsureWorkloadIdentityProvisionsAllResources(t *testing.T) {
 	clientset := newFakeClientsetWithTokens()
 	ctx := context.Background()
 
-	secretName, err := ensureWorkloadIdentity(ctx, clientset, "ns1", "train-job", "train-job-aibom-postprocess-data", testOwnerRef())
+	secretName, err := ensureWorkloadIdentity(ctx, clientset, "ns1", "train-job", "train-job-aibom-postprocess-data")
 	if err != nil {
 		t.Fatalf("ensureWorkloadIdentity() error = %v", err)
 	}
@@ -86,10 +77,10 @@ func TestEnsureWorkloadIdentityIsIdempotent(t *testing.T) {
 	clientset := newFakeClientsetWithTokens()
 	ctx := context.Background()
 
-	if _, err := ensureWorkloadIdentity(ctx, clientset, "ns1", "train-job", "train-job-aibom-postprocess-data", testOwnerRef()); err != nil {
+	if _, err := ensureWorkloadIdentity(ctx, clientset, "ns1", "train-job", "train-job-aibom-postprocess-data"); err != nil {
 		t.Fatalf("first ensureWorkloadIdentity() error = %v", err)
 	}
-	secretName, err := ensureWorkloadIdentity(ctx, clientset, "ns1", "train-job", "train-job-aibom-postprocess-data", testOwnerRef())
+	secretName, err := ensureWorkloadIdentity(ctx, clientset, "ns1", "train-job", "train-job-aibom-postprocess-data")
 	if err != nil {
 		t.Fatalf("second ensureWorkloadIdentity() error = %v", err)
 	}
@@ -103,10 +94,10 @@ func TestEnsureWorkloadIdentityScopesDifferentJobsToDifferentConfigMaps(t *testi
 	clientset := newFakeClientsetWithTokens()
 	ctx := context.Background()
 
-	if _, err := ensureWorkloadIdentity(ctx, clientset, "ns1", "job-a", "job-a-aibom-postprocess-data", testOwnerRef()); err != nil {
+	if _, err := ensureWorkloadIdentity(ctx, clientset, "ns1", "job-a", "job-a-aibom-postprocess-data"); err != nil {
 		t.Fatalf("ensureWorkloadIdentity(job-a) error = %v", err)
 	}
-	if _, err := ensureWorkloadIdentity(ctx, clientset, "ns1", "job-b", "job-b-aibom-postprocess-data", testOwnerRef()); err != nil {
+	if _, err := ensureWorkloadIdentity(ctx, clientset, "ns1", "job-b", "job-b-aibom-postprocess-data"); err != nil {
 		t.Fatalf("ensureWorkloadIdentity(job-b) error = %v", err)
 	}
 

@@ -8,7 +8,6 @@ import (
 	"github.com/gavinsan33/aibom-webhook-service/internal/aibomdata"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -171,18 +170,6 @@ func hasMatchingOwner(pod *corev1.Pod) bool {
 	return false
 }
 
-// matchingOwnerRef returns the same owner hasMatchingOwner/triggerName key
-// off of, but as a full OwnerReference (Kind/APIVersion/UID included) for
-// ensureWorkloadIdentity's TokenRequest BoundObjectRef.
-func matchingOwnerRef(pod *corev1.Pod) (metav1.OwnerReference, bool) {
-	for _, ref := range pod.OwnerReferences {
-		if matchedOwnerKinds[ref.Kind] {
-			return ref, true
-		}
-	}
-	return metav1.OwnerReference{}, false
-}
-
 // ensurePodWorkloadIdentity provisions a per-job identity for pod (see
 // identity.go's ensureWorkloadIdentity) and returns the Secret name to
 // mount as this pod's token, or "" if that isn't applicable -- no
@@ -197,13 +184,12 @@ func (m *Mutator) ensurePodWorkloadIdentity(pod *corev1.Pod) string {
 	if m.Clientset == nil {
 		return ""
 	}
-	ownerRef, ok := matchingOwnerRef(pod)
-	if !ok {
+	if !hasMatchingOwner(pod) {
 		return ""
 	}
 	trigger := triggerName(pod)
 	configMapName := aibomdata.ConfigMapName(trigger)
-	secretName, err := ensureWorkloadIdentity(context.Background(), m.Clientset, pod.Namespace, trigger, configMapName, ownerRef)
+	secretName, err := ensureWorkloadIdentity(context.Background(), m.Clientset, pod.Namespace, trigger, configMapName)
 	if err != nil {
 		log.Printf("warning: could not provision per-job workload identity for %s/%s (job %s): %v; falling back to shared ServiceAccount token", pod.Namespace, pod.Name, trigger, err)
 		return ""
