@@ -1023,6 +1023,130 @@ func TestPostprocessKeepsUnverifiedStorageWhenNoSigningKeyConfigured(t *testing.
 	}
 }
 
+func datasetSigningSecret(namespace string, key []byte) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      aibomdata.DatasetSigningKeySecretName,
+			Namespace: namespace,
+		},
+		Data: map[string][]byte{aibomdata.DatasetSigningKeyDataKey: key},
+	}
+}
+
+// TestPostprocessDropsForgedDatasetData is the #47 counterpart to
+// TestPostprocessDropsForgedDiscoveryData: dataset-<pod>.json is signed by
+// dataset_sidecar.py using its own separate key (not the discovery one --
+// see aibomdata.DatasetSigningKeySecretName), so a pod's data with no
+// matching valid .sig must not survive into the aggregate dataset.json.
+func TestPostprocessDropsForgedDatasetData(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	now := metav1.Now()
+	pod := instrumentedBarePod("web-pod", "test-ns")
+	pod.Finalizers = []string{podFinalizerName}
+	pod.DeletionTimestamp = &now
+
+	key := []byte("dataset-shared-secret")
+	secret := datasetSigningSecret("test-ns", key)
+	forgedDataset := `{"datasets":[{"dataset_name":"forged-dataset"}]}`
+	dataConfigMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pod.Name + "-aibom-postprocess-data",
+			Namespace: "test-ns",
+		},
+		Data: map[string]string{
+			fmt.Sprintf("dataset-%s.json", pod.Name): forgedDataset,
+			fmt.Sprintf("dataset-%s.sig", pod.Name):  "not-a-real-signature",
+		},
+	}
+
+	client := fake.NewSimpleClientset(ns, pod, dataConfigMap, secret)
+	w := New(client, "aibom-postprocess:latest")
+	startWatcher(t, w)
+
+	w.onPodEvent(pod)
+
+	cm, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), pod.Name+"-aibom-postprocess-data", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("data configmap not found: %v", err)
+	}
+	if cm.Data["dataset.json"] != "{}" {
+		t.Errorf("expected forged dataset data to be dropped, got dataset.json = %q", cm.Data["dataset.json"])
+	}
+}
+
+// TestPostprocessKeepsValidlySignedDatasetData is the companion positive case.
+func TestPostprocessKeepsValidlySignedDatasetData(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	now := metav1.Now()
+	pod := instrumentedBarePod("web-pod", "test-ns")
+	pod.Finalizers = []string{podFinalizerName}
+	pod.DeletionTimestamp = &now
+
+	key := []byte("dataset-shared-secret")
+	secret := datasetSigningSecret("test-ns", key)
+	genuineDataset := `{"datasets":[{"dataset_name":"tatsu-lab/alpaca"}]}`
+	dataConfigMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pod.Name + "-aibom-postprocess-data",
+			Namespace: "test-ns",
+		},
+		Data: map[string]string{
+			fmt.Sprintf("dataset-%s.json", pod.Name): genuineDataset,
+			fmt.Sprintf("dataset-%s.sig", pod.Name):  hmacHex(t, key, genuineDataset),
+		},
+	}
+
+	client := fake.NewSimpleClientset(ns, pod, dataConfigMap, secret)
+	w := New(client, "aibom-postprocess:latest")
+	startWatcher(t, w)
+
+	w.onPodEvent(pod)
+
+	cm, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), pod.Name+"-aibom-postprocess-data", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("data configmap not found: %v", err)
+	}
+	if !strings.Contains(cm.Data["dataset.json"], "tatsu-lab/alpaca") {
+		t.Errorf("expected genuine dataset data to survive verification, got dataset.json = %q", cm.Data["dataset.json"])
+	}
+}
+
+// TestPostprocessKeepsUnverifiedDatasetWhenNoSigningKeyConfigured mirrors
+// the gradual-rollout case for dataset data.
+func TestPostprocessKeepsUnverifiedDatasetWhenNoSigningKeyConfigured(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	now := metav1.Now()
+	pod := instrumentedBarePod("web-pod", "test-ns")
+	pod.Finalizers = []string{podFinalizerName}
+	pod.DeletionTimestamp = &now
+
+	unsignedDataset := `{"datasets":[{"dataset_name":"tatsu-lab/alpaca"}]}`
+	dataConfigMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pod.Name + "-aibom-postprocess-data",
+			Namespace: "test-ns",
+		},
+		Data: map[string]string{
+			fmt.Sprintf("dataset-%s.json", pod.Name): unsignedDataset,
+		},
+	}
+
+	// Deliberately no datasetSigningSecret in the fake clientset.
+	client := fake.NewSimpleClientset(ns, pod, dataConfigMap)
+	w := New(client, "aibom-postprocess:latest")
+	startWatcher(t, w)
+
+	w.onPodEvent(pod)
+
+	cm, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), pod.Name+"-aibom-postprocess-data", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("data configmap not found: %v", err)
+	}
+	if !strings.Contains(cm.Data["dataset.json"], "tatsu-lab/alpaca") {
+		t.Errorf("expected unsigned dataset data to pass through when no signing key is configured, got dataset.json = %q", cm.Data["dataset.json"])
+	}
+}
+
 func hmacHex(t *testing.T, key []byte, payload string) string {
 	t.Helper()
 	mac := hmac.New(sha256.New, key)
