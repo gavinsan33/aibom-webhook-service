@@ -14,9 +14,15 @@ rules:
   - apiGroups: [""]
     resources: ["namespaces"]
     verbs: ["list", "watch"]
+  # "patch" is needed even though this process only ever does Get+Update on
+  # ConfigMaps itself (see watcher.go) -- ensureWorkloadIdentity grants
+  # "patch" to each per-job Role (matching what k8s_api.py's workloads
+  # actually call), and Kubernetes' RBAC escalation check refuses to let an
+  # identity grant a verb it doesn't itself hold, even on a Role it's about
+  # to scope down via resourceNames.
   - apiGroups: [""]
     resources: ["configmaps"]
-    verbs: ["get", "create", "update", "delete"]
+    verbs: ["get", "create", "update", "patch", "delete"]
   # jobs: list/watch back the Job informer; create/patch/delete are used directly
   # for postprocess Job lifecycle and finalizer management. No direct Get/Update call exists.
   - apiGroups: ["batch"]
