@@ -474,7 +474,8 @@ setup-namespace *args: _check-auth
         "${monitoring_args[@]}" \
         --set-file scripts.generateSnapshot=scripts/aibom-scripts/generate_snapshot.py \
         --set-file scripts.runtimeDetector=scripts/aibom-scripts/runtime_detector.py \
-        --set-file scripts.k8sApi=scripts/aibom-scripts/k8s_api.py
+        --set-file scripts.k8sApi=scripts/aibom-scripts/k8s_api.py \
+        --set-file scripts.datasetSidecar=scripts/aibom-scripts/dataset_sidecar.py
 
 # Reverses `just setup-namespace`: uninstalls the aibom-ns-<namespace> release
 # (removing the image-puller RoleBinding, aibom-scripts ConfigMap, aibom-postprocess
@@ -559,7 +560,8 @@ chart-push *args:
     rm -rf charts/aibom-workload-namespace/files
     mkdir -p charts/aibom-workload-namespace/files
     cp scripts/aibom-scripts/generate_snapshot.py scripts/aibom-scripts/runtime_detector.py \
-        scripts/aibom-scripts/k8s_api.py charts/aibom-workload-namespace/files/
+        scripts/aibom-scripts/k8s_api.py scripts/aibom-scripts/dataset_sidecar.py \
+        charts/aibom-workload-namespace/files/
     sha="$(git rev-parse --short HEAD)"
     git diff --quiet HEAD || sha="${sha}-dirty"
     for chart in aibom-webhook aibom-workload-namespace; do
