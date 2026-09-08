@@ -22,6 +22,26 @@ subjects:
     name: aibom-postprocess
     namespace: {{ .Release.Namespace }}
 ---
+#
+# aibom-workload-data grants every ServiceAccount in the namespace broad
+# create/get/patch access to all ConfigMaps -- historically the only way a
+# pod's discovery init container or app container could write into its
+# data ConfigMap, but also letting any pod tamper with any other job's
+# ConfigMap in this namespace (#43).
+#
+# For a Job-owned pod (Job/JobSet/PyTorchJob/RayJob -- see mutator.go's
+# matchedOwnerKinds), this Role is no longer what's actually used: the
+# webhook now provisions a per-job ServiceAccount/Role/RoleBinding at
+# admission time, scoped via resourceNames to exactly that job's own data
+# ConfigMap (see internal/webhook/identity.go's ensureWorkloadIdentity),
+# and mounts a token for it in place of the pod's own ServiceAccount
+# wherever this webhook controls the mount. This broad Role remains only
+# as the fallback for bare GPU pods with no matching owner (e.g. a KServe
+# predictor pod owned by a ReplicaSet) -- their final pod name, and so the
+# ConfigMap name a per-pod Role would need to be scoped to, doesn't exist
+# yet at admission time (pods created via generateName), so no
+# equivalently-scoped alternative is possible there. That residual gap is
+# accepted, not solved, by this Role's continued existence.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
