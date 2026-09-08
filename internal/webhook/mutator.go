@@ -1,11 +1,15 @@
 package webhook
 
 import (
+	"context"
 	"fmt"
+	"log"
 
 	"github.com/gavinsan33/aibom-webhook-service/internal/aibomdata"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 )
 
 var matchedOwnerKinds = map[string]bool{
@@ -18,6 +22,14 @@ var matchedOwnerKinds = map[string]bool{
 type Mutator struct {
 	DiscoveryImage   string
 	DatasetDetection bool
+
+	// Clientset, if set, lets Mutate provision a per-job workload identity
+	// (see identity.go's ensureWorkloadIdentity) scoped to exactly this
+	// job's own data ConfigMap. Left nil in tests that don't exercise this
+	// path and treated the same as any other identity-provisioning failure:
+	// Mutate falls back to the pod's own (shared, namespace-wide) identity
+	// rather than failing admission.
+	Clientset kubernetes.Interface
 }
 
 type PatchOperation struct {
@@ -40,6 +52,15 @@ func (m *Mutator) Mutate(pod *corev1.Pod) ([]PatchOperation, error) {
 
 	var patches []PatchOperation
 
+	// Provision (or fall back from) a per-job identity scoped to exactly
+	// this job's own data ConfigMap -- see ensurePodWorkloadIdentity and
+	// identity.go's ensureWorkloadIdentity. identitySecretName is "" when
+	// this pod has no owner with a name known at admission time (e.g. a
+	// bare KServe predictor pod) or provisioning failed, in which case
+	// buildTokenVolume below falls back to today's behavior: a projected
+	// token for the pod's own (shared, namespace-wide) ServiceAccount.
+	identitySecretName := m.ensurePodWorkloadIdentity(pod)
+
 	// Add aibom-data emptyDir volume
 	patches = appendVolume(patches, pod, buildAIBOMVolume())
 
@@ -49,7 +70,7 @@ func (m *Mutator) Mutate(pod *corev1.Pod) ([]PatchOperation, error) {
 	// Add our own Kubernetes API token volume — see buildTokenVolume's doc
 	// comment for why the pod's own (possibly absent) automounted token
 	// can't be relied on for containers this webhook adds.
-	patches = appendVolume(patches, pod, buildTokenVolume())
+	patches = appendVolume(patches, pod, buildTokenVolume(identitySecretName))
 
 	// Add the discovery signing key volume — mounted only into the discovery
 	// init container below (buildDiscoveryInitContainer), never into an app
@@ -75,7 +96,7 @@ func (m *Mutator) Mutate(pod *corev1.Pod) ([]PatchOperation, error) {
 	// Inject dataset detector into application containers
 	if m.DatasetDetection {
 		for i := range pod.Spec.Containers {
-			patches = append(patches, m.buildDatasetDetectorPatches(pod, i)...)
+			patches = append(patches, m.buildDatasetDetectorPatches(pod, i, identitySecretName)...)
 		}
 	}
 
@@ -148,6 +169,46 @@ func hasMatchingOwner(pod *corev1.Pod) bool {
 		}
 	}
 	return false
+}
+
+// matchingOwnerRef returns the same owner hasMatchingOwner/triggerName key
+// off of, but as a full OwnerReference (Kind/APIVersion/UID included) for
+// ensureWorkloadIdentity's TokenRequest BoundObjectRef.
+func matchingOwnerRef(pod *corev1.Pod) (metav1.OwnerReference, bool) {
+	for _, ref := range pod.OwnerReferences {
+		if matchedOwnerKinds[ref.Kind] {
+			return ref, true
+		}
+	}
+	return metav1.OwnerReference{}, false
+}
+
+// ensurePodWorkloadIdentity provisions a per-job identity for pod (see
+// identity.go's ensureWorkloadIdentity) and returns the Secret name to
+// mount as this pod's token, or "" if that isn't applicable -- no
+// Clientset configured, or the pod has no owner whose name is known at
+// admission time (see dataConfigMapEnvVar's doc comment: a bare pod's own
+// name doesn't exist yet when it's created via generateName) -- or
+// provisioning failed. Any failure here is logged and swallowed, never
+// returned as a Mutate error: this service fails open (failurePolicy:
+// Ignore), and a Kubernetes API hiccup while provisioning RBAC must not
+// block the pod it's trying to instrument.
+func (m *Mutator) ensurePodWorkloadIdentity(pod *corev1.Pod) string {
+	if m.Clientset == nil {
+		return ""
+	}
+	ownerRef, ok := matchingOwnerRef(pod)
+	if !ok {
+		return ""
+	}
+	trigger := triggerName(pod)
+	configMapName := aibomdata.ConfigMapName(trigger)
+	secretName, err := ensureWorkloadIdentity(context.Background(), m.Clientset, pod.Namespace, trigger, configMapName, ownerRef)
+	if err != nil {
+		log.Printf("warning: could not provision per-job workload identity for %s/%s (job %s): %v; falling back to shared ServiceAccount token", pod.Namespace, pod.Name, trigger, err)
+		return ""
+	}
+	return secretName
 }
 
 // triggerName returns the identity the watcher will later use to name the
@@ -259,7 +320,7 @@ func podGPUResource(pod *corev1.Pod) *resource.Quantity {
 // buildDatasetDetectorPatches creates JSON patches to inject dataset detection
 // into a specific application container. It adds env vars for activation and
 // mounts the detector script as usercustomize.py so Python auto-imports it.
-func (m *Mutator) buildDatasetDetectorPatches(pod *corev1.Pod, containerIdx int) []PatchOperation {
+func (m *Mutator) buildDatasetDetectorPatches(pod *corev1.Pod, containerIdx int, identitySecretName string) []PatchOperation {
 	var patches []PatchOperation
 	container := &pod.Spec.Containers[containerIdx]
 
@@ -343,9 +404,27 @@ func (m *Mutator) buildDatasetDetectorPatches(pod *corev1.Pod, containerIdx int)
 	// built-in ServiceAccount admission controller already mounted a token
 	// at this same path before our webhook ran, and a second volumeMount at
 	// an identical path fails pod admission outright.
-	if !hasVolumeMountAtPath(container.VolumeMounts, aibomTokenVolumeMount().MountPath) {
+	existingTokenMountIdx := volumeMountIndexAtPath(container.VolumeMounts, aibomTokenVolumeMount().MountPath)
+	switch {
+	case existingTokenMountIdx == -1:
 		mounts = append(mounts, aibomTokenVolumeMount())
+	case identitySecretName != "":
+		// A per-job identity was provisioned (see ensurePodWorkloadIdentity),
+		// so the built-in default-SA mount already occupying this path would
+		// otherwise leave this container able to fall back to its own
+		// (broader, namespace-wide) ServiceAccount for ConfigMap writes,
+		// defeating the point of scoping this identity to one job's
+		// ConfigMap in the first place. Retarget it to our volume instead of
+		// leaving it in place.
+		patches = append(patches, PatchOperation{
+			Op:    "replace",
+			Path:  fmt.Sprintf("/spec/containers/%d/volumeMounts/%d/name", containerIdx, existingTokenMountIdx),
+			Value: aibomTokenVolumeMount().Name,
+		})
 	}
+	// else: no per-job identity available (bare pod, no Clientset, or
+	// provisioning failed) -- leave the pre-existing default-SA mount alone,
+	// same as today.
 
 	mountPath := fmt.Sprintf("/spec/containers/%d/volumeMounts", containerIdx)
 	if len(container.VolumeMounts) == 0 {
@@ -408,19 +487,39 @@ func buildScriptsVolume() corev1.Volume {
 // if it has an explicit volumeMount naming a token volume. Without this,
 // k8s_api.py (used by both generate_snapshot.py and runtime_detector.py) has
 // no token to authenticate with at all.
-func buildTokenVolume() corev1.Volume {
-	expirationSeconds := int64(3600)
+//
+// identitySecretName, when non-empty, swaps the first source from a
+// ServiceAccountTokenProjection (necessarily for the pod's own
+// spec.serviceAccountName — see ensurePodWorkloadIdentity's doc comment for
+// why that identity can't just be overridden) to a SecretProjection reading
+// the token ensureWorkloadIdentity minted for a per-job identity scoped to
+// exactly this job's data ConfigMap. Either way the result lands at the
+// same "token" path, so k8s_api.py doesn't need to know which one it got.
+func buildTokenVolume(identitySecretName string) corev1.Volume {
+	var tokenSource corev1.VolumeProjection
+	if identitySecretName != "" {
+		tokenSource = corev1.VolumeProjection{
+			Secret: &corev1.SecretProjection{
+				LocalObjectReference: corev1.LocalObjectReference{Name: identitySecretName},
+				Items:                []corev1.KeyToPath{{Key: workloadIdentityTokenSecretKey, Path: "token"}},
+			},
+		}
+	} else {
+		expirationSeconds := int64(3600)
+		tokenSource = corev1.VolumeProjection{
+			ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
+				Path:              "token",
+				ExpirationSeconds: &expirationSeconds,
+			},
+		}
+	}
+
 	return corev1.Volume{
 		Name: "aibom-token",
 		VolumeSource: corev1.VolumeSource{
 			Projected: &corev1.ProjectedVolumeSource{
 				Sources: []corev1.VolumeProjection{
-					{
-						ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
-							Path:              "token",
-							ExpirationSeconds: &expirationSeconds,
-						},
-					},
+					tokenSource,
 					{
 						ConfigMap: &corev1.ConfigMapProjection{
 							LocalObjectReference: corev1.LocalObjectReference{Name: "kube-root-ca.crt"},
@@ -477,13 +576,15 @@ func discoverySigningKeyVolumeMount() corev1.VolumeMount {
 	}
 }
 
-func hasVolumeMountAtPath(mounts []corev1.VolumeMount, path string) bool {
-	for _, m := range mounts {
+// volumeMountIndexAtPath returns the index of the volumeMount in mounts
+// whose MountPath matches path, or -1 if none does.
+func volumeMountIndexAtPath(mounts []corev1.VolumeMount, path string) int {
+	for i, m := range mounts {
 		if m.MountPath == path {
-			return true
+			return i
 		}
 	}
-	return false
+	return -1
 }
 
 // appendVolume adds a volume patch, handling nil vs existing volumes array.
