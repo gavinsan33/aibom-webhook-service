@@ -1,8 +1,8 @@
 # Single-GPU LoRA fine-tuning example that pulls its training code from
-# GitHub at runtime instead of baking it into the image or invoking a
-# pip-installed CLI -- exercises the git-provenance detection layers
-# described in CLAUDE.md's Git Provenance Detection section, rather than the
-# model/dataset auto-detection the other examples focus on.
+# GitHub at runtime instead of baking it into the image or using a
+# separately pip-installed release -- exercises the git-provenance detection
+# layers described in CLAUDE.md's Git Provenance Detection section, rather
+# than the model/dataset auto-detection the other examples focus on.
 #
 # The container clones huggingface/trl at pod startup and runs its
 # trl/scripts/sft.py directly against the cloned checkout (installed
