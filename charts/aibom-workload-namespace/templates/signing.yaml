@@ -53,3 +53,49 @@ subjects:
   - kind: ServiceAccount
     name: aibom-webhook
     namespace: {{ .Values.aibomSystemNamespace }}
+---
+# HMAC-SHA256 key used to sign dataset-<pod-name>.json before it's written
+# to the data ConfigMap by the aibom-dataset-sidecar container, and
+# verified by the watcher before that pod's dataset data is trusted enough
+# to merge into the aggregate dataset.json. Deliberately a separate Secret
+# from aibom-discovery-hmac-key above, not a reused key: the sidecar and
+# the discovery init container are different processes with different
+# inputs, so a compromise of one shouldn't need to also invalidate trust in
+# data signed by the other (#47). Mounted only into the dataset sidecar
+# (see mutator.go's buildDatasetSigningKeyVolume) -- never into the
+# workload's own application container, or the discovery init container.
+{{- $datasetSecretName := "aibom-dataset-hmac-key" }}
+{{- $existingDataset := lookup "v1" "Secret" .Release.Namespace $datasetSecretName }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $datasetSecretName }}
+  namespace: {{ .Release.Namespace }}
+type: Opaque
+data:
+  hmac-key: {{ if $existingDataset }}{{ index $existingDataset.data "hmac-key" }}{{ else }}{{ randAlphaNum 48 | b64enc }}{{ end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: aibom-dataset-hmac-key-reader
+  namespace: {{ .Release.Namespace }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+    resourceNames: [{{ $datasetSecretName }}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: aibom-webhook-dataset-hmac-key-reader
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: aibom-dataset-hmac-key-reader
+subjects:
+  - kind: ServiceAccount
+    name: aibom-webhook
+    namespace: {{ .Values.aibomSystemNamespace }}
