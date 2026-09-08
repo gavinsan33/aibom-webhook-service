@@ -299,6 +299,21 @@ func TestShouldMutate_PostprocessPod(t *testing.T) {
 	}
 }
 
+func TestShouldMutate_PostprocessLabelWithoutJobOwner_NotHonored(t *testing.T) {
+	// A raw Pod (no Job owner at all) carrying aibom.io/postprocess-for
+	// can't be a real postprocess pod -- the watcher only ever creates
+	// these via a plain batch/v1 Job. Use a GPU pod (no owner reference at
+	// all) so it would otherwise qualify for instrumentation on its own
+	// merits: if the label were honored without a Job-owner check, this
+	// pod would be wrongly skipped instead of instrumented.
+	m := newTestMutator()
+	pod := podWithGPU()
+	pod.Labels = map[string]string{"aibom.io/postprocess-for": "train-job"}
+	if !m.shouldMutate(pod) {
+		t.Error("expected aibom.io/postprocess-for on a non-Job-owned pod to be ignored, not honored")
+	}
+}
+
 // --- Discovery init container tests ---
 
 func TestMutate_DiscoveryScriptCommand(t *testing.T) {
