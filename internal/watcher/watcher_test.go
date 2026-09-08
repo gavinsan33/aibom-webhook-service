@@ -14,6 +14,7 @@ import (
 	"github.com/gavinsan33/aibom-webhook-service/internal/aibomdata"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -1156,6 +1157,42 @@ func TestCollectAIBOM(t *testing.T) {
 	_, err = client.BatchV1().Jobs("test-ns").Get(context.TODO(), "train-job-aibom-postprocess", metav1.GetOptions{})
 	if err != nil {
 		t.Errorf("expected already-collected postprocess job to be left alone, got err=%v", err)
+	}
+}
+
+// TestCollectAIBOM_DeletesWorkloadIdentity guards the other half of #43:
+// once a job's postprocess Job succeeds, the per-job ServiceAccount/Role/
+// RoleBinding/Secret the webhook provisioned at admission time (see
+// internal/webhook/identity.go's ensureWorkloadIdentity) must be cleaned up
+// too, both so a same-named rerun re-provisions a fresh token instead of
+// reusing a stale one, and so these don't accumulate forever.
+func TestCollectAIBOM_DeletesWorkloadIdentity(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	ppJob, ppPod, dataConfigMap := newAIBOMPostprocessFixtures("train-job", "test-ns")
+
+	identityName := aibomdata.WorkloadIdentityName("train-job")
+	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: identityName, Namespace: "test-ns"}}
+	role := &rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: identityName, Namespace: "test-ns"}}
+	roleBinding := &rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: identityName, Namespace: "test-ns"}}
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: identityName, Namespace: "test-ns"}}
+
+	client := fake.NewSimpleClientset(ns, ppJob, ppPod, dataConfigMap, sa, role, roleBinding, secret)
+	w := New(client, "aibom-postprocess:latest")
+	startWatcher(t, w)
+
+	w.onJobEvent(ppJob)
+
+	if _, err := client.CoreV1().ServiceAccounts("test-ns").Get(context.TODO(), identityName, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("expected workload identity serviceaccount to be deleted after collection, got err=%v", err)
+	}
+	if _, err := client.RbacV1().Roles("test-ns").Get(context.TODO(), identityName, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("expected workload identity role to be deleted after collection, got err=%v", err)
+	}
+	if _, err := client.RbacV1().RoleBindings("test-ns").Get(context.TODO(), identityName, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("expected workload identity rolebinding to be deleted after collection, got err=%v", err)
+	}
+	if _, err := client.CoreV1().Secrets("test-ns").Get(context.TODO(), identityName, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("expected workload identity token secret to be deleted after collection, got err=%v", err)
 	}
 }
 
