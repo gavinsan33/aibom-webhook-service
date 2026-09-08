@@ -233,6 +233,54 @@ func TestMutate_IgnoresWorkloadSuppliedInstrumentedLabel(t *testing.T) {
 	}
 }
 
+func TestMutate_StripsSpoofedInstrumentedLabelOnNonQualifyingPod(t *testing.T) {
+	// A workload that doesn't qualify for instrumentation (no matching
+	// owner, no GPU request) could still pre-set aibom.io/instrumented and
+	// aibom.io/instrumented-by to falsely masquerade as already collected
+	// to the watcher, which selects pods by aibom.io/instrumented=true.
+	m := newTestMutator()
+	pod := podNoMatch()
+	pod.Labels = map[string]string{"aibom.io/instrumented": "true"}
+	pod.Annotations = map[string]string{"aibom.io/instrumented-by": "webhook"}
+
+	patches, err := m.Mutate(pod)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	wantRemoveLabel := false
+	wantRemoveAnnotation := false
+	for _, p := range patches {
+		if p.Op != "remove" {
+			t.Errorf("expected only remove patches for a non-qualifying pod, got op %q on %q", p.Op, p.Path)
+			continue
+		}
+		switch p.Path {
+		case "/metadata/labels/aibom.io~1instrumented":
+			wantRemoveLabel = true
+		case "/metadata/annotations/aibom.io~1instrumented-by":
+			wantRemoveAnnotation = true
+		}
+	}
+	if !wantRemoveLabel {
+		t.Error("expected a remove patch for the spoofed aibom.io/instrumented label")
+	}
+	if !wantRemoveAnnotation {
+		t.Error("expected a remove patch for the spoofed aibom.io/instrumented-by annotation")
+	}
+}
+
+func TestMutate_NonQualifyingPodWithNoClaims_NoPatches(t *testing.T) {
+	m := newTestMutator()
+	patches, err := m.Mutate(podNoMatch())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(patches) != 0 {
+		t.Errorf("expected no patches for a non-qualifying pod with no spoofed claims, got %+v", patches)
+	}
+}
+
 func TestShouldMutate_NoMatch(t *testing.T) {
 	m := newTestMutator()
 	if m.shouldMutate(podNoMatch()) {

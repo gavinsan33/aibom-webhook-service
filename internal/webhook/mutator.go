@@ -52,7 +52,17 @@ func NewMutator(discoveryImage string, datasetDetection bool) *Mutator {
 
 func (m *Mutator) Mutate(pod *corev1.Pod) ([]PatchOperation, error) {
 	if !m.shouldMutate(pod) {
-		return nil, nil
+		// A workload that doesn't qualify for instrumentation may still have
+		// pre-set aibom.io/instrumented / aibom.io/instrumented-by itself
+		// (see shouldMutate's doc comment on why the value can't be
+		// trusted). Left alone, that false claim would still reach etcd on
+		// this pod, and the watcher selects pods to postprocess by
+		// aibom.io/instrumented=true (see watcher.go) -- so an uninstrumented
+		// pod could masquerade as having been properly collected, and the
+		// watcher would compile an AIBOM from data that was never actually
+		// gathered. isPostprocessPod's own pods never carry this label at
+		// all, so this is always safe to run on the "not qualifying" path.
+		return stripSpoofedInstrumentationClaims(pod), nil
 	}
 
 	var patches []PatchOperation
@@ -167,6 +177,29 @@ func (m *Mutator) shouldMutate(pod *corev1.Pod) bool {
 // workload's.
 func isPostprocessPod(pod *corev1.Pod) bool {
 	return pod.Labels[aibomdata.LabelPostprocessFor] != ""
+}
+
+// stripSpoofedInstrumentationClaims returns JSON patches removing any
+// aibom.io/instrumented label and aibom.io/instrumented-by annotation
+// already present on a pod the webhook has decided not to instrument. See
+// Mutate's call site for why a requester-supplied claim here can't be left
+// in place. JSON Patch "remove" fails admission if the target path doesn't
+// exist, so each removal is only emitted when the key is actually present.
+func stripSpoofedInstrumentationClaims(pod *corev1.Pod) []PatchOperation {
+	var patches []PatchOperation
+	if _, ok := pod.Labels["aibom.io/instrumented"]; ok {
+		patches = append(patches, PatchOperation{
+			Op:   "remove",
+			Path: "/metadata/labels/aibom.io~1instrumented",
+		})
+	}
+	if _, ok := pod.Annotations["aibom.io/instrumented-by"]; ok {
+		patches = append(patches, PatchOperation{
+			Op:   "remove",
+			Path: "/metadata/annotations/aibom.io~1instrumented-by",
+		})
+	}
+	return patches
 }
 
 func hasMatchingOwner(pod *corev1.Pod) bool {
