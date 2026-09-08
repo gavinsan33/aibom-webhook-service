@@ -38,20 +38,35 @@ const (
 	// DiscoverySigningKeyDataKey is the key within that Secret's data map.
 	DiscoverySigningKeyDataKey = "hmac-key"
 
+	// DatasetSigningKeySecretName is the dataset-data counterpart to
+	// DiscoverySigningKeySecretName, created by the same
+	// aibom-workload-namespace chart. Mounted only into the
+	// aibom-dataset-sidecar container (never the app container, and never
+	// the discovery init container either) so dataset_sidecar.py can sign
+	// dataset-<pod>.json. Kept as a separate Secret/key from the discovery
+	// one deliberately: this sidecar and the discovery init container are
+	// different processes with different inputs, so a compromise of one
+	// doesn't need to also invalidate trust in data signed by the other.
+	DatasetSigningKeySecretName = "aibom-dataset-hmac-key"
+
+	// DatasetSigningKeyDataKey is the key within that Secret's data map.
+	DatasetSigningKeyDataKey = "hmac-key"
+
 	// WorkloadIdentitySuffix names the per-job ServiceAccount/Role/
 	// RoleBinding/Secret the webhook provisions at admission time (see
 	// internal/webhook/identity.go's ensureWorkloadIdentity) so the
-	// discovery init container -- and, where the app container's own
-	// standard-path token mount can be safely replaced, the app container
-	// too -- authenticate as an identity scoped via resourceNames to
-	// exactly this job's own data ConfigMap, instead of sharing whatever
-	// ServiceAccount the pod runs as (which also carries any image-pull or
-	// cloud IAM federation that identity needs, so it can't just be
-	// overridden). Only ever created for Job-owned pods, where triggerName
-	// is known at admission; bare GPU pods (e.g. KServe predictors) fall
-	// back to the broader namespace-wide aibom-workload-data Role, since
-	// their final pod name -- and so the ConfigMap this Role would need to
-	// name -- doesn't exist yet at admission time.
+	// discovery init container and the dataset sidecar authenticate as an
+	// identity scoped via resourceNames to exactly this job's own data
+	// ConfigMap, instead of sharing whatever ServiceAccount the pod runs as
+	// (which also carries any image-pull or cloud IAM federation that
+	// identity needs, so it can't just be overridden). The app container
+	// itself is never given this identity at all -- see #47, it no longer
+	// talks to the Kubernetes API for this purpose. Only ever created for
+	// Job-owned pods, where triggerName is known at admission; bare GPU
+	// pods (e.g. KServe predictors) fall back to the broader namespace-wide
+	// aibom-workload-data Role, since their final pod name -- and so the
+	// ConfigMap this Role would need to name -- doesn't exist yet at
+	// admission time.
 	WorkloadIdentitySuffix = "-aibom-workload-identity"
 )
 

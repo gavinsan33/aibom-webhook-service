@@ -527,6 +527,12 @@ func TestMutate_InjectsDatasetDetectorEnvVars(t *testing.T) {
 			t.Errorf("expected env var %q in dataset detector patches", expected)
 		}
 	}
+	// Since #47, the app container never talks to the Kubernetes API, so it
+	// has no use for the ConfigMap name -- unlike the discovery init
+	// container and the dataset sidecar, both of which still get it.
+	if envVarNames["AIBOM_DATA_CONFIGMAP"] {
+		t.Error("app container should not get AIBOM_DATA_CONFIGMAP anymore (see #47)")
+	}
 }
 
 // collectContainerVolumeMountPatches gathers every VolumeMount added to a
@@ -547,7 +553,14 @@ func collectContainerVolumeMountPatches(patches []PatchOperation, containerIdx i
 	return mounts
 }
 
-func TestMutate_AddsTokenMountToAppContainer(t *testing.T) {
+// TestMutate_AppContainerNeverGetsTokenMountOrK8sAPIScript is the core
+// regression test for #47: the app container must never receive a
+// Kubernetes API token or the k8s_api.py script it would need to use one,
+// since runtime_detector.py no longer talks to the Kubernetes API at all
+// -- the aibom-dataset-sidecar container performs the (signed) ConfigMap
+// write instead. This holds regardless of whether the container already
+// had its own default-SA token mounted (automount enabled) or not.
+func TestMutate_AppContainerNeverGetsTokenMountOrK8sAPIScript(t *testing.T) {
 	m := newTestMutator()
 	patches, err := m.Mutate(podWithOwner("Job"))
 	if err != nil {
@@ -559,19 +572,23 @@ func TestMutate_AddsTokenMountToAppContainer(t *testing.T) {
 		t.Fatal("container volumeMounts patch not found")
 	}
 	for _, mount := range mounts {
-		if mount.Name == "aibom-token" && mount.MountPath == "/var/run/secrets/kubernetes.io/serviceaccount" {
-			return
+		if mount.Name == "aibom-token" {
+			t.Error("app container should never get an aibom-token mount")
+		}
+		if mount.SubPath == "k8s_api.py" {
+			t.Error("app container should never get a k8s_api.py mount")
 		}
 	}
-	t.Fatal("expected aibom-token mount when the container has no existing token mount")
 }
 
-// TestMutate_SkipsTokenMountWhenAlreadyPresent guards against the real
-// failure mode this exists to avoid: if automountServiceAccountToken wasn't
-// disabled, the built-in ServiceAccount admission controller already mounted
-// a token at this exact path before our webhook ran — a second volumeMount
-// at an identical path fails pod admission outright.
-func TestMutate_SkipsTokenMountWhenAlreadyPresent(t *testing.T) {
+// TestMutate_DoesNotAddSecondMountAtExistingTokenPath guards against the
+// real failure mode this exists to avoid: if automountServiceAccountToken
+// wasn't disabled, the built-in ServiceAccount admission controller
+// already mounted a token at this exact path before our webhook ran — a
+// second volumeMount at an identical path fails pod admission outright.
+// Since #47, this container's pre-existing mount (whatever it is) is left
+// completely alone; there's nothing here for it to need access to anymore.
+func TestMutate_DoesNotAddSecondMountAtExistingTokenPath(t *testing.T) {
 	m := newTestMutator()
 	pod := podWithOwner("Job")
 	pod.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{
