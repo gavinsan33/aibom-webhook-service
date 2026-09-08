@@ -1,13 +1,12 @@
 # Single-GPU LoRA fine-tuning example that pulls its training code from
-# GitHub at runtime instead of baking it into the image or invoking a
-# pip-installed CLI -- exercises the git-provenance detection layers
-# described in CLAUDE.md's Git Provenance Detection section, rather than the
-# model/dataset auto-detection the other examples focus on.
+# GitHub at runtime instead of baking it into the image or using a
+# separately pip-installed release -- exercises the git-provenance detection
+# layers described in CLAUDE.md's Git Provenance Detection section, rather
+# than the model/dataset auto-detection the other examples focus on.
 #
-# The container clones huggingface/trl at pod startup and runs its
-# examples/scripts/sft.py directly against the cloned checkout (installed
-# editable, so the code that actually executes is the clone, not a
-# separately pip-installed release). This exercises two of the five
+# The container clones huggingface/trl at pod startup and runs its `trl sft`
+# CLI (installed editable, so the code that actually executes is the clone,
+# not a separately pip-installed release). This exercises two of the five
 # precedence tiers:
 #   - detect_git_clone_from_containers (postprocess.py) sees the literal
 #     `git clone https://github.com/huggingface/trl.git` in the container's
@@ -51,8 +50,7 @@ spec:
               git clone https://github.com/huggingface/trl.git /tmp/trl-repo && \
               cd /tmp/trl-repo && \
               pip install --no-cache-dir -e . peft datasets accelerate && \
-              export PATH="$HOME/.local/bin:$PATH" && \
-              python examples/scripts/sft.py \
+              trl sft \
                 --model_name_or_path ibm-granite/granite-3.3-2b-instruct \
                 --dataset_name tatsu-lab/alpaca \
                 --output_dir /tmp/output \
