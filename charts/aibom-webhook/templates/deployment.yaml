@@ -48,6 +48,11 @@ spec:
             # aibom.io/postprocess-for was actually created by the watcher
             # and not a workload spoofing the label. See jobguard.go.
             - --trusted-watcher-identity=system:serviceaccount:{{ include "aibom-webhook.namespace" . }}:aibom-webhook
+            {{- if .Values.webhook.trustedJobControllerIdentity }}
+            # Tightens isPostprocessPod's Job-owner check -- see
+            # values.yaml's comment on this setting before enabling it.
+            - --trusted-job-controller-identity={{ .Values.webhook.trustedJobControllerIdentity }}
+            {{- end }}
           volumeMounts:
             - name: certs
               mountPath: /certs

@@ -107,7 +107,7 @@ func (h *Handler) handlePodAdmission(req *admissionv1.AdmissionRequest) *admissi
 		return allowResponse("failed to unmarshal pod")
 	}
 
-	patches, err := h.Mutator.Mutate(&pod)
+	patches, err := h.Mutator.Mutate(&pod, req.UserInfo.Username)
 	if err != nil {
 		log.Printf("mutation error: %v", err)
 		return allowResponse("mutation error")

@@ -31,6 +31,7 @@ func main() {
 	flag.BoolVar(&cfg.EnableWatcher, "enable-watcher", true, "start the Job completion watcher")
 	flag.StringVar(&cfg.PostprocessImage, "postprocess-image", "busybox:latest", "image for postprocess Jobs")
 	flag.StringVar(&cfg.TrustedWatcherIdentity, "trusted-watcher-identity", "", "full username (e.g. system:serviceaccount:aibom-system:aibom-webhook) of this binary's own watcher identity, used to verify a Job claiming aibom.io/postprocess-for was actually created by the watcher; empty disables the check")
+	flag.StringVar(&cfg.TrustedJobControllerIdentity, "trusted-job-controller-identity", "", "full username the cluster's built-in Job controller uses when creating a Job's pods (commonly system:serviceaccount:kube-system:job-controller, but verify on your own cluster -- it depends on kube-controller-manager's --use-service-account-credentials flag); empty disables this extra check, leaving only the weaker ownerReference-only check")
 	flag.Parse()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -40,7 +41,7 @@ func main() {
 		log.Printf("WARNING: --trusted-watcher-identity not set; aibom.io/postprocess-for spoofing protection is disabled")
 	}
 
-	mutator := webhook.NewMutator(cfg.DiscoveryImage, cfg.DatasetDetection)
+	mutator := webhook.NewMutator(cfg.DiscoveryImage, cfg.DatasetDetection, cfg.TrustedJobControllerIdentity)
 
 	// Built unconditionally (not gated on cfg.EnableWatcher) since the
 	// mutator itself now needs a clientset too, to provision per-job
