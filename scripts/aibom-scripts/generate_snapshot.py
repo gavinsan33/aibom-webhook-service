@@ -260,19 +260,24 @@ def resolve_inference_service_storage(namespace):
 _SIGNING_KEY_PATH = "/var/run/secrets/aibom/discovery-signing/hmac-key"
 
 
-def sign_discovery_payload(payload):
-    """HMAC-SHA256 the discovery payload's canonical bytes with the
-    per-namespace signing key, so the watcher can later verify that a
-    discovery-<pod>.json entry genuinely came from this (platform-controlled)
+def sign_payload(payload):
+    """HMAC-SHA256 payload's canonical bytes with the per-namespace signing
+    key, so the watcher can later verify that a discovery-<pod>.json or
+    storage-<pod>.json entry genuinely came from this (platform-controlled)
     discovery container rather than being fabricated or overwritten by the
     workload's own application container, which is never given this key.
+    Both keys are safe to sign with the same key: both are written by this
+    same trusted process, unlike dataset-<pod>.json (written by the
+    workload's own runtime_detector.py hook -- see #47) which isn't signed
+    at all, since a key handed to that untrusted process wouldn't prove
+    anything about data that same process produced.
 
     Returns None (unsigned) if the key isn't mounted -- e.g. a namespace
     whose aibom-workload-namespace chart install predates signing.yaml --
     so a missing key degrades to "unverifiable" rather than failing pod
-    startup. The watcher treats an unsigned discovery payload as untrusted
-    once a per-namespace key does exist, but passes it through unverified if
-    the whole namespace has no key configured yet.
+    startup. The watcher treats an unsigned payload as untrusted once a
+    per-namespace key does exist, but passes it through unverified if the
+    whole namespace has no key configured yet.
     """
     try:
         with open(_SIGNING_KEY_PATH, "rb") as f:
@@ -295,13 +300,19 @@ configmap_name = k8s_api.resolve_data_configmap_name() if k8s_api else ""
 # be reproduced byte-for-byte, not just semantically equivalent JSON.
 discovery_payload = json.dumps(snapshot, sort_keys=True, separators=(",", ":"))
 data_updates = {f"discovery-{pod_name}.json": discovery_payload}
-signature = sign_discovery_payload(discovery_payload)
+signature = sign_payload(discovery_payload)
 if signature:
     data_updates[f"discovery-{pod_name}.sig"] = signature
 
 storage_info = resolve_inference_service_storage(pod_namespace)
 if storage_info:
-    data_updates[f"storage-{pod_name}.json"] = json.dumps(storage_info)
+    # Same canonical serialization requirement as discovery_payload above:
+    # signed and later re-hashed byte-for-byte by the watcher.
+    storage_payload = json.dumps(storage_info, sort_keys=True, separators=(",", ":"))
+    data_updates[f"storage-{pod_name}.json"] = storage_payload
+    storage_signature = sign_payload(storage_payload)
+    if storage_signature:
+        data_updates[f"storage-{pod_name}.sig"] = storage_signature
 
 if k8s_api and pod_name and pod_namespace and configmap_name:
     try:
