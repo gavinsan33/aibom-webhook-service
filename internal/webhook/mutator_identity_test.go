@@ -94,7 +94,13 @@ func TestMutate_FallsBackToSharedTokenWhenOwnerUnknown(t *testing.T) {
 	}
 }
 
-func TestMutate_ReplacesExistingTokenMountWhenIdentityProvisioned(t *testing.T) {
+// TestMutate_DoesNotReplaceAppContainerTokenMountEvenWhenIdentityProvisioned
+// guards the #47 behavior change: previously, a per-job identity being
+// provisioned meant the app container's own pre-existing default-SA token
+// mount got retargeted to it. Since the app container no longer talks to
+// the Kubernetes API for anything, that's no longer necessary or done --
+// its own mount, whatever it is, is left completely alone.
+func TestMutate_DoesNotReplaceAppContainerTokenMountEvenWhenIdentityProvisioned(t *testing.T) {
 	m, _ := newTestMutatorWithClientset()
 	pod := podWithOwner("Job")
 	pod.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{
@@ -106,16 +112,62 @@ func TestMutate_ReplacesExistingTokenMountWhenIdentityProvisioned(t *testing.T) 
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	found := false
 	for _, p := range patches {
 		if p.Op == "replace" && p.Path == "/spec/containers/0/volumeMounts/0/name" {
-			if p.Value != "aibom-token" {
-				t.Errorf("replace value = %v, want aibom-token", p.Value)
-			}
-			found = true
+			t.Errorf("unexpected replace patch %+v -- app container mounts should never be retargeted anymore", p)
 		}
 	}
-	if !found {
-		t.Error("expected a replace patch retargeting the pre-existing token mount to aibom-token once a per-job identity was provisioned")
+}
+
+// TestMutate_DatasetSidecarSharesIdentityWithDiscoveryInitContainer confirms
+// the aibom-dataset-sidecar container (see #47) gets the same job-scoped
+// identity (aibom-token) and its own separate dataset-signing key, mirroring
+// the discovery init container's mounts.
+func TestMutate_DatasetSidecarSharesIdentityWithDiscoveryInitContainer(t *testing.T) {
+	m, _ := newTestMutatorWithClientset()
+	patches, err := m.Mutate(podWithOwner("Job"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
+
+	sidecar := findInitContainer(patches, "aibom-dataset-sidecar")
+	if sidecar == nil {
+		t.Fatal("aibom-dataset-sidecar init container not found")
+	}
+	if sidecar.RestartPolicy == nil || *sidecar.RestartPolicy != corev1.ContainerRestartPolicyAlways {
+		t.Error("expected aibom-dataset-sidecar to be a native sidecar (RestartPolicy: Always)")
+	}
+
+	var hasToken, hasDatasetKey bool
+	for _, mount := range sidecar.VolumeMounts {
+		if mount.Name == "aibom-token" {
+			hasToken = true
+		}
+		if mount.Name == "aibom-dataset-signing-key" {
+			hasDatasetKey = true
+		}
+	}
+	if !hasToken {
+		t.Error("expected aibom-dataset-sidecar to mount aibom-token")
+	}
+	if !hasDatasetKey {
+		t.Error("expected aibom-dataset-sidecar to mount aibom-dataset-signing-key")
+	}
+}
+
+func findInitContainer(patches []PatchOperation, name string) *corev1.Container {
+	for _, p := range patches {
+		if containers, ok := p.Value.([]corev1.Container); ok {
+			for i := range containers {
+				if containers[i].Name == name {
+					return &containers[i]
+				}
+			}
+			continue
+		}
+		if c, ok := p.Value.(corev1.Container); ok && c.Name == name {
+			return &c
+		}
+	}
+	return nil
 }
