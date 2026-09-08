@@ -175,8 +175,36 @@ func (m *Mutator) shouldMutate(pod *corev1.Pod) bool {
 // get instrumented too, deriving a second-generation, truncated data
 // ConfigMap name from the postprocess Job's own name instead of the original
 // workload's.
+//
+// A real postprocess pod is always owned by a plain batch/v1 Job (the
+// watcher never creates one any other way), so this also requires a Job
+// owner reference before trusting the label — see SanitizeJobPostprocessLabel
+// for why the label alone, from a Job's pod template, can now be trusted
+// once it survives that check. That leaves one residual gap this doesn't
+// close: a raw Pod submitted directly (not created by any Job at all) never
+// goes through the Job-admission check, and Kubernetes doesn't validate that
+// a submitted object's ownerReferences point to anything real — a requester
+// could still hand-craft a fake Job ownerReference on their own raw Pod
+// alongside the label. Closing that fully would need comparing this
+// admission's own request.userInfo against the Job controller's identity,
+// which isn't implemented here (see #51's tracked residual-gap note).
 func isPostprocessPod(pod *corev1.Pod) bool {
-	return pod.Labels[aibomdata.LabelPostprocessFor] != ""
+	if pod.Labels[aibomdata.LabelPostprocessFor] == "" {
+		return false
+	}
+	return hasJobOwner(pod)
+}
+
+// hasJobOwner reports whether pod has a plain batch/v1 Job in its
+// ownerReferences — narrower than hasMatchingOwner, which also matches
+// JobSet/PyTorchJob/RayJob; postprocess Jobs are always plain Jobs.
+func hasJobOwner(pod *corev1.Pod) bool {
+	for _, ref := range pod.OwnerReferences {
+		if ref.Kind == "Job" {
+			return true
+		}
+	}
+	return false
 }
 
 // stripSpoofedInstrumentationClaims returns JSON patches removing any
