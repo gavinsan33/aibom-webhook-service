@@ -35,6 +35,21 @@ type Mutator struct {
 	// Mutate falls back to the pod's own (shared, namespace-wide) identity
 	// rather than failing admission.
 	Clientset kubernetes.Interface
+
+	// TrustedJobControllerIdentity, if set, is the full username (e.g.
+	// "system:serviceaccount:kube-system:job-controller") the built-in
+	// Job controller uses when creating a Job's pods on this cluster. It
+	// tightens isPostprocessPod's Job-owner check: a Job-kind
+	// ownerReference alone can be fabricated by a raw Pod submission (see
+	// isPostprocessPod's doc comment), but a fabricated ownerReference
+	// can't also make Kubernetes report request.userInfo as the real Job
+	// controller. Left empty, this extra check is skipped -- the
+	// owner-reference-only check still applies -- since the exact
+	// identity string isn't guaranteed across every cluster/distro (it
+	// depends on kube-controller-manager's --use-service-account-
+	// credentials flag) and defaulting to a guess risks misclassifying a
+	// real postprocess pod as not one.
+	TrustedJobControllerIdentity string
 }
 
 type PatchOperation struct {
@@ -43,15 +58,20 @@ type PatchOperation struct {
 	Value interface{} `json:"value,omitempty"`
 }
 
-func NewMutator(discoveryImage string, datasetDetection bool) *Mutator {
+func NewMutator(discoveryImage string, datasetDetection bool, trustedJobControllerIdentity string) *Mutator {
 	return &Mutator{
-		DiscoveryImage:   discoveryImage,
-		DatasetDetection: datasetDetection,
+		DiscoveryImage:               discoveryImage,
+		DatasetDetection:             datasetDetection,
+		TrustedJobControllerIdentity: trustedJobControllerIdentity,
 	}
 }
 
-func (m *Mutator) Mutate(pod *corev1.Pod) ([]PatchOperation, error) {
-	if !m.shouldMutate(pod) {
+// Mutate decides whether pod should be instrumented and returns the patches
+// to do so. requesterUsername is the AdmissionReview's request.userInfo.username
+// for this pod's own creation -- used only by isPostprocessPod's optional
+// Job-controller identity check (see TrustedJobControllerIdentity).
+func (m *Mutator) Mutate(pod *corev1.Pod, requesterUsername string) ([]PatchOperation, error) {
+	if !m.shouldMutate(pod, requesterUsername) {
 		// A workload that doesn't qualify for instrumentation may still have
 		// pre-set aibom.io/instrumented / aibom.io/instrumented-by itself
 		// (see shouldMutate's doc comment on why the value can't be
@@ -161,8 +181,8 @@ func (m *Mutator) Mutate(pod *corev1.Pod) ([]PatchOperation, error) {
 // the requester submits, so trusting a pre-existing "true" value here would
 // let any workload dodge instrumentation for free simply by pre-setting the
 // label the webhook itself would otherwise add.
-func (m *Mutator) shouldMutate(pod *corev1.Pod) bool {
-	if isPostprocessPod(pod) {
+func (m *Mutator) shouldMutate(pod *corev1.Pod, requesterUsername string) bool {
+	if m.isPostprocessPod(pod, requesterUsername) {
 		return false
 	}
 	return hasMatchingOwner(pod) || requestsGPU(pod)
@@ -180,19 +200,30 @@ func (m *Mutator) shouldMutate(pod *corev1.Pod) bool {
 // watcher never creates one any other way), so this also requires a Job
 // owner reference before trusting the label — see SanitizeJobPostprocessLabel
 // for why the label alone, from a Job's pod template, can now be trusted
-// once it survives that check. That leaves one residual gap this doesn't
-// close: a raw Pod submitted directly (not created by any Job at all) never
-// goes through the Job-admission check, and Kubernetes doesn't validate that
-// a submitted object's ownerReferences point to anything real — a requester
-// could still hand-craft a fake Job ownerReference on their own raw Pod
-// alongside the label. Closing that fully would need comparing this
-// admission's own request.userInfo against the Job controller's identity,
-// which isn't implemented here (see #51's tracked residual-gap note).
-func isPostprocessPod(pod *corev1.Pod) bool {
+// once it survives that check.
+//
+// A Job-kind ownerReference alone can still be forged: Kubernetes doesn't
+// validate that a submitted object's ownerReferences point to anything real,
+// so a raw Pod submitted directly (never created by any Job at all, and so
+// never seen by the Job-admission check) could hand-craft a fake one
+// alongside the label. When m.TrustedJobControllerIdentity is configured,
+// this closes that gap too: a fabricated ownerReference can't also make
+// Kubernetes report requesterUsername as the real Job controller, since that
+// value comes from actual authentication on this admission request, not
+// anything the submitted object controls. Left unconfigured (the default —
+// see the field's doc comment for why), only the weaker ownerReference-only
+// check applies, matching this function's previous behavior.
+func (m *Mutator) isPostprocessPod(pod *corev1.Pod, requesterUsername string) bool {
 	if pod.Labels[aibomdata.LabelPostprocessFor] == "" {
 		return false
 	}
-	return hasJobOwner(pod)
+	if !hasJobOwner(pod) {
+		return false
+	}
+	if m.TrustedJobControllerIdentity == "" {
+		return true
+	}
+	return requesterUsername == m.TrustedJobControllerIdentity
 }
 
 // hasJobOwner reports whether pod has a plain batch/v1 Job in its
