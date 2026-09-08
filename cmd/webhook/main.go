@@ -30,10 +30,15 @@ func main() {
 	flag.BoolVar(&cfg.DatasetDetection, "dataset-detection", true, "inject dataset detection hooks into application containers")
 	flag.BoolVar(&cfg.EnableWatcher, "enable-watcher", true, "start the Job completion watcher")
 	flag.StringVar(&cfg.PostprocessImage, "postprocess-image", "busybox:latest", "image for postprocess Jobs")
+	flag.StringVar(&cfg.TrustedWatcherIdentity, "trusted-watcher-identity", "", "full username (e.g. system:serviceaccount:aibom-system:aibom-webhook) of this binary's own watcher identity, used to verify a Job claiming aibom.io/postprocess-for was actually created by the watcher; empty disables the check")
 	flag.Parse()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	if cfg.TrustedWatcherIdentity == "" {
+		log.Printf("WARNING: --trusted-watcher-identity not set; aibom.io/postprocess-for spoofing protection is disabled")
+	}
 
 	mutator := webhook.NewMutator(cfg.DiscoveryImage, cfg.DatasetDetection)
 
@@ -50,7 +55,7 @@ func main() {
 		mutator.Clientset = clientset
 	}
 
-	handler := webhook.NewHandler(mutator)
+	handler := webhook.NewHandler(mutator, cfg.TrustedWatcherIdentity)
 
 	mux := http.NewServeMux()
 	mux.Handle("/mutate", handler)

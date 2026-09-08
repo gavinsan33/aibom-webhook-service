@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	admissionv1 "k8s.io/api/admission/v1"
+	authenticationv1 "k8s.io/api/authentication/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -754,8 +756,79 @@ func buildAdmissionReview(pod *corev1.Pod) admissionv1.AdmissionReview {
 	}
 }
 
+func buildJobAdmissionReview(job *batchv1.Job, username string) admissionv1.AdmissionReview {
+	jobBytes, _ := json.Marshal(job)
+	return admissionv1.AdmissionReview{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "admission.k8s.io/v1",
+			Kind:       "AdmissionReview",
+		},
+		Request: &admissionv1.AdmissionRequest{
+			UID:      "test-uid",
+			Resource: jobGVR,
+			UserInfo: authenticationv1.UserInfo{Username: username},
+			Object:   runtime.RawExtension{Raw: jobBytes},
+		},
+	}
+}
+
+func TestHandleAdmission_StripsSpoofedPostprocessLabelFromUntrustedJob(t *testing.T) {
+	h := NewHandler(newTestMutator(), testTrustedIdentity)
+	review := buildJobAdmissionReview(jobWithPostprocessLabel(), "system:serviceaccount:default:some-user-sa")
+
+	body, _ := json.Marshal(review)
+	req := httptest.NewRequest(http.MethodPost, "/mutate", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+
+	var resp admissionv1.AdmissionReview
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if !resp.Response.Allowed {
+		t.Error("expected Allowed=true -- this webhook neutralizes the spoofed label, it doesn't reject the Job")
+	}
+	if resp.Response.Patch == nil {
+		t.Fatal("expected a patch removing the spoofed aibom.io/postprocess-for label")
+	}
+	var patches []PatchOperation
+	if err := json.Unmarshal(resp.Response.Patch, &patches); err != nil {
+		t.Fatalf("failed to unmarshal patch: %v", err)
+	}
+	if len(patches) != 2 {
+		t.Errorf("expected 2 remove patches (job + template label), got %d: %+v", len(patches), patches)
+	}
+}
+
+func TestHandleAdmission_TrustedWatcherJobUntouched(t *testing.T) {
+	h := NewHandler(newTestMutator(), testTrustedIdentity)
+	review := buildJobAdmissionReview(jobWithPostprocessLabel(), testTrustedIdentity)
+
+	body, _ := json.Marshal(review)
+	req := httptest.NewRequest(http.MethodPost, "/mutate", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+
+	var resp admissionv1.AdmissionReview
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if !resp.Response.Allowed {
+		t.Error("expected Allowed=true")
+	}
+	if resp.Response.Patch != nil {
+		t.Errorf("expected no patch for a Job created by the trusted watcher identity, got %s", resp.Response.Patch)
+	}
+}
+
 func TestHandleAdmission_MutatesPod(t *testing.T) {
-	h := NewHandler(newTestMutator())
+	h := NewHandler(newTestMutator(), "")
 	review := buildAdmissionReview(podWithOwner("Job"))
 
 	body, _ := json.Marshal(review)
@@ -786,7 +859,7 @@ func TestHandleAdmission_MutatesPod(t *testing.T) {
 }
 
 func TestHandleAdmission_NoMutationForDeployment(t *testing.T) {
-	h := NewHandler(newTestMutator())
+	h := NewHandler(newTestMutator(), "")
 	review := buildAdmissionReview(podNoMatch())
 
 	body, _ := json.Marshal(review)
@@ -810,7 +883,7 @@ func TestHandleAdmission_NoMutationForDeployment(t *testing.T) {
 }
 
 func TestHandleAdmission_WrongMethod(t *testing.T) {
-	h := NewHandler(newTestMutator())
+	h := NewHandler(newTestMutator(), "")
 	req := httptest.NewRequest(http.MethodGet, "/mutate", nil)
 	rr := httptest.NewRecorder()
 
@@ -822,7 +895,7 @@ func TestHandleAdmission_WrongMethod(t *testing.T) {
 }
 
 func TestHandleAdmission_WrongContentType(t *testing.T) {
-	h := NewHandler(newTestMutator())
+	h := NewHandler(newTestMutator(), "")
 	req := httptest.NewRequest(http.MethodPost, "/mutate", bytes.NewReader([]byte("{}")))
 	req.Header.Set("Content-Type", "text/plain")
 	rr := httptest.NewRecorder()
