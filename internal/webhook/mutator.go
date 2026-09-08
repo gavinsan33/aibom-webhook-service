@@ -142,8 +142,17 @@ func (m *Mutator) Mutate(pod *corev1.Pod) ([]PatchOperation, error) {
 	return patches, nil
 }
 
+// shouldMutate reports whether pod should be instrumented. It deliberately
+// does NOT consult any aibom.io/instrumented value already present on the
+// incoming pod: this webhook's MutatingWebhookConfiguration only matches
+// CREATE operations with reinvocationPolicy: Never, so there is no
+// legitimate scenario where this webhook has already run once and set that
+// label earlier in the same admission chain. Labels are part of the object
+// the requester submits, so trusting a pre-existing "true" value here would
+// let any workload dodge instrumentation for free simply by pre-setting the
+// label the webhook itself would otherwise add.
 func (m *Mutator) shouldMutate(pod *corev1.Pod) bool {
-	if alreadyInstrumented(pod) || isPostprocessPod(pod) {
+	if isPostprocessPod(pod) {
 		return false
 	}
 	return hasMatchingOwner(pod) || requestsGPU(pod)
@@ -158,13 +167,6 @@ func (m *Mutator) shouldMutate(pod *corev1.Pod) bool {
 // workload's.
 func isPostprocessPod(pod *corev1.Pod) bool {
 	return pod.Labels[aibomdata.LabelPostprocessFor] != ""
-}
-
-func alreadyInstrumented(pod *corev1.Pod) bool {
-	if pod.Labels == nil {
-		return false
-	}
-	return pod.Labels["aibom.io/instrumented"] == "true"
 }
 
 func hasMatchingOwner(pod *corev1.Pod) bool {

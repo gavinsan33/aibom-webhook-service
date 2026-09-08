@@ -200,10 +200,36 @@ func TestMutate_NonKServePod_NoInferenceServiceNameEnv(t *testing.T) {
 	t.Fatal("init container patch not found")
 }
 
-func TestShouldMutate_AlreadyInstrumented(t *testing.T) {
+func TestShouldMutate_IgnoresWorkloadSuppliedInstrumentedLabel(t *testing.T) {
+	// A workload's own manifest can set aibom.io/instrumented: "true" before
+	// the webhook ever runs -- reinvocationPolicy is Never, so there's no
+	// legitimate way this label is already "true" on a fresh CREATE. If
+	// shouldMutate trusted it, a workload could dodge instrumentation
+	// entirely just by pre-setting the label. It must still match here,
+	// same as any other Job-owned pod.
 	m := newTestMutator()
-	if m.shouldMutate(podAlreadyInstrumented()) {
-		t.Error("expected already-instrumented pod to be skipped")
+	if !m.shouldMutate(podAlreadyInstrumented()) {
+		t.Error("expected a workload-supplied aibom.io/instrumented label to be ignored, not honored")
+	}
+}
+
+func TestMutate_IgnoresWorkloadSuppliedInstrumentedLabel(t *testing.T) {
+	// Same scenario at the Mutate level, not just the shouldMutate gate:
+	// confirm the pod actually gets the real injection (discovery init
+	// container) rather than being waved through as "already done".
+	m := newTestMutator()
+	patches, err := m.Mutate(podAlreadyInstrumented())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	foundInitContainer := false
+	for _, p := range patches {
+		if p.Path == "/spec/initContainers" {
+			foundInitContainer = true
+		}
+	}
+	if !foundInitContainer {
+		t.Error("expected a workload-supplied aibom.io/instrumented label not to suppress real injection")
 	}
 }
 
