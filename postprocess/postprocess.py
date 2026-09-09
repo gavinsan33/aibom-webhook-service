@@ -101,6 +101,16 @@ TELEMETRY_QUERIES = {
         "query": 'rate(container_network_transmit_bytes_total{pod="{pod_name}"}[5m])',
         "unit": "bytes_per_sec",
     },
+    # container_fs_* is labeled per-device, unlike network -- sum across
+    # devices so this collapses to one series per pod like every other metric.
+    "storage_read_throughput": {
+        "query": 'sum by (pod) (rate(container_fs_reads_bytes_total{pod="{pod_name}", container!="POD", container!=""}[5m]))',
+        "unit": "bytes_per_sec",
+    },
+    "storage_write_throughput": {
+        "query": 'sum by (pod) (rate(container_fs_writes_bytes_total{pod="{pod_name}", container!="POD", container!=""}[5m]))',
+        "unit": "bytes_per_sec",
+    },
 }
 
 SCRAPE_INTERVAL_MS = 5 * 60 * 1000
@@ -1270,6 +1280,8 @@ def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, tel
             "memory_usage": (1 / (1024**3), "GB"),
             "network_receive": (8 / (1024 * 1024), "Mbps"),
             "network_transmit": (8 / (1024 * 1024), "Mbps"),
+            "storage_read_throughput": (1 / (1024 * 1024), "MBps"),
+            "storage_write_throughput": (1 / (1024 * 1024), "MBps"),
         }
 
         utilization = {"collected_at": telemetry.get("collected_at")}
