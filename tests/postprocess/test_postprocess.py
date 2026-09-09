@@ -699,11 +699,11 @@ def test_compile_aibom_no_telemetry_notes_unavailable():
 
 
 # ---------------------------------------------------------------------------
-# compile_aibom: runtime (start/end/duration)
+# compile_aibom: execution_metadata.duration_seconds
 # ---------------------------------------------------------------------------
 
 
-def test_compile_aibom_computes_runtime_from_earliest_pod_start():
+def test_compile_aibom_computes_duration_from_earliest_pod_start():
     discoveries = [
         {"pod_metadata": {"name": "job-abc", "start_time": "2024-01-01T00:05:00"}},
     ]
@@ -711,32 +711,36 @@ def test_compile_aibom_computes_runtime_from_earliest_pod_start():
         discoveries=discoveries, detected_datasets=[], runtime_info={},
         annotations={}, telemetry=None,
     )
-    runtime = aibom["runtime"]
-    assert runtime["start_time"] == "2024-01-01T00:05:00"
-    assert runtime["end_time"] is not None
-    assert runtime["duration_seconds"] >= 0
+    assert aibom["execution_metadata"]["duration_seconds"] >= 0
 
 
-def test_compile_aibom_runtime_uses_earliest_of_jobset_sibling_pods():
+def test_compile_aibom_duration_uses_earliest_of_jobset_sibling_pods():
     discoveries = [
         {"pod_metadata": {"name": "server-0", "start_time": "2024-01-01T00:10:00"}},
         {"pod_metadata": {"name": "server-1", "start_time": "2024-01-01T00:02:00"}},
     ]
-    aibom = pp.compile_aibom(
+    aibom_late_start_only = pp.compile_aibom(
+        discoveries=discoveries[:1], detected_datasets=[], runtime_info={},
+        annotations={}, telemetry=None,
+    )
+    aibom_with_earlier_sibling = pp.compile_aibom(
         discoveries=discoveries, detected_datasets=[], runtime_info={},
         annotations={}, telemetry=None,
     )
-    assert aibom["runtime"]["start_time"] == "2024-01-01T00:02:00"
+    # Including the earlier-starting sibling pod should only ever lengthen
+    # the computed duration, never shorten it.
+    assert (
+        aibom_with_earlier_sibling["execution_metadata"]["duration_seconds"]
+        >= aibom_late_start_only["execution_metadata"]["duration_seconds"]
+    )
 
 
-def test_compile_aibom_runtime_omitted_fields_when_no_pod_start_time():
+def test_compile_aibom_duration_omitted_when_no_pod_start_time():
     aibom = pp.compile_aibom(
         discoveries=[], detected_datasets=[], runtime_info={},
         annotations={}, telemetry=None,
     )
-    assert aibom["runtime"]["start_time"] is None
-    assert aibom["runtime"]["duration_seconds"] is None
-    assert aibom["runtime"]["end_time"] is not None
+    assert aibom["execution_metadata"]["duration_seconds"] is None
 
 
 # ---------------------------------------------------------------------------

@@ -1054,6 +1054,11 @@ def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, tel
         )
     print(f"  Telemetry: {'available' if telemetry else 'not available'}")
 
+    # Computed once and reused for both _metadata.generated_at and the
+    # duration_seconds calculation below, so the two can't drift apart.
+    generated_at_dt = datetime.utcnow()
+    generated_at = generated_at_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
     aibom = {}
 
     # Experiment metadata from annotations
@@ -1101,10 +1106,29 @@ def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, tel
             }
         )
 
+    # duration_seconds spans from the earliest pod's start (a JobSet can have
+    # sibling pods that started at slightly different times) to now --
+    # postprocess runs immediately after the workload's Job completes/is
+    # deleted, so "now" is the closest available proxy for when it finished.
+    # Only the duration itself is stored here: the start/end timestamps it's
+    # derived from already exist as pods[].start_time above and _metadata's
+    # generated_at below, and duplicating them would give this AIBOM two
+    # sources of truth for the same fact -- permanently, since spec is
+    # immutable once created.
+    pod_start_times = [p["start_time"] for p in pods if p.get("start_time")]
+    duration_seconds = None
+    if pod_start_times:
+        try:
+            earliest_dt = min(datetime.fromisoformat(t.replace("Z", "+00:00")) for t in pod_start_times)
+            duration_seconds = round(generated_at_dt.timestamp() - earliest_dt.timestamp())
+        except (ValueError, AttributeError):
+            print(f"  WARNING: Invalid pod start_time in {pod_start_times}, omitting duration_seconds", file=sys.stderr)
+
     aibom["execution_metadata"] = {
         "job_id": JOB_NAME,
         "namespace": JOB_NAMESPACE,
         "pods": pods,
+        "duration_seconds": duration_seconds,
     }
 
     # Model info: auto-detected (container commands, then runtime hooks for
@@ -1319,31 +1343,6 @@ def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, tel
         aibom["resource_utilization"] = {
             "note": "No telemetry data available.",
         }
-
-    # Runtime: wall-clock span from the earliest pod's start (a JobSet can
-    # have sibling pods that started at slightly different times) to now --
-    # postprocess runs immediately after the workload's Job completes/is
-    # deleted, so "now" is the closest available proxy for when it finished.
-    now = datetime.utcnow()
-    generated_at = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-    pod_start_times = [p["start_time"] for p in pods if p.get("start_time")]
-    earliest_start = None
-    duration_seconds = None
-    if pod_start_times:
-        try:
-            parsed = [
-                (datetime.fromisoformat(t.replace("Z", "+00:00")), t) for t in pod_start_times
-            ]
-            earliest_dt, earliest_start = min(parsed, key=lambda p: p[0])
-            duration_seconds = round(now.timestamp() - earliest_dt.timestamp())
-        except (ValueError, AttributeError):
-            print(f"  WARNING: Invalid pod start_time in {pod_start_times}, omitting runtime", file=sys.stderr)
-
-    aibom["runtime"] = {
-        "start_time": earliest_start,
-        "end_time": generated_at,
-        "duration_seconds": duration_seconds,
-    }
 
     # Metadata
     aibom["_metadata"] = {
