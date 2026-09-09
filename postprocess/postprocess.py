@@ -12,7 +12,7 @@ import re
 import shlex
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 import urllib.request
 import urllib.parse
@@ -1496,7 +1496,11 @@ def main():
             "jobName": JOB_NAME,
             "modelName": safe_get(aibom, "model", "name", default=""),
             "experimentIntent": aibom.get("experiment_intent") or "",
-            "collectedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            # Same value as spec.data._metadata.generated_at -- computed once
+            # in compile_aibom rather than a second independent datetime.now()
+            # call, so there's a single canonical "when did this finish"
+            # timestamp instead of two that could drift apart.
+            "collectedAt": aibom["_metadata"]["generated_at"],
             "data": aibom,
         },
     }
