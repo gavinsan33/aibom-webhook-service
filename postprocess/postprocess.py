@@ -1320,10 +1320,35 @@ def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, tel
             "note": "No telemetry data available.",
         }
 
+    # Runtime: wall-clock span from the earliest pod's start (a JobSet can
+    # have sibling pods that started at slightly different times) to now --
+    # postprocess runs immediately after the workload's Job completes/is
+    # deleted, so "now" is the closest available proxy for when it finished.
+    now = datetime.utcnow()
+    generated_at = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    pod_start_times = [p["start_time"] for p in pods if p.get("start_time")]
+    earliest_start = None
+    duration_seconds = None
+    if pod_start_times:
+        try:
+            parsed = [
+                (datetime.fromisoformat(t.replace("Z", "+00:00")), t) for t in pod_start_times
+            ]
+            earliest_dt, earliest_start = min(parsed, key=lambda p: p[0])
+            duration_seconds = round(now.timestamp() - earliest_dt.timestamp())
+        except (ValueError, AttributeError):
+            print(f"  WARNING: Invalid pod start_time in {pod_start_times}, omitting runtime", file=sys.stderr)
+
+    aibom["runtime"] = {
+        "start_time": earliest_start,
+        "end_time": generated_at,
+        "duration_seconds": duration_seconds,
+    }
+
     # Metadata
     aibom["_metadata"] = {
         "aibom_version": "0.1.0",
-        "generated_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "generated_at": generated_at,
         "generator": "aibom-webhook postprocess",
         "schema_compliance": "partial - focuses on reproducibility and telemetry fields",
         "dataset_detection": (

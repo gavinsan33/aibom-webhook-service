@@ -699,6 +699,47 @@ def test_compile_aibom_no_telemetry_notes_unavailable():
 
 
 # ---------------------------------------------------------------------------
+# compile_aibom: runtime (start/end/duration)
+# ---------------------------------------------------------------------------
+
+
+def test_compile_aibom_computes_runtime_from_earliest_pod_start():
+    discoveries = [
+        {"pod_metadata": {"name": "job-abc", "start_time": "2024-01-01T00:05:00"}},
+    ]
+    aibom = pp.compile_aibom(
+        discoveries=discoveries, detected_datasets=[], runtime_info={},
+        annotations={}, telemetry=None,
+    )
+    runtime = aibom["runtime"]
+    assert runtime["start_time"] == "2024-01-01T00:05:00"
+    assert runtime["end_time"] is not None
+    assert runtime["duration_seconds"] >= 0
+
+
+def test_compile_aibom_runtime_uses_earliest_of_jobset_sibling_pods():
+    discoveries = [
+        {"pod_metadata": {"name": "server-0", "start_time": "2024-01-01T00:10:00"}},
+        {"pod_metadata": {"name": "server-1", "start_time": "2024-01-01T00:02:00"}},
+    ]
+    aibom = pp.compile_aibom(
+        discoveries=discoveries, detected_datasets=[], runtime_info={},
+        annotations={}, telemetry=None,
+    )
+    assert aibom["runtime"]["start_time"] == "2024-01-01T00:02:00"
+
+
+def test_compile_aibom_runtime_omitted_fields_when_no_pod_start_time():
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info={},
+        annotations={}, telemetry=None,
+    )
+    assert aibom["runtime"]["start_time"] is None
+    assert aibom["runtime"]["duration_seconds"] is None
+    assert aibom["runtime"]["end_time"] is not None
+
+
+# ---------------------------------------------------------------------------
 # compile_aibom: runtime_info fallbacks (transformers/peft runtime hooks,
 # for scripts with no CLI flags for detect_trl_from_command to see)
 # ---------------------------------------------------------------------------
