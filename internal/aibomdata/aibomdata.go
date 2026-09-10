@@ -55,22 +55,36 @@ const (
 	WorkloadIdentitySuffix = "-aibom-workload-identity"
 )
 
+// truncatedTriggerBase truncates triggerName to the narrowest budget any of
+// PostprocessJobName/ConfigMapName/WorkloadIdentityName need (i.e. the
+// longest suffix among them, currently WorkloadIdentitySuffix), and applies
+// it uniformly. All three names are derived from this single shared base
+// rather than each re-truncating triggerName to their own suffix's budget:
+// otherwise two distinct trigger names sharing a prefix up to the
+// shorter-suffix cutoff but differing beyond it would produce the same
+// WorkloadIdentityName while getting different ConfigMapNames -- letting
+// one job's identity cleanup (see watcher.go's collectAIBOM) delete the
+// ServiceAccount/Role/RoleBinding/Secret out from under an unrelated job
+// that happens to collide on the truncated name.
+func truncatedTriggerBase(triggerName string) string {
+	maxBase := MaxJobNameLength - len(WorkloadIdentitySuffix)
+	if len(triggerName) > maxBase {
+		triggerName = triggerName[:maxBase]
+	}
+	return strings.TrimRight(triggerName, "-")
+}
+
 // PostprocessJobName returns the deterministic postprocess Job name for a
 // given trigger name (an owning Job's name, or a bare pod's own name),
 // truncated to fit Kubernetes' 63-character name limit.
 func PostprocessJobName(triggerName string) string {
-	maxBase := MaxJobNameLength - len(PostprocessSuffix)
-	if len(triggerName) > maxBase {
-		triggerName = triggerName[:maxBase]
-	}
-	triggerName = strings.TrimRight(triggerName, "-")
-	return triggerName + PostprocessSuffix
+	return truncatedTriggerBase(triggerName) + PostprocessSuffix
 }
 
 // ConfigMapName returns the deterministic data ConfigMap name for a given
 // trigger name, truncated to fit Kubernetes' 253-character name limit.
 func ConfigMapName(triggerName string) string {
-	name := PostprocessJobName(triggerName) + ConfigMapSuffix
+	name := truncatedTriggerBase(triggerName) + PostprocessSuffix + ConfigMapSuffix
 	if len(name) > 253 {
 		name = strings.TrimRight(name[:253], "-")
 	}
@@ -80,14 +94,7 @@ func ConfigMapName(triggerName string) string {
 // WorkloadIdentityName returns the deterministic name for the per-job
 // ServiceAccount/Role/RoleBinding/Secret quartet, truncated to fit
 // Kubernetes' 63-character name limit (ServiceAccount names, like Job
-// names, are also used as label values elsewhere, so this uses the same
-// stricter limit as PostprocessJobName rather than the 253-character limit
-// ConfigMapName gets away with).
+// names, are also used as label values elsewhere).
 func WorkloadIdentityName(triggerName string) string {
-	maxBase := MaxJobNameLength - len(WorkloadIdentitySuffix)
-	if len(triggerName) > maxBase {
-		triggerName = triggerName[:maxBase]
-	}
-	triggerName = strings.TrimRight(triggerName, "-")
-	return triggerName + WorkloadIdentitySuffix
+	return truncatedTriggerBase(triggerName) + WorkloadIdentitySuffix
 }
