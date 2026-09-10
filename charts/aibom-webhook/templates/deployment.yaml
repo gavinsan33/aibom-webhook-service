@@ -42,6 +42,11 @@ spec:
             - --port=8443
             - --postprocess-image={{ .Values.image.postprocess.repository }}:{{ .Values.image.postprocess.tag }}
             - --enable-watcher={{ .Values.watcher.enabled }}
+            - --prometheus-url={{ .Values.prometheus.url }}
+            - --grafana-url={{ .Values.grafana.url }}
+            - --grafana-datasource-uid={{ .Values.grafana.datasourceUid }}
+            - --debug-keep-postprocess-jobs={{ .Values.debug.keepPostprocessJobs }}
+            - --debug-telemetry-all-pods={{ .Values.debug.telemetryAllPods }}
           volumeMounts:
             - name: certs
               mountPath: /certs
