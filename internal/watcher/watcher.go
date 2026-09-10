@@ -476,16 +476,17 @@ func (w *Watcher) getInstrumentedPods(job *batchv1.Job) ([]corev1.Pod, error) {
 // "discovery-<pod-name>.json"/"dataset-<pod-name>.json"/"storage-<pod-name>.json"
 // rather than scraped from logs — dataCM is nil if the ConfigMap doesn't exist
 // yet (e.g. none of them have run/flushed yet).
-func extractDataFromPod(pod *corev1.Pod, dataCM *corev1.ConfigMap) (discoveryJSON, discoverySig, datasetJSON, storageJSON, storageSig string) {
+func extractDataFromPod(pod *corev1.Pod, dataCM *corev1.ConfigMap) (discoveryJSON, discoverySig, datasetJSON, datasetSig, storageJSON, storageSig string) {
 	if dataCM != nil {
 		discoveryJSON = dataCM.Data[fmt.Sprintf("discovery-%s.json", pod.Name)]
 		discoverySig = dataCM.Data[fmt.Sprintf("discovery-%s.sig", pod.Name)]
 		datasetJSON = dataCM.Data[fmt.Sprintf("dataset-%s.json", pod.Name)]
+		datasetSig = dataCM.Data[fmt.Sprintf("dataset-%s.sig", pod.Name)]
 		storageJSON = dataCM.Data[fmt.Sprintf("storage-%s.json", pod.Name)]
 		storageSig = dataCM.Data[fmt.Sprintf("storage-%s.sig", pod.Name)]
 	}
 
-	return discoveryJSON, discoverySig, datasetJSON, storageJSON, storageSig
+	return discoveryJSON, discoverySig, datasetJSON, datasetSig, storageJSON, storageSig
 }
 
 // fetchDiscoverySigningKey reads the per-namespace HMAC key (see
@@ -506,6 +507,22 @@ func (w *Watcher) fetchDiscoverySigningKey(ctx context.Context, namespace string
 		return nil, err
 	}
 	return secret.Data[aibomdata.DiscoverySigningKeyDataKey], nil
+}
+
+// fetchDatasetSigningKey is fetchDiscoverySigningKey's counterpart for the
+// separate dataset-signing key (see aibomdata.DatasetSigningKeySecretName)
+// that dataset_sidecar.py signs dataset-<pod>.json with -- kept as its own
+// Secret rather than reusing the discovery key, since the sidecar and the
+// discovery init container are different processes with different inputs.
+func (w *Watcher) fetchDatasetSigningKey(ctx context.Context, namespace string) ([]byte, error) {
+	secret, err := w.clientset.CoreV1().Secrets(namespace).Get(ctx, aibomdata.DatasetSigningKeySecretName, metav1.GetOptions{})
+	if err != nil {
+		if errors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return secret.Data[aibomdata.DatasetSigningKeyDataKey], nil
 }
 
 // verifySignature reports whether sigHex is a valid HMAC-SHA256 of payload
@@ -683,9 +700,13 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 	if err != nil {
 		log.Printf("warning: could not read discovery signing key in namespace %s: %v", namespace, err)
 	}
+	datasetSigningKey, err := w.fetchDatasetSigningKey(ctx, namespace)
+	if err != nil {
+		log.Printf("warning: could not read dataset signing key in namespace %s: %v", namespace, err)
+	}
 
 	for _, pod := range pods {
-		disc, discSig, ds, storage, storageSig := extractDataFromPod(&pod, dataCM)
+		disc, discSig, ds, dsSig, storage, storageSig := extractDataFromPod(&pod, dataCM)
 		if disc != "" && signingKey != nil && !verifySignature(signingKey, disc, discSig) {
 			log.Printf("warning: dropping unverified discovery data for pod %s/%s (missing or invalid signature)", namespace, pod.Name)
 			disc = ""
@@ -693,6 +714,10 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 		if storage != "" && signingKey != nil && !verifySignature(signingKey, storage, storageSig) {
 			log.Printf("warning: dropping unverified storage data for pod %s/%s (missing or invalid signature)", namespace, pod.Name)
 			storage = ""
+		}
+		if ds != "" && datasetSigningKey != nil && !verifySignature(datasetSigningKey, ds, dsSig) {
+			log.Printf("warning: dropping unverified dataset data for pod %s/%s (missing or invalid signature)", namespace, pod.Name)
+			ds = ""
 		}
 		discoveries = append(discoveries, disc)
 		datasets = append(datasets, ds)

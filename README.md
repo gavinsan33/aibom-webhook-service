@@ -59,7 +59,7 @@ just setup-namespace my-ai-workloads
 1. Labels the namespace `aibom.io/enabled=true` — opts it into webhook instrumentation
 2. Runs `helm upgrade --install aibom-ns-<namespace> charts/aibom-workload-namespace -n <namespace>`, which creates the image-puller RoleBinding, the `aibom-scripts` ConfigMap, the `aibom-postprocess` ServiceAccount/RBAC, the `aibom-workload-data` RBAC, and the `aibom-discovery-hmac-key` Secret used to sign discovery data (see `charts/aibom-workload-namespace/templates/`)
 
-**Upgrading an existing namespace**: re-run `just setup-namespace <ns>` any time `scripts/aibom-scripts/*.py` changes — `helm upgrade --install` is idempotent. A stale `aibom-scripts` ConfigMap can fail *pod startup* for every instrumented workload in the namespace (not just silently skip dataset detection), since the dataset detector hook mounts `k8s_api.py` via a `subPath` volume mount.
+**Upgrading an existing namespace**: re-run `just setup-namespace <ns>` any time `scripts/aibom-scripts/*.py` changes — `helm upgrade --install` is idempotent. A stale `aibom-scripts` ConfigMap can fail *pod startup* for every instrumented workload in the namespace (not just silently skip dataset detection), since the dataset detector hook mounts `runtime_detector.py` via a `subPath` volume mount, and the `aibom-discovery`/`aibom-dataset-sidecar` init containers each run a script straight out of that same ConfigMap.
 
 ## Cluster Deployment
 
@@ -193,7 +193,8 @@ scripts/
   aibom-scripts/
     generate_snapshot.py             # Hardware discovery script (from coldpress)
     runtime_detector.py               # Dataset detection + training runtime hooks (from coldpress)
-    k8s_api.py                       # Stdlib-only in-cluster REST client shared by both scripts
+    k8s_api.py                       # Stdlib-only in-cluster REST client shared by these scripts
+    dataset_sidecar.py               # Signs + publishes dataset detection data from outside the app container
 examples/
   vllm-inference.yaml               # Example JobSet: vLLM server + guidellm benchmark
   vllm-inference-rhoai.yaml         # Same model via a RHOAI/KServe InferenceService
@@ -223,6 +224,7 @@ The webhook server accepts these flags:
 | `--dataset-detection` | `true` | Inject dataset detection hooks into application containers |
 | `--enable-watcher` | `true` | Start the Job completion watcher |
 | `--postprocess-image` | `busybox:latest` | Image for AIBOM postprocess Jobs (set to the aibom-postprocess image) |
+| `--dataset-sidecar-image` | `python:3.12-slim` | Image for the dataset-signing sidecar container |
 
 ## What Gets Injected
 
@@ -236,13 +238,18 @@ When the webhook mutates a pod, it adds:
 - Signs that data with a per-namespace HMAC key mounted only into this init container — never into the application container — so the watcher can reject a forged or overwritten entry before it's trusted; see `CLAUDE.md`
 
 **Runtime detector (into each application container):**
-- Mounts `runtime_detector.py` as `usercustomize.py` on `PYTHONPATH`, plus `k8s_api.py` alongside it
+- Mounts `runtime_detector.py` as `usercustomize.py` on `PYTHONPATH`
 - Python auto-imports it at startup — no code changes needed
 - Hooks into PyTorch DataLoader, HuggingFace `datasets.load_dataset`, torchvision datasets, and webdataset, plus `transformers.TrainingArguments`, `transformers.PreTrainedModel.from_pretrained`, and `peft.LoraConfig`
 - Captures dataset name, version, split, fingerprint, license, and training args
-- Writes the result into the same data ConfigMap (key `dataset-<pod-name>.json`) at process exit
+- Writes the result to a local file on the shared `aibom-data` volume at process exit — this container never talks to the Kubernetes API itself
 
-See `CLAUDE.md` for the detection internals (CLI-arg parsing, runtime hooks, KServe storage-path resolution, quantization/parallelization detection).
+**Sidecar (`aibom-dataset-sidecar`, into the pod's init containers, alongside `aibom-discovery`):**
+- A Kubernetes native sidecar (`restartPolicy: Always`) — starts without blocking the app container, runs for the pod's whole lifetime, and terminates only after every app container has already exited
+- Watches the local file the runtime detector writes; on change, signs it with a per-namespace HMAC key (separate from the discovery key) mounted only into this container, and publishes it into the data ConfigMap (key `dataset-<pod-name>.json`)
+- This is the only component that writes dataset data into the ConfigMap — the app container holds no credentials for it
+
+See `CLAUDE.md` for the detection internals (CLI-arg parsing, runtime hooks, KServe storage-path resolution, quantization/parallelization detection) and the signing/trust model for both the discovery and dataset sidecar paths.
 
 ## Postprocess Flow
 

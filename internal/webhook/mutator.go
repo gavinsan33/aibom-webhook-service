@@ -28,6 +28,13 @@ type Mutator struct {
 	DiscoveryImage   string
 	DatasetDetection bool
 
+	// DatasetSidecarImage runs dataset_sidecar.py (see #47) -- unlike
+	// DiscoveryImage, this never needs GPU tooling or a training
+	// framework, only Python's stdlib, so it defaults to a minimal image
+	// rather than reusing DiscoveryImage. Exported so main.go can override
+	// it from a flag, same as DiscoveryImage/PostprocessImage.
+	DatasetSidecarImage string
+
 	// Clientset, if set, lets Mutate provision a per-job workload identity
 	// (see identity.go's ensureWorkloadIdentity) scoped to exactly this
 	// job's own data ConfigMap. Left nil in tests that don't exercise this
@@ -45,8 +52,9 @@ type PatchOperation struct {
 
 func NewMutator(discoveryImage string, datasetDetection bool) *Mutator {
 	return &Mutator{
-		DiscoveryImage:   discoveryImage,
-		DatasetDetection: datasetDetection,
+		DiscoveryImage:      discoveryImage,
+		DatasetDetection:    datasetDetection,
+		DatasetSidecarImage: "python:3.12-slim",
 	}
 }
 
@@ -83,26 +91,21 @@ func (m *Mutator) Mutate(pod *corev1.Pod) ([]PatchOperation, error) {
 	patches = appendVolume(patches, pod, buildDiscoverySigningKeyVolume())
 
 	// Add discovery init container
-	initContainer := m.buildDiscoveryInitContainer(pod)
-	if len(pod.Spec.InitContainers) == 0 {
-		patches = append(patches, PatchOperation{
-			Op:    "add",
-			Path:  "/spec/initContainers",
-			Value: []corev1.Container{initContainer},
-		})
-	} else {
-		patches = append(patches, PatchOperation{
-			Op:    "add",
-			Path:  "/spec/initContainers/-",
-			Value: initContainer,
-		})
-	}
+	patches = appendInitContainer(patches, pod, m.buildDiscoveryInitContainer(pod))
 
-	// Inject dataset detector into application containers
+	// Inject dataset detector into application containers, and the sidecar
+	// that signs and publishes what it detects (see #47) -- gated on the
+	// same flag, since without dataset detection nothing ever gets written
+	// for the sidecar to watch. The app container itself gets no
+	// Kubernetes API credentials for this at all anymore (contrast with
+	// the discovery init container, which still shares identitySecretName
+	// via aibom-token) -- see buildDatasetDetectorPatches.
 	if m.DatasetDetection {
 		for i := range pod.Spec.Containers {
-			patches = append(patches, m.buildDatasetDetectorPatches(pod, i, identitySecretName)...)
+			patches = append(patches, m.buildDatasetDetectorPatches(pod, i)...)
 		}
+		patches = appendVolume(patches, pod, buildDatasetSigningKeyVolume())
+		patches = appendInitContainer(patches, pod, m.buildDatasetSidecarContainer(pod))
 	}
 
 	// Add instrumented label
@@ -312,10 +315,58 @@ func podGPUResource(pod *corev1.Pod) *resource.Quantity {
 	return nil
 }
 
+// containerRestartPolicyAlways is a package-level var (rather than an
+// inline &corev1.ContainerRestartPolicyAlways) since Go doesn't allow
+// taking the address of a typed constant directly.
+var containerRestartPolicyAlways = corev1.ContainerRestartPolicyAlways
+
+// buildDatasetSidecarContainer builds the aibom-dataset-sidecar container
+// (dataset_sidecar.py, see #47): a Kubernetes native sidecar (an init
+// container with RestartPolicy: Always), which the kubelet starts without
+// blocking the rest of the pod on it completing, keeps running for the
+// pod's whole lifetime, and only terminates after every main container has
+// already exited -- letting it catch runtime_detector.py's
+// atexit-triggered final flush before the pod goes away.
+//
+// It shares the discovery init container's identity (aibom-token) rather
+// than getting a separate one: both are platform-controlled processes, and
+// the isolation that actually matters (per #43) is job-vs-job, not
+// discovery-vs-sidecar, so provisioning a second per-job ServiceAccount
+// here would add nothing.
+func (m *Mutator) buildDatasetSidecarContainer(pod *corev1.Pod) corev1.Container {
+	env := []corev1.EnvVar{
+		downwardAPIEnv("POD_NAME", "metadata.name"),
+		downwardAPIEnv("POD_NAMESPACE", "metadata.namespace"),
+		{Name: "AIBOM_DATASET_OUTPUT", Value: "/tmp/aibom/dataset_detected.json"},
+	}
+	if dataConfigMapEnv, ok := dataConfigMapEnvVar(pod); ok {
+		env = append(env, dataConfigMapEnv)
+	}
+
+	return corev1.Container{
+		Name:          "aibom-dataset-sidecar",
+		Image:         m.DatasetSidecarImage,
+		RestartPolicy: &containerRestartPolicyAlways,
+		Command:       []string{"/bin/bash", "-c"},
+		Args:          []string{"python3 /scripts/dataset_sidecar.py"},
+		Env:           env,
+		VolumeMounts: []corev1.VolumeMount{
+			// Same aibom-data emptyDir the app container writes
+			// dataset_detected.json into (mounted there at the same
+			// "/tmp/aibom" path -- see buildDatasetDetectorPatches), just
+			// read-only here since this container only ever reads it.
+			{Name: "aibom-data", MountPath: "/tmp/aibom", ReadOnly: true},
+			{Name: "aibom-scripts", MountPath: "/scripts", ReadOnly: true},
+			aibomTokenVolumeMount(),
+			datasetSigningKeyVolumeMount(),
+		},
+	}
+}
+
 // buildDatasetDetectorPatches creates JSON patches to inject dataset detection
 // into a specific application container. It adds env vars for activation and
 // mounts the detector script as usercustomize.py so Python auto-imports it.
-func (m *Mutator) buildDatasetDetectorPatches(pod *corev1.Pod, containerIdx int, identitySecretName string) []PatchOperation {
+func (m *Mutator) buildDatasetDetectorPatches(pod *corev1.Pod, containerIdx int) []PatchOperation {
 	var patches []PatchOperation
 	container := &pod.Spec.Containers[containerIdx]
 
@@ -328,6 +379,10 @@ func (m *Mutator) buildDatasetDetectorPatches(pod *corev1.Pod, containerIdx int,
 		}
 	}
 
+	// No AIBOM_DATA_CONFIGMAP here -- unlike the discovery init container
+	// and the dataset sidecar, this container no longer talks to the
+	// Kubernetes API at all (see #47), so it has no use for the ConfigMap
+	// name.
 	envVars := []corev1.EnvVar{
 		{Name: "AIBOM_DATASET_DETECT", Value: "1"},
 		{Name: "AIBOM_DEBUG", Value: "1"},
@@ -335,9 +390,6 @@ func (m *Mutator) buildDatasetDetectorPatches(pod *corev1.Pod, containerIdx int,
 		downwardAPIEnv("POD_NAME", "metadata.name"),
 		downwardAPIEnv("POD_NAMESPACE", "metadata.namespace"),
 		{Name: "PYTHONPATH", Value: pythonPath},
-	}
-	if dataConfigMapEnv, ok := dataConfigMapEnvVar(pod); ok {
-		envVars = append(envVars, dataConfigMapEnv)
 	}
 
 	envPath := fmt.Sprintf("/spec/containers/%d/env", containerIdx)
@@ -373,8 +425,15 @@ func (m *Mutator) buildDatasetDetectorPatches(pod *corev1.Pod, containerIdx int,
 		}
 	}
 
-	// Mount usercustomize.py (runtime detector), its k8s_api.py import
-	// dependency, and the aibom-data volume
+	// Mount usercustomize.py (runtime detector) and the aibom-data volume
+	// it writes dataset_detected.json into. No k8s_api.py mount and no
+	// Kubernetes API token here anymore -- runtime_detector.py no longer
+	// talks to the Kubernetes API at all (see #47); the aibom-dataset-
+	// sidecar container reads this same aibom-data volume and performs the
+	// actual (signed) ConfigMap write instead. This container's own
+	// pre-existing ServiceAccount token mount (if any, from the built-in
+	// admission controller) is left completely untouched, unlike before
+	// #47 -- there's nothing here for it to need access to anymore.
 	mounts := []corev1.VolumeMount{
 		{
 			Name:      "aibom-scripts",
@@ -383,43 +442,10 @@ func (m *Mutator) buildDatasetDetectorPatches(pod *corev1.Pod, containerIdx int,
 			ReadOnly:  true,
 		},
 		{
-			Name:      "aibom-scripts",
-			MountPath: "/aibom-hooks/k8s_api.py",
-			SubPath:   "k8s_api.py",
-			ReadOnly:  true,
-		},
-		{
 			Name:      "aibom-data",
 			MountPath: "/tmp/aibom",
 		},
 	}
-	// Unlike the discovery init container (which we add fresh and so never
-	// has a pre-existing mount to collide with), this is the workload's own
-	// container — if automountServiceAccountToken wasn't disabled, the
-	// built-in ServiceAccount admission controller already mounted a token
-	// at this same path before our webhook ran, and a second volumeMount at
-	// an identical path fails pod admission outright.
-	existingTokenMountIdx := volumeMountIndexAtPath(container.VolumeMounts, aibomTokenVolumeMount().MountPath)
-	switch {
-	case existingTokenMountIdx == -1:
-		mounts = append(mounts, aibomTokenVolumeMount())
-	case identitySecretName != "":
-		// A per-job identity was provisioned (see ensurePodWorkloadIdentity),
-		// so the built-in default-SA mount already occupying this path would
-		// otherwise leave this container able to fall back to its own
-		// (broader, namespace-wide) ServiceAccount for ConfigMap writes,
-		// defeating the point of scoping this identity to one job's
-		// ConfigMap in the first place. Retarget it to our volume instead of
-		// leaving it in place.
-		patches = append(patches, PatchOperation{
-			Op:    "replace",
-			Path:  fmt.Sprintf("/spec/containers/%d/volumeMounts/%d/name", containerIdx, existingTokenMountIdx),
-			Value: aibomTokenVolumeMount().Name,
-		})
-	}
-	// else: no per-job identity available (bare pod, no Clientset, or
-	// provisioning failed) -- leave the pre-existing default-SA mount alone,
-	// same as today.
 
 	mountPath := fmt.Sprintf("/spec/containers/%d/volumeMounts", containerIdx)
 	if len(container.VolumeMounts) == 0 {
@@ -571,15 +597,34 @@ func discoverySigningKeyVolumeMount() corev1.VolumeMount {
 	}
 }
 
-// volumeMountIndexAtPath returns the index of the volumeMount in mounts
-// whose MountPath matches path, or -1 if none does.
-func volumeMountIndexAtPath(mounts []corev1.VolumeMount, path string) int {
-	for i, m := range mounts {
-		if m.MountPath == path {
-			return i
-		}
+// buildDatasetSigningKeyVolume mirrors buildDiscoverySigningKeyVolume for
+// the separate dataset-signing key (see aibomdata.DatasetSigningKeySecretName
+// for why it's a distinct Secret from the discovery one). Mounted only into
+// the aibom-dataset-sidecar container -- never the app container, and never
+// the discovery init container either. Optional for the same reason as the
+// discovery key: a namespace whose chart install predates this key's
+// addition to signing.yaml simply has no such Secret, and
+// dataset_sidecar.py falls back to publishing unsigned dataset data rather
+// than the sidecar failing to start.
+func buildDatasetSigningKeyVolume() corev1.Volume {
+	optional := true
+	return corev1.Volume{
+		Name: "aibom-dataset-signing-key",
+		VolumeSource: corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{
+				SecretName: aibomdata.DatasetSigningKeySecretName,
+				Optional:   &optional,
+			},
+		},
 	}
-	return -1
+}
+
+func datasetSigningKeyVolumeMount() corev1.VolumeMount {
+	return corev1.VolumeMount{
+		Name:      "aibom-dataset-signing-key",
+		MountPath: "/var/run/secrets/aibom/dataset-signing",
+		ReadOnly:  true,
+	}
 }
 
 // appendVolume adds a volume patch, handling nil vs existing volumes array.
@@ -604,5 +649,32 @@ func appendVolume(patches []PatchOperation, pod *corev1.Pod, vol corev1.Volume) 
 		Op:    "add",
 		Path:  "/spec/volumes/-",
 		Value: vol,
+	})
+}
+
+// appendInitContainer adds an initContainer patch, handling nil vs existing
+// initContainers array, and tracking the running count the same way
+// appendVolume does -- needed since Mutate can now add more than one init
+// container in a single call (the discovery init container, and, when
+// dataset detection is enabled, the dataset sidecar -- see #47).
+func appendInitContainer(patches []PatchOperation, pod *corev1.Pod, c corev1.Container) []PatchOperation {
+	existingCount := len(pod.Spec.InitContainers)
+	for _, p := range patches {
+		if p.Path == "/spec/initContainers" || p.Path == "/spec/initContainers/-" {
+			existingCount++
+		}
+	}
+
+	if existingCount == 0 {
+		return append(patches, PatchOperation{
+			Op:    "add",
+			Path:  "/spec/initContainers",
+			Value: []corev1.Container{c},
+		})
+	}
+	return append(patches, PatchOperation{
+		Op:    "add",
+		Path:  "/spec/initContainers/-",
+		Value: c,
 	})
 }

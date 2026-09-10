@@ -30,12 +30,14 @@ func main() {
 	flag.BoolVar(&cfg.DatasetDetection, "dataset-detection", true, "inject dataset detection hooks into application containers")
 	flag.BoolVar(&cfg.EnableWatcher, "enable-watcher", true, "start the Job completion watcher")
 	flag.StringVar(&cfg.PostprocessImage, "postprocess-image", "busybox:latest", "image for postprocess Jobs")
+	flag.StringVar(&cfg.DatasetSidecarImage, "dataset-sidecar-image", "python:3.12-slim", "image for the dataset-signing sidecar container")
 	flag.Parse()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	mutator := webhook.NewMutator(cfg.DiscoveryImage, cfg.DatasetDetection)
+	mutator.DatasetSidecarImage = cfg.DatasetSidecarImage
 
 	// Built unconditionally (not gated on cfg.EnableWatcher) since the
 	// mutator itself now needs a clientset too, to provision per-job

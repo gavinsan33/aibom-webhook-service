@@ -345,4 +345,5 @@ setup-namespace namespace skip_label="false": _check-auth
     helm upgrade --install aibom-ns-{{ namespace }} charts/aibom-workload-namespace -n {{ namespace }} \
         --set-file scripts.generateSnapshot=scripts/aibom-scripts/generate_snapshot.py \
         --set-file scripts.runtimeDetector=scripts/aibom-scripts/runtime_detector.py \
-        --set-file scripts.k8sApi=scripts/aibom-scripts/k8s_api.py
+        --set-file scripts.k8sApi=scripts/aibom-scripts/k8s_api.py \
+        --set-file scripts.datasetSidecar=scripts/aibom-scripts/dataset_sidecar.py
