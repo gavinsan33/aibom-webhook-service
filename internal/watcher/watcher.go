@@ -182,6 +182,13 @@ func (w *Watcher) onJobEvent(obj interface{}) {
 	}
 
 	if !w.shouldPostprocess(job) {
+		// This job may still have had a per-job workload identity provisioned
+		// at admission time (the webhook creates one for any Job-owned pod,
+		// regardless of whether the job ends up qualifying for postprocessing
+		// here — see mutator.go's ensurePodWorkloadIdentity). Since this job
+		// will never reach collectAIBOM (the only other place that deletes
+		// it), clean it up here instead of leaking it forever.
+		w.deleteWorkloadIdentity(context.TODO(), job.Namespace, job.Name)
 		if hasFinalizer(job) {
 			w.removeFinalizer(context.TODO(), job)
 		}
@@ -193,6 +200,7 @@ func (w *Watcher) onJobEvent(obj interface{}) {
 		retries := postprocessRetryCount(job.Annotations) + 1
 		if retries >= maxPostprocessRetries {
 			log.Printf("giving up on postprocessing %s/%s after %d retries; removing finalizer", job.Namespace, job.Name, retries)
+			w.deleteWorkloadIdentity(context.TODO(), job.Namespace, job.Name)
 			if hasFinalizer(job) {
 				w.removeFinalizer(context.TODO(), job)
 			}
@@ -950,5 +958,32 @@ func (w *Watcher) collectAIBOM(ctx context.Context, job *batchv1.Job) {
 	configMapName := job.Name + configMapSuffix
 	if err := w.clientset.CoreV1().ConfigMaps(job.Namespace).Delete(ctx, configMapName, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
 		log.Printf("warning: could not delete postprocess data configmap %s/%s: %v", job.Namespace, configMapName, err)
+	}
+
+	w.deleteWorkloadIdentity(ctx, job.Namespace, originalJobName)
+}
+
+// deleteWorkloadIdentity removes the per-job ServiceAccount, Role,
+// RoleBinding, and token Secret the webhook provisioned at admission time
+// for originalJobName (see internal/webhook/identity.go's
+// ensureWorkloadIdentity), so a same-named rerun of the workload
+// re-provisions fresh ones instead of reusing a stale token, and so these
+// don't otherwise accumulate forever. Deleting the ServiceAccount also
+// immediately invalidates any token minted for it, independent of the
+// token's own expiration.
+func (w *Watcher) deleteWorkloadIdentity(ctx context.Context, namespace, triggerName string) {
+	name := aibomdata.WorkloadIdentityName(triggerName)
+
+	if err := w.clientset.CoreV1().ServiceAccounts(namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+		log.Printf("warning: could not delete workload identity serviceaccount %s/%s: %v", namespace, name, err)
+	}
+	if err := w.clientset.RbacV1().Roles(namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+		log.Printf("warning: could not delete workload identity role %s/%s: %v", namespace, name, err)
+	}
+	if err := w.clientset.RbacV1().RoleBindings(namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+		log.Printf("warning: could not delete workload identity rolebinding %s/%s: %v", namespace, name, err)
+	}
+	if err := w.clientset.CoreV1().Secrets(namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+		log.Printf("warning: could not delete workload identity token secret %s/%s: %v", namespace, name, err)
 	}
 }

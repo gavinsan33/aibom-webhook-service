@@ -14,20 +14,61 @@ rules:
   - apiGroups: [""]
     resources: ["namespaces"]
     verbs: ["list", "watch"]
+  # "patch" is needed even though this process only ever does Get+Update on
+  # ConfigMaps itself (see watcher.go) -- ensureWorkloadIdentity grants
+  # "patch" to each per-job Role (matching what k8s_api.py's workloads
+  # actually call), and Kubernetes' RBAC escalation check refuses to let an
+  # identity grant a verb it doesn't itself hold, even on a Role it's about
+  # to scope down via resourceNames.
   - apiGroups: [""]
     resources: ["configmaps"]
-    verbs: ["get", "create", "update", "delete"]
+    verbs: ["get", "create", "update", "patch", "delete"]
   # jobs: list/watch back the Job informer; create/patch/delete are used directly
   # for postprocess Job lifecycle and finalizer management. No direct Get/Update call exists.
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["list", "watch", "create", "patch", "delete"]
-  # secrets: intentionally absent here. Read access to a namespace's discovery
-  # signing key (aibom-discovery-hmac-key) is granted per-namespace via a
-  # namespaced Role/RoleBinding created by aibom-workload-namespace's
-  # signing.yaml, not by this cluster-wide ClusterRole -- so this identity's
-  # blast radius is limited to namespaces that actually installed that chart,
-  # not every namespace on the cluster.
+  # serviceaccounts, roles, rolebindings: the webhook provisions (Mutate)
+  # and the watcher tears down (collectAIBOM) a per-job ServiceAccount/
+  # Role/RoleBinding scoped via resourceNames to exactly one job's own data
+  # ConfigMap (see internal/webhook/identity.go's ensureWorkloadIdentity),
+  # closing the cross-job ConfigMap access #43 describes. This is a real
+  # privilege increase over the read-only/narrowly-scoped grants elsewhere
+  # in this ClusterRole: an identity that can create Roles can in principle
+  # create one for itself with broader rights than this ClusterRole itself
+  # holds (Kubernetes' RBAC escalation check only prevents *binding*
+  # privileges the creator doesn't already have, not creating the Role
+  # object itself with excess rules it never binds). No get/update verb is
+  # needed on roles/rolebindings: both are created once per job and never
+  # read back or modified in place, only deleted at cleanup.
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["create", "delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["create", "delete"]
+  # secrets: create/get/update/delete is for the per-job identity token
+  # Secret ensureWorkloadIdentity provisions and collectAIBOM tears down
+  # (get is needed to check for an already-minted, still-valid token before
+  # requesting a new one). Read access to a namespace's discovery signing
+  # key (aibom-discovery-hmac-key) is granted separately, per-namespace, via
+  # a namespaced Role/RoleBinding created by aibom-workload-namespace's
+  # signing.yaml -- not by this cluster-wide ClusterRole -- so that
+  # specific key's blast radius stays limited to namespaces that actually
+  # installed that chart, not every namespace on the cluster. The grant
+  # here, by contrast, is unavoidably cluster-wide like the configmaps/jobs
+  # grants above, since this ClusterRole is bound once via a
+  # ClusterRoleBinding rather than per-namespace.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create", "update", "delete"]
+  # serviceaccounts/token: TokenRequest subresource used to mint the
+  # per-job identity's token (see requestServiceAccountToken). Distinct
+  # verb/resource from the "serviceaccounts" create/delete grant above --
+  # RBAC treats subresources as separate resources entirely.
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    verbs: ["create"]
   # No serving.kserve.io permission here deliberately: resolving an
   # InferenceService's storage.path/storageUri for model identity is done by
   # the aibom-discovery init container itself, using the workload's own
