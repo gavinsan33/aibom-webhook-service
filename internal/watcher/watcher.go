@@ -182,6 +182,13 @@ func (w *Watcher) onJobEvent(obj interface{}) {
 	}
 
 	if !w.shouldPostprocess(job) {
+		// This job may still have had a per-job workload identity provisioned
+		// at admission time (the webhook creates one for any Job-owned pod,
+		// regardless of whether the job ends up qualifying for postprocessing
+		// here — see mutator.go's ensurePodWorkloadIdentity). Since this job
+		// will never reach collectAIBOM (the only other place that deletes
+		// it), clean it up here instead of leaking it forever.
+		w.deleteWorkloadIdentity(context.TODO(), job.Namespace, job.Name)
 		if hasFinalizer(job) {
 			w.removeFinalizer(context.TODO(), job)
 		}
@@ -193,6 +200,7 @@ func (w *Watcher) onJobEvent(obj interface{}) {
 		retries := postprocessRetryCount(job.Annotations) + 1
 		if retries >= maxPostprocessRetries {
 			log.Printf("giving up on postprocessing %s/%s after %d retries; removing finalizer", job.Namespace, job.Name, retries)
+			w.deleteWorkloadIdentity(context.TODO(), job.Namespace, job.Name)
 			if hasFinalizer(job) {
 				w.removeFinalizer(context.TODO(), job)
 			}
