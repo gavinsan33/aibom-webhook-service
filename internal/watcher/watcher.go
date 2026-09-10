@@ -476,24 +476,27 @@ func (w *Watcher) getInstrumentedPods(job *batchv1.Job) ([]corev1.Pod, error) {
 // "discovery-<pod-name>.json"/"dataset-<pod-name>.json"/"storage-<pod-name>.json"
 // rather than scraped from logs — dataCM is nil if the ConfigMap doesn't exist
 // yet (e.g. none of them have run/flushed yet).
-func extractDataFromPod(pod *corev1.Pod, dataCM *corev1.ConfigMap) (discoveryJSON, discoverySig, datasetJSON, storageJSON string) {
+func extractDataFromPod(pod *corev1.Pod, dataCM *corev1.ConfigMap) (discoveryJSON, discoverySig, datasetJSON, storageJSON, storageSig string) {
 	if dataCM != nil {
 		discoveryJSON = dataCM.Data[fmt.Sprintf("discovery-%s.json", pod.Name)]
 		discoverySig = dataCM.Data[fmt.Sprintf("discovery-%s.sig", pod.Name)]
 		datasetJSON = dataCM.Data[fmt.Sprintf("dataset-%s.json", pod.Name)]
 		storageJSON = dataCM.Data[fmt.Sprintf("storage-%s.json", pod.Name)]
+		storageSig = dataCM.Data[fmt.Sprintf("storage-%s.sig", pod.Name)]
 	}
 
-	return discoveryJSON, discoverySig, datasetJSON, storageJSON
+	return discoveryJSON, discoverySig, datasetJSON, storageJSON, storageSig
 }
 
 // fetchDiscoverySigningKey reads the per-namespace HMAC key (see
 // aibomdata.DiscoverySigningKeySecretName) that generate_snapshot.py signs
-// discovery-<pod>.json with. A missing Secret (nil, nil) means the namespace
-// hasn't been upgraded to a chart version carrying signing.yaml yet —
-// callers treat that as "verification unavailable" and pass discovery data
-// through unverified, rather than dropping it outright, so this is a
-// gradual rollout, not a hard requirement.
+// discovery-<pod>.json and storage-<pod>.json with -- both are written by
+// that same trusted discovery init container, so they share one key (see
+// generate_snapshot.py's sign_payload). A missing Secret (nil, nil) means
+// the namespace hasn't been upgraded to a chart version carrying
+// signing.yaml yet — callers treat that as "verification unavailable" and
+// pass the data through unverified, rather than dropping it outright, so
+// this is a gradual rollout, not a hard requirement.
 func (w *Watcher) fetchDiscoverySigningKey(ctx context.Context, namespace string) ([]byte, error) {
 	secret, err := w.clientset.CoreV1().Secrets(namespace).Get(ctx, aibomdata.DiscoverySigningKeySecretName, metav1.GetOptions{})
 	if err != nil {
@@ -505,13 +508,14 @@ func (w *Watcher) fetchDiscoverySigningKey(ctx context.Context, namespace string
 	return secret.Data[aibomdata.DiscoverySigningKeyDataKey], nil
 }
 
-// verifyDiscoverySignature reports whether sigHex is a valid HMAC-SHA256 of
-// payload under key. An empty/missing signature never verifies — a pod
-// whose application container overwrote discovery-<pod>.json without also
-// producing a valid discovery-<pod>.sig (impossible without the key, which
-// is never mounted into an app container) is exactly the forgery this
-// exists to catch.
-func verifyDiscoverySignature(key []byte, payload, sigHex string) bool {
+// verifySignature reports whether sigHex is a valid HMAC-SHA256 of payload
+// under key. Used for both discovery-<pod>.json and storage-<pod>.json,
+// which share one key (see fetchDiscoverySigningKey). An empty/missing
+// signature never verifies — a pod whose application container overwrote
+// one of these keys without also producing a valid .sig (impossible
+// without the key, which is never mounted into an app container) is
+// exactly the forgery this exists to catch.
+func verifySignature(key []byte, payload, sigHex string) bool {
 	if sigHex == "" {
 		return false
 	}
@@ -681,10 +685,14 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 	}
 
 	for _, pod := range pods {
-		disc, discSig, ds, storage := extractDataFromPod(&pod, dataCM)
-		if disc != "" && signingKey != nil && !verifyDiscoverySignature(signingKey, disc, discSig) {
+		disc, discSig, ds, storage, storageSig := extractDataFromPod(&pod, dataCM)
+		if disc != "" && signingKey != nil && !verifySignature(signingKey, disc, discSig) {
 			log.Printf("warning: dropping unverified discovery data for pod %s/%s (missing or invalid signature)", namespace, pod.Name)
 			disc = ""
+		}
+		if storage != "" && signingKey != nil && !verifySignature(signingKey, storage, storageSig) {
+			log.Printf("warning: dropping unverified storage data for pod %s/%s (missing or invalid signature)", namespace, pod.Name)
+			storage = ""
 		}
 		discoveries = append(discoveries, disc)
 		datasets = append(datasets, ds)

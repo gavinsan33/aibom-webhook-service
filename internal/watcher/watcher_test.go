@@ -760,7 +760,7 @@ func TestVerifyDiscoverySignature_ValidSignatureVerifies(t *testing.T) {
 	key := []byte("test-key")
 	payload := `{"gpu":{"gpu_count":"2"}}`
 	sig := hmacHex(t, key, payload)
-	if !verifyDiscoverySignature(key, payload, sig) {
+	if !verifySignature(key, payload, sig) {
 		t.Error("expected valid signature to verify")
 	}
 }
@@ -768,7 +768,7 @@ func TestVerifyDiscoverySignature_ValidSignatureVerifies(t *testing.T) {
 func TestVerifyDiscoverySignature_WrongKeyFails(t *testing.T) {
 	payload := `{"gpu":{"gpu_count":"2"}}`
 	sig := hmacHex(t, []byte("real-key"), payload)
-	if verifyDiscoverySignature([]byte("wrong-key"), payload, sig) {
+	if verifySignature([]byte("wrong-key"), payload, sig) {
 		t.Error("expected signature under a different key to fail verification")
 	}
 }
@@ -776,13 +776,13 @@ func TestVerifyDiscoverySignature_WrongKeyFails(t *testing.T) {
 func TestVerifyDiscoverySignature_TamperedPayloadFails(t *testing.T) {
 	key := []byte("test-key")
 	sig := hmacHex(t, key, `{"gpu":{"gpu_count":"2"}}`)
-	if verifyDiscoverySignature(key, `{"gpu":{"gpu_count":"8"}}`, sig) {
+	if verifySignature(key, `{"gpu":{"gpu_count":"8"}}`, sig) {
 		t.Error("expected a payload that doesn't match the signed one to fail verification")
 	}
 }
 
 func TestVerifyDiscoverySignature_EmptySignatureFails(t *testing.T) {
-	if verifyDiscoverySignature([]byte("key"), "payload", "") {
+	if verifySignature([]byte("key"), "payload", "") {
 		t.Error("expected an empty signature to never verify")
 	}
 }
@@ -904,6 +904,122 @@ func TestPostprocessKeepsUnverifiedDiscoveryWhenNoSigningKeyConfigured(t *testin
 	}
 	if cm.Data["discovery.json"] != "["+unsignedDiscovery+"]" {
 		t.Errorf("expected unsigned discovery data to pass through when no signing key is configured, got discovery.json = %q", cm.Data["discovery.json"])
+	}
+}
+
+// TestPostprocessDropsForgedStorageData mirrors
+// TestPostprocessDropsForgedDiscoveryData for #44: storage-<pod>.json is
+// written by the same trusted discovery init container as
+// discovery-<pod>.json (see generate_snapshot.py's
+// resolve_inference_service_storage), so it's verified the same way and
+// with the same key.
+func TestPostprocessDropsForgedStorageData(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	now := metav1.Now()
+	pod := instrumentedBarePod("granite-model-predictor-abc123", "test-ns")
+	pod.Finalizers = []string{podFinalizerName}
+	pod.DeletionTimestamp = &now
+
+	key := []byte("shared-secret")
+	secret := discoverySigningSecret("test-ns", key)
+	forgedStorage := `{"inference_service":"forged","storage_path":"models/forged"}`
+	dataConfigMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pod.Name + "-aibom-postprocess-data",
+			Namespace: "test-ns",
+		},
+		Data: map[string]string{
+			fmt.Sprintf("storage-%s.json", pod.Name): forgedStorage,
+			fmt.Sprintf("storage-%s.sig", pod.Name):  "not-a-real-signature",
+		},
+	}
+
+	client := fake.NewSimpleClientset(ns, pod, dataConfigMap, secret)
+	w := New(client, "aibom-postprocess:latest")
+	startWatcher(t, w)
+
+	w.onPodEvent(pod)
+
+	cm, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), pod.Name+"-aibom-postprocess-data", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("data configmap not found: %v", err)
+	}
+	if cm.Data["storage.json"] != "{}" {
+		t.Errorf("expected forged storage data to be dropped, got storage.json = %q", cm.Data["storage.json"])
+	}
+}
+
+// TestPostprocessKeepsValidlySignedStorageData is the companion positive
+// case for #44.
+func TestPostprocessKeepsValidlySignedStorageData(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	now := metav1.Now()
+	pod := instrumentedBarePod("granite-model-predictor-abc123", "test-ns")
+	pod.Finalizers = []string{podFinalizerName}
+	pod.DeletionTimestamp = &now
+
+	key := []byte("shared-secret")
+	secret := discoverySigningSecret("test-ns", key)
+	genuineStorage := `{"inference_service":"granite-model","storage_path":"models/tinyllama-1.1b-chat"}`
+	dataConfigMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pod.Name + "-aibom-postprocess-data",
+			Namespace: "test-ns",
+		},
+		Data: map[string]string{
+			fmt.Sprintf("storage-%s.json", pod.Name): genuineStorage,
+			fmt.Sprintf("storage-%s.sig", pod.Name):  hmacHex(t, key, genuineStorage),
+		},
+	}
+
+	client := fake.NewSimpleClientset(ns, pod, dataConfigMap, secret)
+	w := New(client, "aibom-postprocess:latest")
+	startWatcher(t, w)
+
+	w.onPodEvent(pod)
+
+	cm, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), pod.Name+"-aibom-postprocess-data", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("data configmap not found: %v", err)
+	}
+	if cm.Data["storage.json"] != genuineStorage {
+		t.Errorf("expected genuine storage data to survive verification, got storage.json = %q", cm.Data["storage.json"])
+	}
+}
+
+// TestPostprocessKeepsUnverifiedStorageWhenNoSigningKeyConfigured mirrors
+// the discovery-data gradual-rollout case for storage data.
+func TestPostprocessKeepsUnverifiedStorageWhenNoSigningKeyConfigured(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	now := metav1.Now()
+	pod := instrumentedBarePod("granite-model-predictor-abc123", "test-ns")
+	pod.Finalizers = []string{podFinalizerName}
+	pod.DeletionTimestamp = &now
+
+	unsignedStorage := `{"inference_service":"granite-model","storage_path":"models/tinyllama-1.1b-chat"}`
+	dataConfigMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pod.Name + "-aibom-postprocess-data",
+			Namespace: "test-ns",
+		},
+		Data: map[string]string{
+			fmt.Sprintf("storage-%s.json", pod.Name): unsignedStorage,
+		},
+	}
+
+	// Deliberately no discoverySigningSecret in the fake clientset.
+	client := fake.NewSimpleClientset(ns, pod, dataConfigMap)
+	w := New(client, "aibom-postprocess:latest")
+	startWatcher(t, w)
+
+	w.onPodEvent(pod)
+
+	cm, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), pod.Name+"-aibom-postprocess-data", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("data configmap not found: %v", err)
+	}
+	if cm.Data["storage.json"] != unsignedStorage {
+		t.Errorf("expected unsigned storage data to pass through when no signing key is configured, got storage.json = %q", cm.Data["storage.json"])
 	}
 }
 
