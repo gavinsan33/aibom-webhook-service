@@ -4,12 +4,18 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/gavinsan33/aibom-webhook-service/internal/aibomdata"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/client-go/kubernetes"
 )
+
+// workloadIdentityProvisionTimeout bounds ensurePodWorkloadIdentity's
+// Kubernetes API calls, which run synchronously in the admission path — a
+// hanging apiserver call here must not indefinitely delay pod admission.
+const workloadIdentityProvisionTimeout = 5 * time.Second
 
 var matchedOwnerKinds = map[string]bool{
 	"Job":        true,
@@ -187,9 +193,12 @@ func (m *Mutator) ensurePodWorkloadIdentity(pod *corev1.Pod) string {
 	if !hasMatchingOwner(pod) {
 		return ""
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), workloadIdentityProvisionTimeout)
+	defer cancel()
+
 	trigger := triggerName(pod)
 	configMapName := aibomdata.ConfigMapName(trigger)
-	secretName, err := ensureWorkloadIdentity(context.Background(), m.Clientset, pod.Namespace, trigger, configMapName)
+	secretName, err := ensureWorkloadIdentity(ctx, m.Clientset, pod.Namespace, trigger, configMapName)
 	if err != nil {
 		log.Printf("warning: could not provision per-job workload identity for %s/%s (job %s): %v; falling back to shared ServiceAccount token", pod.Namespace, pod.Name, trigger, err)
 		return ""
