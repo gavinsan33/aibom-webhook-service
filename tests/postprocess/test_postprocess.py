@@ -840,6 +840,37 @@ def test_compile_aibom_utilization_merges_jobset_sibling_pods():
     assert detail["p95"] == 85
 
 
+def test_compile_aibom_utilization_scales_storage_throughput_to_mbps():
+    telemetry = {
+        "collected_at": "2024-01-01T00:00:00Z",
+        "pods": [
+            {
+                "pod_name": "job-abc",
+                "metrics": {
+                    "storage_read_throughput": _pod_metrics(
+                        avg=10 * 1024 * 1024, min_=1024 * 1024, max_=20 * 1024 * 1024,
+                        p95=19 * 1024 * 1024, unit="bytes_per_sec",
+                    ),
+                    "storage_write_throughput": _pod_metrics(
+                        avg=5 * 1024 * 1024, min_=512 * 1024, max_=8 * 1024 * 1024,
+                        p95=7 * 1024 * 1024, unit="bytes_per_sec",
+                    ),
+                },
+            }
+        ],
+    }
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info={},
+        annotations={}, telemetry=telemetry,
+    )
+    metrics = aibom["resource_utilization"]["metrics"]
+    assert metrics["storage_read_throughput"]["unit"] == "MBps"
+    assert metrics["storage_read_throughput"]["avg"] == 10
+    assert metrics["storage_read_throughput"]["max"] == 20
+    assert metrics["storage_write_throughput"]["unit"] == "MBps"
+    assert metrics["storage_write_throughput"]["avg"] == 5
+
+
 # ---------------------------------------------------------------------------
 # compile_aibom: runtime_info fallbacks (transformers/peft runtime hooks,
 # for scripts with no CLI flags for detect_trl_from_command to see)
