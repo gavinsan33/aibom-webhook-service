@@ -14,35 +14,39 @@ Any field can also be set directly via an `aibom.io/*` annotation, which always 
 
 ## Hardware & System (`generate_snapshot.py`)
 
-Captured once per pod by the discovery init container, HMAC-signed (see `CLAUDE.md`), and merged into `environment.*` / `execution_metadata.pods[]`.
+Captured once per pod by the discovery init container into `discovery-<pod>.json`, HMAC-signed (see `CLAUDE.md`).
+
+**⚠️ Surfacing note**: `postprocess.py` only ever reads a small, fixed subset of this file — `gpu.gpu_models`/`gpu_count`/`cuda_version`/`gpu_driver_version` and `system.cpu_model`/`cpu_count`/`memory_total_gb`/`numa_node_count`/`kernel_version` — into `environment.*`. Everything else below is genuinely captured (it's in `discovery-<pod>.json`) but is **never read by any downstream code**, so it exists only in the per-workload data ConfigMap, which is deleted once the postprocess Job succeeds (see `CLAUDE.md`'s Postprocess Flow) — it never reaches the final `AIBOM` custom resource. Rows are marked ✅ *surfaced* (→ `environment.<field>`) or ⚠️ *captured only* accordingly.
 
 **CPU / memory / kernel**
 
-| Field | Detection |
-|---|---|
-| CPU model | `/proc/cpuinfo` (`model name`) |
-| CPU count | `/proc/cpuinfo` processor count |
-| Cores per socket / threads per core | `lscpu` |
-| Architecture | `uname -m` |
-| Current / max / min clock frequency | `/sys/devices/system/cpu/cpu0/cpufreq/*` |
-| L1d / L1i / L2 / L3 cache size | `lscpu` |
-| Total / available / free memory | `/proc/meminfo` |
-| NUMA node count | `/sys/devices/system/node/node*` listing |
-| Kernel version | `uname -r` |
-| Uptime | `/proc/uptime` |
+| Field | Detection | Surfaced? |
+|---|---|---|
+| CPU model | `/proc/cpuinfo` (`model name`) | ✅ `environment.cpu_model` |
+| CPU count | `/proc/cpuinfo` processor count | ✅ `environment.cpu_cores` |
+| Cores per socket / threads per core | `lscpu` | ⚠️ captured only |
+| Architecture | `uname -m` | ⚠️ captured only |
+| Current / max / min clock frequency | `/sys/devices/system/cpu/cpu0/cpufreq/*` | ⚠️ captured only |
+| L1d / L1i / L2 / L3 cache size | `lscpu` | ⚠️ captured only |
+| Total memory | `/proc/meminfo` (`MemTotal`) | ✅ `environment.memory_gb` |
+| Available / free memory | `/proc/meminfo` (`MemAvailable`/`MemFree`) | ⚠️ captured only |
+| NUMA node count | `/sys/devices/system/node/node*` listing | ✅ `environment.numa_nodes` |
+| Kernel version | `uname -r` | ✅ `environment.kernel_version` |
+| Uptime | `/proc/uptime` | ⚠️ captured only |
 
 **GPU**
 
-| Field | Detection |
-|---|---|
-| GPU count / model(s) | `nvidia-smi --query-gpu=name` |
-| GPU memory per device | `nvidia-smi --query-gpu=memory.total` |
-| GPU driver version | `nvidia-smi --query-gpu=driver_version` |
-| CUDA version | `nvidia-smi` (`CUDA Version` line) |
+| Field | Detection | Surfaced? |
+|---|---|---|
+| GPU count | `nvidia-smi --query-gpu=name` (line count) | ✅ `environment.gpu_count` |
+| GPU model(s) | `nvidia-smi --query-gpu=name` | ✅ `environment.gpu_type` — only the **first line** of a multi-GPU-model listing; a mixed-model node's other GPU types are dropped |
+| GPU memory per device (VRAM) | `nvidia-smi --query-gpu=memory.total` | ⚠️ captured only |
+| GPU driver version | `nvidia-smi --query-gpu=driver_version` | ✅ `environment.driver_version` |
+| CUDA version | `nvidia-smi` (`CUDA Version` line) | ✅ `environment.cuda_version` |
 
 The GPU resource request itself (used to decide whether to run this detection at all) is copied from the pod's own `nvidia.com/gpu` container resource request, not detected independently.
 
-**Network**
+**Network** — ⚠️ all fields below are captured but never surfaced into the compiled AIBOM:
 
 | Field | Detection |
 |---|---|
@@ -52,7 +56,7 @@ The GPU resource request itself (used to decide whether to run this detection at
 | TCP read/write memory buffers | `/proc/sys/net/ipv4/tcp_{rmem,wmem}` |
 | TCP congestion control algorithm | `/proc/sys/net/ipv4/tcp_congestion_control` |
 
-**Storage**
+**Storage (hardware)** — ⚠️ all fields below are captured but never surfaced into the compiled AIBOM. (Don't confuse this with the KServe `storage-<pod>.json` file described below, which *is* surfaced — this is disk/block-device hardware info.)
 
 | Field | Detection |
 |---|---|
@@ -61,7 +65,7 @@ The GPU resource request itself (used to decide whether to run this detection at
 | `/tmp` size / available space | `df -h /tmp` |
 | Active I/O scheduler | `/sys/block/sda/queue/scheduler` |
 
-**Kernel / cgroup performance config**
+**Kernel / cgroup performance config** — ⚠️ all fields below are captured but never surfaced into the compiled AIBOM:
 
 | Field | Detection |
 |---|---|
@@ -76,9 +80,9 @@ The GPU resource request itself (used to decide whether to run this detection at
 | cgroup CPU quota / period | `/sys/fs/cgroup/cpu/cpu.cfs_{quota,period}_us` |
 | cgroup memory limit | `/sys/fs/cgroup/memory/memory.limit_in_bytes` |
 
-**Pod metadata** — `name`/`uid`/`namespace`/`ip`/`node`, all from downward-API env vars; plus a capture timestamp.
+**Pod metadata** — ✅ surfaced into `execution_metadata.pods[]`: `pod_name`/`pod_uid`/`pod_namespace`/`pod_ip`/`node_name`/`start_time` (from downward-API env vars + a capture timestamp).
 
-**Benchmarks** — actually executed, not just read from `/proc`/`/sys`:
+**Benchmarks** — actually executed, not just read from `/proc`/`/sys` — ⚠️ **all four are captured but never surfaced into the compiled AIBOM** (no `aibom["benchmarks"]` or similar section exists in `postprocess.py`):
 
 | Benchmark | Measures | Method |
 |---|---|---|
@@ -87,7 +91,7 @@ The GPU resource request itself (used to decide whether to run this detection at
 | Disk I/O | write/read throughput MB/s | write/read 50×1MB blocks to a temp file with `fsync`, timed |
 | Context switch overhead | avg ms per process spawn | spawn a trivial subprocess 100×, timed |
 
-**InferenceService storage resolution** (KServe only) — reads `spec.predictor.model.storage.{path,key}` / `storageUri` off the pod's own `InferenceService` object (via its `INFERENCESERVICE_NAME` downward-API env var) and writes `storage-<pod>.json`; consumed later by `postprocess.py`'s model-name derivation (see below). Identification only — doesn't touch the actual bucket.
+**InferenceService storage resolution** (KServe only) — ✅ surfaced. Reads `spec.predictor.model.storage.{path,key}` / `storageUri` off the pod's own `InferenceService` object (via its `INFERENCESERVICE_NAME` downward-API env var) and writes `storage-<pod>.json`; consumed by `postprocess.py`'s `detect_model_from_storage` to derive `model.name` (see below). Identification only — doesn't touch the actual bucket.
 
 ---
 
@@ -143,6 +147,8 @@ Every `dataset.auto_detected[]` entry gets `matches_declared` — whether its na
 | `--gpu-memory-utilization` | `inference.gpu_memory_utilization` |
 | `--speculative-model`+`--num-speculative-tokens` (legacy), or `--speculative-config` (JSON/`key=value`) | `model.speculative_decoding` |
 | `--override-generation-config` (JSON/`key=value`) | `inference.temperature`, `.top_p`, `.top_k` |
+
+⚠️ Also parsed but **never surfaced** into the compiled AIBOM (dropped after the intermediate detection dict): `--served-model-name`, `--max-num-seqs`, `--seed`, `--trust-remote-code`, `--enforce-eager`, `--enable-prefix-caching`, `--port`.
 
 *trl* (`trl sft`/`trl dpo`-style):
 
