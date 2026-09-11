@@ -52,7 +52,17 @@ func NewMutator(discoveryImage string, datasetDetection bool) *Mutator {
 
 func (m *Mutator) Mutate(pod *corev1.Pod) ([]PatchOperation, error) {
 	if !m.shouldMutate(pod) {
-		return nil, nil
+		// A workload that doesn't qualify for instrumentation may still have
+		// pre-set aibom.io/instrumented / aibom.io/instrumented-by itself
+		// (see shouldMutate's doc comment on why the value can't be
+		// trusted). Left alone, that false claim would still reach etcd on
+		// this pod, and the watcher selects pods to postprocess by
+		// aibom.io/instrumented=true (see watcher.go) -- so an uninstrumented
+		// pod could masquerade as having been properly collected, and the
+		// watcher would compile an AIBOM from data that was never actually
+		// gathered. isPostprocessPod's own pods never carry this label at
+		// all, so this is always safe to run on the "not qualifying" path.
+		return stripSpoofedInstrumentationClaims(pod), nil
 	}
 
 	var patches []PatchOperation
@@ -142,8 +152,17 @@ func (m *Mutator) Mutate(pod *corev1.Pod) ([]PatchOperation, error) {
 	return patches, nil
 }
 
+// shouldMutate reports whether pod should be instrumented. It deliberately
+// does NOT consult any aibom.io/instrumented value already present on the
+// incoming pod: this webhook's MutatingWebhookConfiguration only matches
+// CREATE operations with reinvocationPolicy: Never, so there is no
+// legitimate scenario where this webhook has already run once and set that
+// label earlier in the same admission chain. Labels are part of the object
+// the requester submits, so trusting a pre-existing "true" value here would
+// let any workload dodge instrumentation for free simply by pre-setting the
+// label the webhook itself would otherwise add.
 func (m *Mutator) shouldMutate(pod *corev1.Pod) bool {
-	if alreadyInstrumented(pod) || isPostprocessPod(pod) {
+	if isPostprocessPod(pod) {
 		return false
 	}
 	return hasMatchingOwner(pod) || requestsGPU(pod)
@@ -160,11 +179,27 @@ func isPostprocessPod(pod *corev1.Pod) bool {
 	return pod.Labels[aibomdata.LabelPostprocessFor] != ""
 }
 
-func alreadyInstrumented(pod *corev1.Pod) bool {
-	if pod.Labels == nil {
-		return false
+// stripSpoofedInstrumentationClaims returns JSON patches removing any
+// aibom.io/instrumented label and aibom.io/instrumented-by annotation
+// already present on a pod the webhook has decided not to instrument. See
+// Mutate's call site for why a requester-supplied claim here can't be left
+// in place. JSON Patch "remove" fails admission if the target path doesn't
+// exist, so each removal is only emitted when the key is actually present.
+func stripSpoofedInstrumentationClaims(pod *corev1.Pod) []PatchOperation {
+	var patches []PatchOperation
+	if _, ok := pod.Labels["aibom.io/instrumented"]; ok {
+		patches = append(patches, PatchOperation{
+			Op:   "remove",
+			Path: "/metadata/labels/aibom.io~1instrumented",
+		})
 	}
-	return pod.Labels["aibom.io/instrumented"] == "true"
+	if _, ok := pod.Annotations["aibom.io/instrumented-by"]; ok {
+		patches = append(patches, PatchOperation{
+			Op:   "remove",
+			Path: "/metadata/annotations/aibom.io~1instrumented-by",
+		})
+	}
+	return patches
 }
 
 func hasMatchingOwner(pod *corev1.Pod) bool {

@@ -200,10 +200,84 @@ func TestMutate_NonKServePod_NoInferenceServiceNameEnv(t *testing.T) {
 	t.Fatal("init container patch not found")
 }
 
-func TestShouldMutate_AlreadyInstrumented(t *testing.T) {
+func TestShouldMutate_IgnoresWorkloadSuppliedInstrumentedLabel(t *testing.T) {
+	// A workload's own manifest can set aibom.io/instrumented: "true" before
+	// the webhook ever runs -- reinvocationPolicy is Never, so there's no
+	// legitimate way this label is already "true" on a fresh CREATE. If
+	// shouldMutate trusted it, a workload could dodge instrumentation
+	// entirely just by pre-setting the label. It must still match here,
+	// same as any other Job-owned pod.
 	m := newTestMutator()
-	if m.shouldMutate(podAlreadyInstrumented()) {
-		t.Error("expected already-instrumented pod to be skipped")
+	if !m.shouldMutate(podAlreadyInstrumented()) {
+		t.Error("expected a workload-supplied aibom.io/instrumented label to be ignored, not honored")
+	}
+}
+
+func TestMutate_IgnoresWorkloadSuppliedInstrumentedLabel(t *testing.T) {
+	// Same scenario at the Mutate level, not just the shouldMutate gate:
+	// confirm the pod actually gets the real injection (discovery init
+	// container) rather than being waved through as "already done".
+	m := newTestMutator()
+	patches, err := m.Mutate(podAlreadyInstrumented())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	foundInitContainer := false
+	for _, p := range patches {
+		if p.Path == "/spec/initContainers" {
+			foundInitContainer = true
+		}
+	}
+	if !foundInitContainer {
+		t.Error("expected a workload-supplied aibom.io/instrumented label not to suppress real injection")
+	}
+}
+
+func TestMutate_StripsSpoofedInstrumentedLabelOnNonQualifyingPod(t *testing.T) {
+	// A workload that doesn't qualify for instrumentation (no matching
+	// owner, no GPU request) could still pre-set aibom.io/instrumented and
+	// aibom.io/instrumented-by to falsely masquerade as already collected
+	// to the watcher, which selects pods by aibom.io/instrumented=true.
+	m := newTestMutator()
+	pod := podNoMatch()
+	pod.Labels = map[string]string{"aibom.io/instrumented": "true"}
+	pod.Annotations = map[string]string{"aibom.io/instrumented-by": "webhook"}
+
+	patches, err := m.Mutate(pod)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	wantRemoveLabel := false
+	wantRemoveAnnotation := false
+	for _, p := range patches {
+		if p.Op != "remove" {
+			t.Errorf("expected only remove patches for a non-qualifying pod, got op %q on %q", p.Op, p.Path)
+			continue
+		}
+		switch p.Path {
+		case "/metadata/labels/aibom.io~1instrumented":
+			wantRemoveLabel = true
+		case "/metadata/annotations/aibom.io~1instrumented-by":
+			wantRemoveAnnotation = true
+		}
+	}
+	if !wantRemoveLabel {
+		t.Error("expected a remove patch for the spoofed aibom.io/instrumented label")
+	}
+	if !wantRemoveAnnotation {
+		t.Error("expected a remove patch for the spoofed aibom.io/instrumented-by annotation")
+	}
+}
+
+func TestMutate_NonQualifyingPodWithNoClaims_NoPatches(t *testing.T) {
+	m := newTestMutator()
+	patches, err := m.Mutate(podNoMatch())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(patches) != 0 {
+		t.Errorf("expected no patches for a non-qualifying pod with no spoofed claims, got %+v", patches)
 	}
 }
 
