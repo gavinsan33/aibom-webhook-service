@@ -8,10 +8,16 @@ import (
 	"net/http"
 
 	admissionv1 "k8s.io/api/admission/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
+)
+
+var (
+	podGVR = metav1.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}
+	jobGVR = metav1.GroupVersionResource{Group: "batch", Version: "v1", Resource: "jobs"}
 )
 
 var (
@@ -26,10 +32,15 @@ func init() {
 
 type Handler struct {
 	Mutator *Mutator
+
+	// TrustedWatcherIdentity is passed through to SanitizeJobPostprocessLabel
+	// for every Job admission -- see its doc comment and config.Config's
+	// TrustedWatcherIdentity field.
+	TrustedWatcherIdentity string
 }
 
-func NewHandler(mutator *Mutator) *Handler {
-	return &Handler{Mutator: mutator}
+func NewHandler(mutator *Mutator, trustedWatcherIdentity string) *Handler {
+	return &Handler{Mutator: mutator, TrustedWatcherIdentity: trustedWatcherIdentity}
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -79,17 +90,24 @@ func (h *Handler) handleAdmission(review *admissionv1.AdmissionReview) *admissio
 		return allowResponse("no request in review")
 	}
 
-	if req.Resource != (metav1.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}) {
-		return allowResponse("not a pod resource")
+	switch req.Resource {
+	case podGVR:
+		return h.handlePodAdmission(req)
+	case jobGVR:
+		return h.handleJobAdmission(req)
+	default:
+		return allowResponse("not a supported resource")
 	}
+}
 
+func (h *Handler) handlePodAdmission(req *admissionv1.AdmissionRequest) *admissionv1.AdmissionResponse {
 	var pod corev1.Pod
 	if err := json.Unmarshal(req.Object.Raw, &pod); err != nil {
 		log.Printf("failed to unmarshal pod: %v", err)
 		return allowResponse("failed to unmarshal pod")
 	}
 
-	patches, err := h.Mutator.Mutate(&pod)
+	patches, err := h.Mutator.Mutate(&pod, req.UserInfo.Username)
 	if err != nil {
 		log.Printf("mutation error: %v", err)
 		return allowResponse("mutation error")
@@ -107,6 +125,36 @@ func (h *Handler) handleAdmission(review *admissionv1.AdmissionReview) *admissio
 
 	patchType := admissionv1.PatchTypeJSONPatch
 	log.Printf("mutating pod %s/%s: %d patches", pod.Namespace, pod.Name, len(patches))
+	return &admissionv1.AdmissionResponse{
+		Allowed:   true,
+		PatchType: &patchType,
+		Patch:     patchBytes,
+	}
+}
+
+// handleJobAdmission runs SanitizeJobPostprocessLabel against every Job
+// creation in an opted-in namespace -- see that function's doc comment for
+// why aibom.io/postprocess-for can't be trusted from the Job object alone.
+func (h *Handler) handleJobAdmission(req *admissionv1.AdmissionRequest) *admissionv1.AdmissionResponse {
+	var job batchv1.Job
+	if err := json.Unmarshal(req.Object.Raw, &job); err != nil {
+		log.Printf("failed to unmarshal job: %v", err)
+		return allowResponse("failed to unmarshal job")
+	}
+
+	patches := SanitizeJobPostprocessLabel(&job, req.UserInfo.Username, h.TrustedWatcherIdentity)
+	if patches == nil {
+		return allowResponse("no mutation needed")
+	}
+
+	patchBytes, err := json.Marshal(patches)
+	if err != nil {
+		log.Printf("failed to marshal patches: %v", err)
+		return allowResponse("failed to marshal patches")
+	}
+
+	patchType := admissionv1.PatchTypeJSONPatch
+	log.Printf("stripping spoofed aibom.io/postprocess-for from job %s/%s (requester %q is not the trusted watcher identity)", job.Namespace, job.Name, req.UserInfo.Username)
 	return &admissionv1.AdmissionResponse{
 		Allowed:   true,
 		PatchType: &patchType,

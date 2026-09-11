@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	admissionv1 "k8s.io/api/admission/v1"
+	authenticationv1 "k8s.io/api/authentication/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -16,11 +18,11 @@ import (
 )
 
 func newTestMutator() *Mutator {
-	return NewMutator("pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime", true)
+	return NewMutator("pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime", true, "")
 }
 
 func newTestMutatorNoDataset() *Mutator {
-	return NewMutator("pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime", false)
+	return NewMutator("pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime", false, "")
 }
 
 func podWithOwner(kind string) *corev1.Pod {
@@ -113,35 +115,35 @@ func podNoMatch() *corev1.Pod {
 
 func TestShouldMutate_JobOwner(t *testing.T) {
 	m := newTestMutator()
-	if !m.shouldMutate(podWithOwner("Job")) {
+	if !m.shouldMutate(podWithOwner("Job"), "") {
 		t.Error("expected pod with Job owner to match")
 	}
 }
 
 func TestShouldMutate_JobSetOwner(t *testing.T) {
 	m := newTestMutator()
-	if !m.shouldMutate(podWithOwner("JobSet")) {
+	if !m.shouldMutate(podWithOwner("JobSet"), "") {
 		t.Error("expected pod with JobSet owner to match")
 	}
 }
 
 func TestShouldMutate_PyTorchJobOwner(t *testing.T) {
 	m := newTestMutator()
-	if !m.shouldMutate(podWithOwner("PyTorchJob")) {
+	if !m.shouldMutate(podWithOwner("PyTorchJob"), "") {
 		t.Error("expected pod with PyTorchJob owner to match")
 	}
 }
 
 func TestShouldMutate_RayJobOwner(t *testing.T) {
 	m := newTestMutator()
-	if !m.shouldMutate(podWithOwner("RayJob")) {
+	if !m.shouldMutate(podWithOwner("RayJob"), "") {
 		t.Error("expected pod with RayJob owner to match")
 	}
 }
 
 func TestShouldMutate_GPURequest(t *testing.T) {
 	m := newTestMutator()
-	if !m.shouldMutate(podWithGPU()) {
+	if !m.shouldMutate(podWithGPU(), "") {
 		t.Error("expected pod with GPU request to match")
 	}
 }
@@ -151,7 +153,7 @@ func TestMutate_KServePredictor_AddsInferenceServiceNameEnv(t *testing.T) {
 	pod := podWithGPU()
 	pod.Labels = map[string]string{"serving.kserve.io/inferenceservice": "granite-model"}
 
-	patches, err := m.Mutate(pod)
+	patches, err := m.Mutate(pod, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -180,7 +182,7 @@ func TestMutate_KServePredictor_AddsInferenceServiceNameEnv(t *testing.T) {
 
 func TestMutate_NonKServePod_NoInferenceServiceNameEnv(t *testing.T) {
 	m := newTestMutator()
-	patches, err := m.Mutate(podWithGPU())
+	patches, err := m.Mutate(podWithGPU(), "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -208,7 +210,7 @@ func TestShouldMutate_IgnoresWorkloadSuppliedInstrumentedLabel(t *testing.T) {
 	// entirely just by pre-setting the label. It must still match here,
 	// same as any other Job-owned pod.
 	m := newTestMutator()
-	if !m.shouldMutate(podAlreadyInstrumented()) {
+	if !m.shouldMutate(podAlreadyInstrumented(), "") {
 		t.Error("expected a workload-supplied aibom.io/instrumented label to be ignored, not honored")
 	}
 }
@@ -218,7 +220,7 @@ func TestMutate_IgnoresWorkloadSuppliedInstrumentedLabel(t *testing.T) {
 	// confirm the pod actually gets the real injection (discovery init
 	// container) rather than being waved through as "already done".
 	m := newTestMutator()
-	patches, err := m.Mutate(podAlreadyInstrumented())
+	patches, err := m.Mutate(podAlreadyInstrumented(), "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -243,7 +245,7 @@ func TestMutate_StripsSpoofedInstrumentedLabelOnNonQualifyingPod(t *testing.T) {
 	pod.Labels = map[string]string{"aibom.io/instrumented": "true"}
 	pod.Annotations = map[string]string{"aibom.io/instrumented-by": "webhook"}
 
-	patches, err := m.Mutate(pod)
+	patches, err := m.Mutate(pod, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -272,7 +274,7 @@ func TestMutate_StripsSpoofedInstrumentedLabelOnNonQualifyingPod(t *testing.T) {
 
 func TestMutate_NonQualifyingPodWithNoClaims_NoPatches(t *testing.T) {
 	m := newTestMutator()
-	patches, err := m.Mutate(podNoMatch())
+	patches, err := m.Mutate(podNoMatch(), "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -283,7 +285,7 @@ func TestMutate_NonQualifyingPodWithNoClaims_NoPatches(t *testing.T) {
 
 func TestShouldMutate_NoMatch(t *testing.T) {
 	m := newTestMutator()
-	if m.shouldMutate(podNoMatch()) {
+	if m.shouldMutate(podNoMatch(), "") {
 		t.Error("expected Deployment-owned pod without GPU to be skipped")
 	}
 }
@@ -292,8 +294,71 @@ func TestShouldMutate_PostprocessPod(t *testing.T) {
 	m := newTestMutator()
 	pod := podWithOwner("Job")
 	pod.Labels = map[string]string{"aibom.io/postprocess-for": "train-job"}
-	if m.shouldMutate(pod) {
+	if m.shouldMutate(pod, "") {
 		t.Error("expected a postprocess Job's own pod to be skipped despite its Job owner")
+	}
+}
+
+func TestShouldMutate_PostprocessLabelWithoutJobOwner_NotHonored(t *testing.T) {
+	// A raw Pod (no Job owner at all) carrying aibom.io/postprocess-for
+	// can't be a real postprocess pod -- the watcher only ever creates
+	// these via a plain batch/v1 Job. Use a GPU pod (no owner reference at
+	// all) so it would otherwise qualify for instrumentation on its own
+	// merits: if the label were honored without a Job-owner check, this
+	// pod would be wrongly skipped instead of instrumented.
+	m := newTestMutator()
+	pod := podWithGPU()
+	pod.Labels = map[string]string{"aibom.io/postprocess-for": "train-job"}
+	if !m.shouldMutate(pod, "") {
+		t.Error("expected aibom.io/postprocess-for on a non-Job-owned pod to be ignored, not honored")
+	}
+}
+
+const testJobControllerIdentity = "system:serviceaccount:kube-system:job-controller"
+
+func newTestMutatorWithJobControllerCheck() *Mutator {
+	m := newTestMutator()
+	m.TrustedJobControllerIdentity = testJobControllerIdentity
+	return m
+}
+
+func TestShouldMutate_PostprocessPod_RealJobControllerIdentity_StillSkipped(t *testing.T) {
+	// A real postprocess pod is created by the actual Job controller, so
+	// its admission request's userInfo is the Job controller's own
+	// identity. With the extra check configured, this must still match.
+	m := newTestMutatorWithJobControllerCheck()
+	pod := podWithOwner("Job")
+	pod.Labels = map[string]string{"aibom.io/postprocess-for": "train-job"}
+	if m.shouldMutate(pod, testJobControllerIdentity) {
+		t.Error("expected a real postprocess pod (created by the Job controller) to still be skipped")
+	}
+}
+
+func TestShouldMutate_PostprocessPod_FabricatedOwnerReference_NowCaught(t *testing.T) {
+	// A raw Pod with a hand-crafted Job ownerReference, submitted directly
+	// by some other identity (not the real Job controller) -- this is the
+	// residual gap #51 documented as unclosed. With
+	// TrustedJobControllerIdentity configured, it's closed: the
+	// fabricated ownerReference alone isn't enough once the requester's
+	// real identity is checked too.
+	m := newTestMutatorWithJobControllerCheck()
+	pod := podWithOwner("Job") // has a Job-kind ownerReference, but...
+	pod.Labels = map[string]string{"aibom.io/postprocess-for": "train-job"}
+	if !m.shouldMutate(pod, "system:serviceaccount:default:some-user-sa") {
+		t.Error("expected a fabricated Job ownerReference from a non-Job-controller requester to be caught, not honored")
+	}
+}
+
+func TestShouldMutate_PostprocessPod_CheckDisabledByDefault(t *testing.T) {
+	// Without TrustedJobControllerIdentity configured (the default), the
+	// weaker ownerReference-only check still applies regardless of who
+	// the requester actually was -- unchanged from #51's original
+	// behavior, preserved here as a regression guard.
+	m := newTestMutator() // TrustedJobControllerIdentity unset
+	pod := podWithOwner("Job")
+	pod.Labels = map[string]string{"aibom.io/postprocess-for": "train-job"}
+	if m.shouldMutate(pod, "system:serviceaccount:default:some-user-sa") {
+		t.Error("expected the ownerReference-only check to still apply when TrustedJobControllerIdentity is unset")
 	}
 }
 
@@ -301,7 +366,7 @@ func TestShouldMutate_PostprocessPod(t *testing.T) {
 
 func TestMutate_DiscoveryScriptCommand(t *testing.T) {
 	m := newTestMutator()
-	patches, err := m.Mutate(podWithOwner("Job"))
+	patches, err := m.Mutate(podWithOwner("Job"), "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -324,7 +389,7 @@ func TestMutate_DiscoveryScriptCommand(t *testing.T) {
 
 func TestMutate_InjectsInitContainer(t *testing.T) {
 	m := newTestMutator()
-	patches, err := m.Mutate(podWithOwner("Job"))
+	patches, err := m.Mutate(podWithOwner("Job"), "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -356,7 +421,7 @@ func TestMutate_InjectsInitContainer(t *testing.T) {
 // validly-signed forgery of its own hardware claims.
 func TestMutate_DiscoverySigningKeyMountedOnlyInInitContainer(t *testing.T) {
 	m := newTestMutator()
-	patches, err := m.Mutate(podWithOwner("Job"))
+	patches, err := m.Mutate(podWithOwner("Job"), "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -389,7 +454,7 @@ func TestMutate_DiscoverySigningKeyMountedOnlyInInitContainer(t *testing.T) {
 
 func TestMutate_JobOwnedPod_HasStaticDataConfigMapEnv(t *testing.T) {
 	m := newTestMutator()
-	patches, err := m.Mutate(podWithOwner("Job"))
+	patches, err := m.Mutate(podWithOwner("Job"), "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -422,7 +487,7 @@ func TestMutate_JobOwnedPod_HasStaticDataConfigMapEnv(t *testing.T) {
 // dataConfigMapEnvVar's doc comment.
 func TestMutate_BarePod_OmitsDataConfigMapEnv(t *testing.T) {
 	m := newTestMutator()
-	patches, err := m.Mutate(podWithGPU())
+	patches, err := m.Mutate(podWithGPU(), "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -449,7 +514,7 @@ func TestMutate_ExistingInitContainers(t *testing.T) {
 		{Name: "existing-init", Image: "busybox"},
 	}
 
-	patches, err := m.Mutate(pod)
+	patches, err := m.Mutate(pod, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -469,7 +534,7 @@ func TestMutate_ExistingInitContainers(t *testing.T) {
 
 func TestMutate_InjectsAIBOMDataVolume(t *testing.T) {
 	m := newTestMutator()
-	patches, err := m.Mutate(podWithOwner("Job"))
+	patches, err := m.Mutate(podWithOwner("Job"), "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -494,7 +559,7 @@ func TestMutate_InjectsAIBOMDataVolume(t *testing.T) {
 
 func TestMutate_InjectsScriptsVolume(t *testing.T) {
 	m := newTestMutator()
-	patches, err := m.Mutate(podWithOwner("Job"))
+	patches, err := m.Mutate(podWithOwner("Job"), "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -522,7 +587,7 @@ func TestMutate_InjectsScriptsVolume(t *testing.T) {
 
 func TestMutate_AddsLabel(t *testing.T) {
 	m := newTestMutator()
-	patches, err := m.Mutate(podWithOwner("Job"))
+	patches, err := m.Mutate(podWithOwner("Job"), "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -547,7 +612,7 @@ func TestMutate_ExistingLabels(t *testing.T) {
 	pod := podWithOwner("Job")
 	pod.Labels = map[string]string{"app": "training"}
 
-	patches, err := m.Mutate(pod)
+	patches, err := m.Mutate(pod, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -565,7 +630,7 @@ func TestMutate_ExistingLabels(t *testing.T) {
 
 func TestMutate_NoMutationNeeded(t *testing.T) {
 	m := newTestMutator()
-	patches, err := m.Mutate(podNoMatch())
+	patches, err := m.Mutate(podNoMatch(), "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -578,7 +643,7 @@ func TestMutate_NoMutationNeeded(t *testing.T) {
 
 func TestMutate_InjectsDatasetDetectorEnvVars(t *testing.T) {
 	m := newTestMutator()
-	patches, err := m.Mutate(podWithOwner("Job"))
+	patches, err := m.Mutate(podWithOwner("Job"), "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -623,7 +688,7 @@ func collectContainerVolumeMountPatches(patches []PatchOperation, containerIdx i
 
 func TestMutate_AddsTokenMountToAppContainer(t *testing.T) {
 	m := newTestMutator()
-	patches, err := m.Mutate(podWithOwner("Job"))
+	patches, err := m.Mutate(podWithOwner("Job"), "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -652,7 +717,7 @@ func TestMutate_SkipsTokenMountWhenAlreadyPresent(t *testing.T) {
 		{Name: "kube-api-access-abcde", MountPath: "/var/run/secrets/kubernetes.io/serviceaccount", ReadOnly: true},
 	}
 
-	patches, err := m.Mutate(pod)
+	patches, err := m.Mutate(pod, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -670,7 +735,7 @@ func TestMutate_SkipsTokenMountWhenAlreadyPresent(t *testing.T) {
 
 func TestMutate_DatasetDetectorVolumeMount(t *testing.T) {
 	m := newTestMutator()
-	patches, err := m.Mutate(podWithOwner("Job"))
+	patches, err := m.Mutate(podWithOwner("Job"), "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -698,7 +763,7 @@ func TestMutate_DatasetDetectorVolumeMount(t *testing.T) {
 
 func TestMutate_PythonPathAppend(t *testing.T) {
 	m := newTestMutator()
-	patches, err := m.Mutate(podWithExistingPythonPath())
+	patches, err := m.Mutate(podWithExistingPythonPath(), "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -720,7 +785,7 @@ func TestMutate_PythonPathAppend(t *testing.T) {
 
 func TestMutate_DatasetDetectionDisabled(t *testing.T) {
 	m := newTestMutatorNoDataset()
-	patches, err := m.Mutate(podWithOwner("Job"))
+	patches, err := m.Mutate(podWithOwner("Job"), "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -754,8 +819,79 @@ func buildAdmissionReview(pod *corev1.Pod) admissionv1.AdmissionReview {
 	}
 }
 
+func buildJobAdmissionReview(job *batchv1.Job, username string) admissionv1.AdmissionReview {
+	jobBytes, _ := json.Marshal(job)
+	return admissionv1.AdmissionReview{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "admission.k8s.io/v1",
+			Kind:       "AdmissionReview",
+		},
+		Request: &admissionv1.AdmissionRequest{
+			UID:      "test-uid",
+			Resource: jobGVR,
+			UserInfo: authenticationv1.UserInfo{Username: username},
+			Object:   runtime.RawExtension{Raw: jobBytes},
+		},
+	}
+}
+
+func TestHandleAdmission_StripsSpoofedPostprocessLabelFromUntrustedJob(t *testing.T) {
+	h := NewHandler(newTestMutator(), testTrustedIdentity)
+	review := buildJobAdmissionReview(jobWithPostprocessLabel(), "system:serviceaccount:default:some-user-sa")
+
+	body, _ := json.Marshal(review)
+	req := httptest.NewRequest(http.MethodPost, "/mutate", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+
+	var resp admissionv1.AdmissionReview
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if !resp.Response.Allowed {
+		t.Error("expected Allowed=true -- this webhook neutralizes the spoofed label, it doesn't reject the Job")
+	}
+	if resp.Response.Patch == nil {
+		t.Fatal("expected a patch removing the spoofed aibom.io/postprocess-for label")
+	}
+	var patches []PatchOperation
+	if err := json.Unmarshal(resp.Response.Patch, &patches); err != nil {
+		t.Fatalf("failed to unmarshal patch: %v", err)
+	}
+	if len(patches) != 2 {
+		t.Errorf("expected 2 remove patches (job + template label), got %d: %+v", len(patches), patches)
+	}
+}
+
+func TestHandleAdmission_TrustedWatcherJobUntouched(t *testing.T) {
+	h := NewHandler(newTestMutator(), testTrustedIdentity)
+	review := buildJobAdmissionReview(jobWithPostprocessLabel(), testTrustedIdentity)
+
+	body, _ := json.Marshal(review)
+	req := httptest.NewRequest(http.MethodPost, "/mutate", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+
+	var resp admissionv1.AdmissionReview
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if !resp.Response.Allowed {
+		t.Error("expected Allowed=true")
+	}
+	if resp.Response.Patch != nil {
+		t.Errorf("expected no patch for a Job created by the trusted watcher identity, got %s", resp.Response.Patch)
+	}
+}
+
 func TestHandleAdmission_MutatesPod(t *testing.T) {
-	h := NewHandler(newTestMutator())
+	h := NewHandler(newTestMutator(), "")
 	review := buildAdmissionReview(podWithOwner("Job"))
 
 	body, _ := json.Marshal(review)
@@ -786,7 +922,7 @@ func TestHandleAdmission_MutatesPod(t *testing.T) {
 }
 
 func TestHandleAdmission_NoMutationForDeployment(t *testing.T) {
-	h := NewHandler(newTestMutator())
+	h := NewHandler(newTestMutator(), "")
 	review := buildAdmissionReview(podNoMatch())
 
 	body, _ := json.Marshal(review)
@@ -810,7 +946,7 @@ func TestHandleAdmission_NoMutationForDeployment(t *testing.T) {
 }
 
 func TestHandleAdmission_WrongMethod(t *testing.T) {
-	h := NewHandler(newTestMutator())
+	h := NewHandler(newTestMutator(), "")
 	req := httptest.NewRequest(http.MethodGet, "/mutate", nil)
 	rr := httptest.NewRecorder()
 
@@ -822,7 +958,7 @@ func TestHandleAdmission_WrongMethod(t *testing.T) {
 }
 
 func TestHandleAdmission_WrongContentType(t *testing.T) {
-	h := NewHandler(newTestMutator())
+	h := NewHandler(newTestMutator(), "")
 	req := httptest.NewRequest(http.MethodPost, "/mutate", bytes.NewReader([]byte("{}")))
 	req.Header.Set("Content-Type", "text/plain")
 	rr := httptest.NewRecorder()

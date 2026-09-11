@@ -37,7 +37,7 @@ func findVolume(patches []PatchOperation, name string) *corev1.Volume {
 
 func TestMutate_UsesPerJobIdentityTokenWhenClientsetConfigured(t *testing.T) {
 	m, _ := newTestMutatorWithClientset()
-	patches, err := m.Mutate(podWithOwner("Job"))
+	patches, err := m.Mutate(podWithOwner("Job"), "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -60,7 +60,7 @@ func TestMutate_UsesPerJobIdentityTokenWhenClientsetConfigured(t *testing.T) {
 
 func TestMutate_ProvisionsIdentityResourcesInWorkloadNamespace(t *testing.T) {
 	m, clientset := newTestMutatorWithClientset()
-	if _, err := m.Mutate(podWithOwner("Job")); err != nil {
+	if _, err := m.Mutate(podWithOwner("Job"), ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -79,7 +79,7 @@ func TestMutate_FallsBackToSharedTokenWhenOwnerUnknown(t *testing.T) {
 	// ConfigMap name) isn't known yet at admission time -- see
 	// dataConfigMapEnvVar's doc comment. ensurePodWorkloadIdentity must skip
 	// identity provisioning here rather than erroring.
-	patches, err := m.Mutate(podWithGPU())
+	patches, err := m.Mutate(podWithGPU(), "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -101,7 +101,7 @@ func TestMutate_ReplacesExistingTokenMountWhenIdentityProvisioned(t *testing.T) 
 		{Name: "kube-api-access-abcde", MountPath: "/var/run/secrets/kubernetes.io/serviceaccount", ReadOnly: true},
 	}
 
-	patches, err := m.Mutate(pod)
+	patches, err := m.Mutate(pod, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
