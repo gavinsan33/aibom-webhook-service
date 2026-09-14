@@ -7,10 +7,10 @@ The `examples/vllm-inference.yaml` file shows a JobSet with a vLLM server and a 
 oc apply -f examples/vllm-inference.yaml
 
 # Watch progress
-oc get pods -n gavin-test -w
+oc get pods -n project-gavin-test -w
 
 # View the AIBOM after postprocessing completes
-oc logs -n gavin-test job/aibom-vllm-benchmark-server-0-aibom-postprocess
+oc logs -n project-gavin-test job/aibom-vllm-benchmark-server-0-aibom-postprocess
 ```
 
 ## Example: vLLM via RHOAI/KServe Model Serving

@@ -296,10 +296,10 @@ Because `AIBOM` is a namespaced resource, it inherits ordinary Kubernetes RBAC: 
 
 ```bash
 # List AIBOMs in a namespace (only visible to users with RBAC on aiboms.aibom.io there)
-oc get aiboms -n gavin-test
+oc get aiboms -n project-gavin-test
 
 # Inspect one, including the full compiled AIBOM under spec.data
-oc get aibom train-job-abc123 -n gavin-test -o yaml
+oc get aibom train-job-abc123 -n project-gavin-test -o yaml
 ```
 
 `spec.jobName`, `spec.modelName`, `spec.experimentIntent`, and `spec.collectedAt` are pulled out as printer-friendly summary fields; `spec.data` holds the complete AIBOM JSON exactly as `postprocess.py` produced it.

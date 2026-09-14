@@ -6,7 +6,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-NAMESPACE="${1:-gavin-test}"
+NAMESPACE="${1:-project-gavin-test}"
 
 echo "Cleaning up example workloads..."
 for f in "$SCRIPT_DIR"/*.yaml; do

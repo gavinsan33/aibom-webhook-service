@@ -2,7 +2,7 @@ apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
 metadata:
   name: aibom-vllm-benchmark
-  namespace: gavin-test
+  namespace: project-gavin-test
 spec:
   replicatedJobs:
     - name: server
@@ -72,7 +72,7 @@ spec:
                   command:
                     - guidellm
                     - run
-                    - --backend=kind=openai_http,target=http://aibom-vllm-benchmark-server-0-0.aibom-vllm-benchmark.gavin-test.svc.cluster.local:8000
+                    - --backend=kind=openai_http,target=http://aibom-vllm-benchmark-server-0-0.aibom-vllm-benchmark.project-gavin-test.svc.cluster.local:8000
                     - --data=kind=synthetic_text,prompt_tokens=256,output_tokens=128
                     - --profile=kind=sweep
                     - --constraint=kind=max_duration,seconds=30

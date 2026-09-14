@@ -18,7 +18,7 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: aibom-granite-lora-finetune-multigpu
-  namespace: gavin-test
+  namespace: project-gavin-test
   annotations:
     aibom.io/experiment-intent: sft
     aibom.io/experiment-name: granite-lora-sft-multigpu-benchmark

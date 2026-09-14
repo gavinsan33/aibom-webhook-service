@@ -28,7 +28,7 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: aibom-granite-lora-finetune-raw-trainer
-  namespace: gavin-test
+  namespace: project-gavin-test
   annotations:
     aibom.io/experiment-intent: sft
     aibom.io/experiment-name: granite-lora-sft-raw-trainer-benchmark
