@@ -110,7 +110,7 @@ func instrumentedBarePod(name, namespace string) *corev1.Pod {
 }
 
 func TestShouldPostprocessPod_NoQualifyingSignal(t *testing.T) {
-	pod := instrumentedBarePod("web-pod", "gavin-test")
+	pod := instrumentedBarePod("web-pod", "project-gavin-test")
 	pod.Spec.Containers[0].Resources = corev1.ResourceRequirements{}
 
 	if shouldPostprocessPod(pod) {

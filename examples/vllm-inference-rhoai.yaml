@@ -25,7 +25,7 @@ apiVersion: serving.kserve.io/v1beta1
 kind: InferenceService
 metadata:
   name: aibom-vllm-granite-rhoai
-  namespace: gavin-test
+  namespace: project-gavin-test
   annotations:
     serving.kserve.io/deploymentMode: RawDeployment
 spec:
@@ -76,7 +76,7 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: aibom-vllm-granite-rhoai-client
-  namespace: gavin-test
+  namespace: project-gavin-test
 spec:
   backoffLimit: 0
   template:
@@ -91,7 +91,7 @@ spec:
             - sh
             - -c
             - |
-              until curl -sf http://aibom-vllm-granite-rhoai-predictor.gavin-test.svc.cluster.local:8000/health; do
+              until curl -sf http://aibom-vllm-granite-rhoai-predictor.project-gavin-test.svc.cluster.local:8000/health; do
                 echo "waiting for predictor..."
                 sleep 5
               done
@@ -102,7 +102,7 @@ spec:
           command:
             - guidellm
             - run
-            - --backend=kind=openai_http,target=http://aibom-vllm-granite-rhoai-predictor.gavin-test.svc.cluster.local:8000
+            - --backend=kind=openai_http,target=http://aibom-vllm-granite-rhoai-predictor.project-gavin-test.svc.cluster.local:8000
             - --data=kind=synthetic_text,prompt_tokens=256,output_tokens=128
             - --profile=kind=sweep
             - --constraint=kind=max_duration,seconds=30
