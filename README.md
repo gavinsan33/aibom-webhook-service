@@ -103,7 +103,7 @@ There are three ways to get images into the cluster — pick whichever fits:
 
 | Situation | Recipe |
 |---|---|
-| Default — Quay's GitHub build triggers already build both images on every push to `master` | `just deploy` |
+| Default — Quay's GitHub build triggers already build both images on every push to `main` | `just deploy` |
 | No egress to quay.io, or no external registry account | `just deploy-buildconfig` (in-cluster OpenShift BuildConfig) |
 | Iterating locally, don't want to wait on Quay or a git push | `just deploy-local <repo>` |
 
@@ -150,11 +150,11 @@ To remove the deployment: `just undeploy` (runs `helm uninstall aibom-webhook`, 
 One-time setup, done in the Quay web UI (not scriptable — it requires a GitHub OAuth authorization). Repeat for both `aibom-webhook-service` and `aibom-postprocess` repos on quay.io:
 
 1. Repo → **Builds** tab → **Add Build Trigger** → **GitHub Repository Push**, authorizing Quay against GitHub if prompted
-2. Source repo: this repo; branch filter restricted to `master` only
+2. Source repo: this repo; branch filter restricted to `main` only
 3. Dockerfile location: `/Dockerfile` for `aibom-webhook-service`, `/postprocess/Dockerfile` for `aibom-postprocess`; context `/` for both (the postprocess Dockerfile `COPY`s files from outside its own directory)
 4. Tagging options: add a template so each build produces both `latest` and a short-commit-SHA tag, keeping rollback ("redeploy an older SHA") consistent with `just deploy-buildconfig`'s path
 
-Once set up, every push to `master` produces new `latest` and `<sha>` tags automatically — `just deploy` (no arguments) always deploys whatever was built most recently.
+Once set up, every push to `main` produces new `latest` and `<sha>` tags automatically — `just deploy` (no arguments) always deploys whatever was built most recently.
 
 ### Setting Up Chart Publishing
 
