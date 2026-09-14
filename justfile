@@ -5,8 +5,8 @@ default:
 binary_name := "webhook-server"
 # The only place aibom-webhook's namespace is configured — the chart itself has no
 # separate namespace value, it always installs into the release namespace passed here.
-# Override with `just --set webhook_namespace <ns> <recipe>` if it's ever not aibom-system.
-webhook_namespace := "aibom-system"
+# Override with `just --set webhook_namespace <ns> <recipe>` if it's ever not project-aibom.
+webhook_namespace := "project-aibom"
 
 # --- Build & test ------------------------------------------------------------
 
