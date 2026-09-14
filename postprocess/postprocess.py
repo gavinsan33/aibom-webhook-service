@@ -103,12 +103,24 @@ TELEMETRY_QUERIES = {
     },
     # container_fs_* is labeled per-device, unlike network -- sum across
     # devices so this collapses to one series per pod like every other metric.
+    # Depending on runtime/cgroup version, cAdvisor sometimes only exposes
+    # these at the pod-level cgroup (container="") rather than per-container,
+    # so the primary per-container sum falls back to the pod-level series via
+    # `or` when the per-container one comes back empty for a pod -- the two
+    # are never emitted simultaneously for the same pod, so this can't
+    # double-count.
     "storage_read_throughput": {
-        "query": 'sum by (pod) (rate(container_fs_reads_bytes_total{pod="{pod_name}", container!="POD", container!=""}[5m]))',
+        "query": (
+            'sum by (pod) (rate(container_fs_reads_bytes_total{pod="{pod_name}", container!="POD", container!=""}[5m]))'
+            ' or sum by (pod) (rate(container_fs_reads_bytes_total{pod="{pod_name}", container=""}[5m]))'
+        ),
         "unit": "bytes_per_sec",
     },
     "storage_write_throughput": {
-        "query": 'sum by (pod) (rate(container_fs_writes_bytes_total{pod="{pod_name}", container!="POD", container!=""}[5m]))',
+        "query": (
+            'sum by (pod) (rate(container_fs_writes_bytes_total{pod="{pod_name}", container!="POD", container!=""}[5m]))'
+            ' or sum by (pod) (rate(container_fs_writes_bytes_total{pod="{pod_name}", container=""}[5m]))'
+        ),
         "unit": "bytes_per_sec",
     },
 }
