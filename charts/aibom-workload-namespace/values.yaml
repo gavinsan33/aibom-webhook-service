@@ -1,7 +1,7 @@
 # Namespace the aibom-webhook chart was installed into. The image-puller
 # RoleBinding must live there (OpenShift's system:image-puller access is
 # granted from the image's own namespace, not the consuming namespace).
-aibomSystemNamespace: aibom-system
+aibomSystemNamespace: project-aibom
 
 # Populate via --set-file at install time, e.g.:
 #   helm install aibom-ns-<team> ./charts/aibom-workload-namespace -n <team> \

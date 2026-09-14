@@ -114,21 +114,23 @@ _check-auth:
 # tip SHA via remote-build-sha.sh (erroring if it hasn't been pushed), and uses that
 # SHA the same way --version would — so it's still pinned to immutable content, not
 # a mutable branch name that could move between resolving and building it.
-# Usage: just deploy-buildconfig [--version=<sha> | --branch[=<name>]] [--skip-crds]
+# Usage: just deploy-buildconfig [--version=<sha> | --branch[=<name>]] [--values=<file>] [--skip-crds]
 [group('deploy')]
 deploy-buildconfig *args: _check-auth
     #!/usr/bin/env bash
     set -euo pipefail
     version=""
     branch=""
+    values_file=""
     skip_crds=false
     for arg in {{ args }}; do
         case "$arg" in
             --skip-crds) skip_crds=true ;;
             --version=*) version="${arg#--version=}" ;;
+            --values=*) values_file="${arg#--values=}" ;;
             --branch) branch="$(git rev-parse --abbrev-ref HEAD)" ;;
             --branch=*) branch="${arg#--branch=}" ;;
-            *) echo "error: unknown argument '$arg' (expected --version=<sha>, --branch[=<name>], or --skip-crds)" >&2; exit 1 ;;
+            *) echo "error: unknown argument '$arg' (expected --version=<sha>, --branch[=<name>], --values=<file>, or --skip-crds)" >&2; exit 1 ;;
         esac
     done
     if [[ -n "$version" && -n "$branch" ]]; then
@@ -141,11 +143,14 @@ deploy-buildconfig *args: _check-auth
     [[ -n "$version" ]] || version="$(scripts/remote-build-sha.sh)"
     ns_flag="--create-namespace"
     [[ "$skip_crds" = true ]] && ns_flag="--skip-crds"
+    values_args=()
+    [[ -n "$values_file" ]] && values_args=(-f "$values_file")
     gitref_args=()
     [[ "$version" = "latest" ]] || gitref_args=(--set "build.gitRef=$version")
     first_install=false
     helm status aibom-webhook -n {{ webhook_namespace }} >/dev/null 2>&1 || first_install=true
     helm upgrade --install aibom-webhook charts/aibom-webhook -n {{ webhook_namespace }} "$ns_flag" \
+        "${values_args[@]}" \
         --set build.enabled=true \
         --set image.webhook.repository="image-registry.openshift-image-registry.svc:5000/{{ webhook_namespace }}/aibom-webhook-service" \
         --set image.postprocess.repository="image-registry.openshift-image-registry.svc:5000/{{ webhook_namespace }}/aibom-postprocess" \
@@ -202,7 +207,7 @@ undeploy: _check-auth
 # are uncommitted changes — unlike `just deploy-buildconfig`, there's no git
 # remote tip to resolve here, since this builds whatever's on disk right now.
 # --skip-crds behaves the same as in `just deploy-buildconfig`.
-# Usage: just deploy-local <repo> [--version=<tag>] [--skip-crds]
+# Usage: just deploy-local <repo> [--version=<tag>] [--values=<file>] [--skip-crds]
 [group('deploy')]
 deploy-local repo *args: _check-auth
     #!/usr/bin/env bash
@@ -210,12 +215,14 @@ deploy-local repo *args: _check-auth
     engine=docker
     command -v docker >/dev/null 2>&1 || engine=podman
     version=""
+    values_file=""
     skip_crds=false
     for arg in {{ args }}; do
         case "$arg" in
             --skip-crds) skip_crds=true ;;
             --version=*) version="${arg#--version=}" ;;
-            *) echo "error: unknown argument '$arg' (expected --version=<tag> or --skip-crds)" >&2; exit 1 ;;
+            --values=*) values_file="${arg#--values=}" ;;
+            *) echo "error: unknown argument '$arg' (expected --version=<tag>, --values=<file>, or --skip-crds)" >&2; exit 1 ;;
         esac
     done
     if [[ -z "$version" ]]; then
@@ -230,7 +237,10 @@ deploy-local repo *args: _check-auth
     "$engine" push "$postprocess_ref"
     ns_flag="--create-namespace"
     [[ "$skip_crds" = true ]] && ns_flag="--skip-crds"
+    values_args=()
+    [[ -n "$values_file" ]] && values_args=(-f "$values_file")
     helm upgrade --install aibom-webhook charts/aibom-webhook -n {{ webhook_namespace }} "$ns_flag" \
+        "${values_args[@]}" \
         --set build.enabled=false \
         --set image.webhook.repository="{{ repo }}/aibom-webhook-service" \
         --set image.postprocess.repository="{{ repo }}/aibom-postprocess" \
@@ -249,23 +259,28 @@ deploy-local repo *args: _check-auth
 # repo/version only matter when deploying a different quay org or pinning to
 # an immutable SHA tag instead of the mutable "latest" Quay's master trigger
 # keeps overwriting. For in-cluster builds instead, see `just deploy-buildconfig`.
-# Usage: just deploy [<repo>] [--version=<tag>] [--skip-crds]
+# Usage: just deploy [<repo>] [--version=<tag>] [--values=<file>] [--skip-crds]
 [group('deploy')]
 deploy repo="quay.io/gsanders" *args: _check-auth
     #!/usr/bin/env bash
     set -euo pipefail
     version="latest"
+    values_file=""
     skip_crds=false
     for arg in {{ args }}; do
         case "$arg" in
             --skip-crds) skip_crds=true ;;
             --version=*) version="${arg#--version=}" ;;
-            *) echo "error: unknown argument '$arg' (expected --version=<tag> or --skip-crds)" >&2; exit 1 ;;
+            --values=*) values_file="${arg#--values=}" ;;
+            *) echo "error: unknown argument '$arg' (expected --version=<tag>, --values=<file>, or --skip-crds)" >&2; exit 1 ;;
         esac
     done
     ns_flag="--create-namespace"
     [[ "$skip_crds" = true ]] && ns_flag="--skip-crds"
+    values_args=()
+    [[ -n "$values_file" ]] && values_args=(-f "$values_file")
     helm upgrade --install aibom-webhook charts/aibom-webhook -n {{ webhook_namespace }} "$ns_flag" \
+        "${values_args[@]}" \
         --set build.enabled=false \
         --set image.webhook.repository="{{ repo }}/aibom-webhook-service" \
         --set image.postprocess.repository="{{ repo }}/aibom-postprocess" \
