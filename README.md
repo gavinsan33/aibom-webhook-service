@@ -242,7 +242,7 @@ When the webhook mutates a pod, it adds:
 - Captures dataset name, version, split, fingerprint, license, and training args
 - Writes the result into the same data ConfigMap (key `dataset-<pod-name>.json`) at process exit
 
-See `CLAUDE.md` for the detection internals (CLI-arg parsing, runtime hooks, KServe storage-path resolution, quantization/parallelization detection).
+See `CLAUDE.md` for the detection internals (CLI-arg parsing, runtime hooks, KServe storage-path resolution, quantization/parallelization detection), or [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md) for a field-by-field reference of everything detectable and exactly how.
 
 ## Postprocess Flow
 
