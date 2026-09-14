@@ -238,7 +238,7 @@ undeploy *args: _check-auth
 # --skip-crds behaves the same as in `just deploy-buildconfig`.
 # Usage: just deploy-local <repo> [--version=<tag>] [--values=<file>] [--skip-crds]
 [group('deploy')]
-deploy-local repo *args: _check-auth
+deploy-local repo="quay.io/gsanders" *args: _check-auth
     #!/usr/bin/env bash
     set -euo pipefail
     engine=docker
