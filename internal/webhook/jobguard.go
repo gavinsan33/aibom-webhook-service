@@ -28,6 +28,17 @@ import (
 // isPostprocessPod later inspects. Both need to be sanitized at Job-creation
 // time so the Job controller only ever propagates a clean value.
 //
+// oldJob is nil on CREATE, and the previous version of the object on UPDATE
+// (the webhook is registered for both -- see webhook-configuration.yaml).
+// The Job webhook only running on CREATE would leave an easy bypass: create
+// the Job without the label (or suspended, without a pod template label),
+// then UPDATE it in afterward once past admission. On UPDATE, only a value
+// that is newly added or changed relative to oldJob is a candidate for
+// stripping; a value already present and unchanged was already checked (and
+// let through, or didn't exist yet) on a prior admission, so re-stripping it
+// here would incorrectly undo a legitimate label the watcher itself set
+// earlier and never touched again.
+//
 // If trustedIdentity is empty (not configured), this check is disabled and
 // no patches are ever returned -- fails open rather than stripping a
 // legitimate value when the operator hasn't wired up the identity to
@@ -38,23 +49,42 @@ import (
 // submitted directly (not via a Job at all) never goes through this check.
 // See isPostprocessPod's own doc comment for the complementary, narrower
 // defense on that path, and its documented residual gap.
-func SanitizeJobPostprocessLabel(job *batchv1.Job, requesterUsername, trustedIdentity string) []PatchOperation {
+func SanitizeJobPostprocessLabel(job, oldJob *batchv1.Job, requesterUsername, trustedIdentity string) []PatchOperation {
 	if trustedIdentity == "" || requesterUsername == trustedIdentity {
 		return nil
 	}
 
+	var oldLabels, oldTemplateLabels map[string]string
+	if oldJob != nil {
+		oldLabels = oldJob.Labels
+		oldTemplateLabels = oldJob.Spec.Template.ObjectMeta.Labels
+	}
+
 	var patches []PatchOperation
-	if _, ok := job.Labels[aibomdata.LabelPostprocessFor]; ok {
+	if changedLabel(job.Labels, oldLabels) {
 		patches = append(patches, PatchOperation{
 			Op:   "remove",
 			Path: "/metadata/labels/aibom.io~1postprocess-for",
 		})
 	}
-	if _, ok := job.Spec.Template.ObjectMeta.Labels[aibomdata.LabelPostprocessFor]; ok {
+	if changedLabel(job.Spec.Template.ObjectMeta.Labels, oldTemplateLabels) {
 		patches = append(patches, PatchOperation{
 			Op:   "remove",
 			Path: "/spec/template/metadata/labels/aibom.io~1postprocess-for",
 		})
 	}
 	return patches
+}
+
+// changedLabel reports whether aibom.io/postprocess-for is present in
+// labels and either wasn't present in oldLabels at all, or had a different
+// value there -- i.e. this admission is the one that introduced or changed
+// it, as opposed to carrying forward a value from an earlier admission.
+func changedLabel(labels, oldLabels map[string]string) bool {
+	val, ok := labels[aibomdata.LabelPostprocessFor]
+	if !ok {
+		return false
+	}
+	oldVal, oldOk := oldLabels[aibomdata.LabelPostprocessFor]
+	return !oldOk || oldVal != val
 }
