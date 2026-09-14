@@ -110,7 +110,7 @@ _check-auth:
 # path the BuildConfig actually writes to — the two must move together, or the
 # Deployment ends up pointed at an image the BuildConfig never produced.
 #
-# With no arguments, deploys build.gitRef from values.yaml (master) at its current
+# With no arguments, deploys build.gitRef from values.yaml (main) at its current
 # remote tip — NOT your local checkout or branch, which this recipe never inspects.
 # --branch[=<name>] deploys a different branch instead: defaults to whatever branch
 # is currently checked out locally if no name is given, resolves it to its remote
@@ -284,12 +284,12 @@ deploy-local repo="quay.io/gsanders" *args: _check-auth
 # The seamless default: install/upgrade the chart against images Quay already
 # built — no build, no push, just a helm install pointing at a tag. Works once
 # Quay's GitHub build triggers are set up (see README) to auto-build both
-# images on every push to master: nothing runs locally at all, this just tells
+# images on every push to main: nothing runs locally at all, this just tells
 # the cluster where to pull from. Also matches values.yaml's own defaults
 # (quay.io/gsanders, tag latest), so `just deploy` with no arguments is
 # equivalent to a plain `helm upgrade --install` with no --set overrides —
 # repo/version only matter when deploying a different quay org or pinning to
-# an immutable SHA tag instead of the mutable "latest" Quay's master trigger
+# an immutable SHA tag instead of the mutable "latest" Quay's main trigger
 # keeps overwriting. For in-cluster builds instead, see `just deploy-buildconfig`.
 # Usage: just deploy [<repo>] [--version=<tag>] [--values=<file>] [--skip-crds]
 [group('deploy')]

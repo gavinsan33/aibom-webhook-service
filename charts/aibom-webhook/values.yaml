@@ -1,5 +1,5 @@
 # Defaults to the Quay build triggers that auto-build both images on every push
-# to master (see README's Cluster Deployment section) — the seamless, no-cluster-
+# to main (see README's Cluster Deployment section) — the seamless, no-cluster-
 # permission-needed path. `just deploy` (build.enabled=true) overrides both
 # repositories to the in-cluster registry path instead, since that's where its
 # BuildConfig actually writes; see justfile.
@@ -47,7 +47,7 @@ webhook:
 build:
   enabled: false
   gitRepo: https://github.com/gavinsan33/aibom-webhook-service.git
-  gitRef: master
+  gitRef: main
 
 watcher:
   enabled: true
