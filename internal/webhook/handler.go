@@ -133,8 +133,9 @@ func (h *Handler) handlePodAdmission(req *admissionv1.AdmissionRequest) *admissi
 }
 
 // handleJobAdmission runs SanitizeJobPostprocessLabel against every Job
-// creation in an opted-in namespace -- see that function's doc comment for
-// why aibom.io/postprocess-for can't be trusted from the Job object alone.
+// create/update in an opted-in namespace -- see that function's doc comment
+// for why aibom.io/postprocess-for can't be trusted from the Job object
+// alone, and why UPDATE has to be checked too, not just CREATE.
 func (h *Handler) handleJobAdmission(req *admissionv1.AdmissionRequest) *admissionv1.AdmissionResponse {
 	var job batchv1.Job
 	if err := json.Unmarshal(req.Object.Raw, &job); err != nil {
@@ -142,7 +143,16 @@ func (h *Handler) handleJobAdmission(req *admissionv1.AdmissionRequest) *admissi
 		return allowResponse("failed to unmarshal job")
 	}
 
-	patches := SanitizeJobPostprocessLabel(&job, req.UserInfo.Username, h.TrustedWatcherIdentity)
+	var oldJob *batchv1.Job
+	if req.Operation == admissionv1.Update && len(req.OldObject.Raw) > 0 {
+		oldJob = &batchv1.Job{}
+		if err := json.Unmarshal(req.OldObject.Raw, oldJob); err != nil {
+			log.Printf("failed to unmarshal old job: %v", err)
+			return allowResponse("failed to unmarshal old job")
+		}
+	}
+
+	patches := SanitizeJobPostprocessLabel(&job, oldJob, req.UserInfo.Username, h.TrustedWatcherIdentity)
 	if patches == nil {
 		return allowResponse("no mutation needed")
 	}

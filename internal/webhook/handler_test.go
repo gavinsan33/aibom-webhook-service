@@ -835,6 +835,25 @@ func buildJobAdmissionReview(job *batchv1.Job, username string) admissionv1.Admi
 	}
 }
 
+func buildJobUpdateAdmissionReview(job, oldJob *batchv1.Job, username string) admissionv1.AdmissionReview {
+	jobBytes, _ := json.Marshal(job)
+	oldJobBytes, _ := json.Marshal(oldJob)
+	return admissionv1.AdmissionReview{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "admission.k8s.io/v1",
+			Kind:       "AdmissionReview",
+		},
+		Request: &admissionv1.AdmissionRequest{
+			UID:       "test-uid",
+			Resource:  jobGVR,
+			Operation: admissionv1.Update,
+			UserInfo:  authenticationv1.UserInfo{Username: username},
+			Object:    runtime.RawExtension{Raw: jobBytes},
+			OldObject: runtime.RawExtension{Raw: oldJobBytes},
+		},
+	}
+}
+
 func TestHandleAdmission_StripsSpoofedPostprocessLabelFromUntrustedJob(t *testing.T) {
 	h := NewHandler(newTestMutator(), testTrustedIdentity)
 	review := buildJobAdmissionReview(jobWithPostprocessLabel(), "system:serviceaccount:default:some-user-sa")
@@ -887,6 +906,45 @@ func TestHandleAdmission_TrustedWatcherJobUntouched(t *testing.T) {
 	}
 	if resp.Response.Patch != nil {
 		t.Errorf("expected no patch for a Job created by the trusted watcher identity, got %s", resp.Response.Patch)
+	}
+}
+
+// TestHandleAdmission_StripsPostprocessLabelAddedOnUpdate covers the bypass
+// the reviewer flagged on PR #53: creating a Job without the label (passing
+// a CREATE-only check trivially), then adding it via a later UPDATE. The
+// Job webhook rule now covers UPDATE too (see webhook-configuration.yaml),
+// and this exercises that path end to end through ServeHTTP.
+func TestHandleAdmission_StripsPostprocessLabelAddedOnUpdate(t *testing.T) {
+	h := NewHandler(newTestMutator(), testTrustedIdentity)
+	oldJob := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "sneaky-job", Namespace: "default"},
+	}
+	review := buildJobUpdateAdmissionReview(jobWithPostprocessLabel(), oldJob, "system:serviceaccount:default:some-user-sa")
+
+	body, _ := json.Marshal(review)
+	req := httptest.NewRequest(http.MethodPost, "/mutate", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+
+	var resp admissionv1.AdmissionReview
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if !resp.Response.Allowed {
+		t.Error("expected Allowed=true -- this webhook neutralizes the spoofed label, it doesn't reject the Job")
+	}
+	if resp.Response.Patch == nil {
+		t.Fatal("expected a patch removing the label added on UPDATE")
+	}
+	var patches []PatchOperation
+	if err := json.Unmarshal(resp.Response.Patch, &patches); err != nil {
+		t.Fatalf("failed to unmarshal patch: %v", err)
+	}
+	if len(patches) != 2 {
+		t.Errorf("expected 2 remove patches (job + template label), got %d: %+v", len(patches), patches)
 	}
 }
 
