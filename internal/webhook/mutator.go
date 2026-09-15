@@ -478,14 +478,11 @@ func (m *Mutator) buildDatasetDetectorPatches(pod *corev1.Pod, containerIdx int)
 	}
 
 	// Mount usercustomize.py (runtime detector) and the aibom-data volume
-	// it writes dataset_detected.json into. No k8s_api.py mount and no
-	// Kubernetes API token here anymore -- runtime_detector.py no longer
-	// talks to the Kubernetes API at all (see #47); the aibom-dataset-
-	// sidecar container reads this same aibom-data volume and performs the
-	// actual (signed) ConfigMap write instead. This container's own
-	// pre-existing ServiceAccount token mount (if any, from the built-in
-	// admission controller) is left completely untouched, unlike before
-	// #47 -- there's nothing here for it to need access to anymore.
+	// it writes dataset_detected.json into. No k8s_api.py mount here
+	// anymore -- runtime_detector.py no longer talks to the Kubernetes API
+	// at all (see #47); the aibom-dataset-sidecar container reads this same
+	// aibom-data volume and performs the actual (signed) ConfigMap write
+	// instead.
 	mounts := []corev1.VolumeMount{
 		{
 			Name:      "aibom-scripts",
@@ -514,6 +511,23 @@ func (m *Mutator) buildDatasetDetectorPatches(pod *corev1.Pod, containerIdx int)
 				Value: mount,
 			})
 		}
+	}
+
+	// This container no longer needs any Kubernetes API access at all (see
+	// above), so strip its default automounted ServiceAccount token if the
+	// built-in ServiceAccount admission controller already mounted one --
+	// left in place, it would give this container the pod's own
+	// (namespace-wide, via aibom-workload-data) ConfigMap access, which is
+	// broader than the per-job identity this container used to be
+	// retargeted to before #47 removed its need for a token entirely. This
+	// is a straight removal, not a retarget: unlike the discovery init
+	// container and the dataset sidecar, this container has no legitimate
+	// remaining use for any token.
+	if idx := volumeMountIndexAtPath(container.VolumeMounts, aibomTokenVolumeMount().MountPath); idx != -1 {
+		patches = append(patches, PatchOperation{
+			Op:   "remove",
+			Path: fmt.Sprintf("/spec/containers/%d/volumeMounts/%d", containerIdx, idx),
+		})
 	}
 
 	return patches
@@ -677,6 +691,17 @@ func datasetSigningKeyVolumeMount() corev1.VolumeMount {
 		MountPath: "/var/run/secrets/aibom/dataset-signing",
 		ReadOnly:  true,
 	}
+}
+
+// volumeMountIndexAtPath returns the index of the volumeMount in mounts
+// whose MountPath matches path, or -1 if none does.
+func volumeMountIndexAtPath(mounts []corev1.VolumeMount, path string) int {
+	for i, m := range mounts {
+		if m.MountPath == path {
+			return i
+		}
+	}
+	return -1
 }
 
 // appendVolume adds a volume patch, handling nil vs existing volumes array.
