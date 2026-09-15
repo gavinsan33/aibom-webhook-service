@@ -380,3 +380,35 @@ setup-namespace namespace skip_label="false": _check-auth
         --set-file scripts.generateSnapshot=scripts/aibom-scripts/generate_snapshot.py \
         --set-file scripts.runtimeDetector=scripts/aibom-scripts/runtime_detector.py \
         --set-file scripts.k8sApi=scripts/aibom-scripts/k8s_api.py
+
+# --- Chart publishing -----------------------------------------------------
+#
+# Packages both charts and pushes them as OCI artifacts to Quay, so
+# `helm upgrade --install ... oci://quay.io/<org>/aibom-webhook` and
+# `.../aibom-workload-namespace` (chart names, distinct from the
+# aibom-webhook-service/aibom-postprocess image repos) work with no checked-out
+# copy of this repo. One-time setup: `helm registry login quay.io` with an
+# account/robot that has push access under that org, and (in the Quay UI) make
+# both chart repos public, or install accepts credentials some other way.
+#
+# The aibom-workload-namespace chart needs scripts/aibom-scripts/*.py embedded
+# so an OCI install doesn't also need --set-file pointed at a repo checkout —
+# copied into charts/aibom-workload-namespace/files/ here (gitignored; picked
+# up by templates/scripts-configmap.yaml as a fallback only when
+# .Values.scripts.* isn't set — see that file) rather than committed, so
+# there's exactly one source of truth for the scripts and this recipe is the
+# only place responsible for keeping the packaged copy fresh.
+[group('charts')]
+chart-push repo="quay.io/gsanders":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    pkg_dir="$(mktemp -d)"
+    trap 'rm -rf charts/aibom-workload-namespace/files "$pkg_dir"' EXIT
+    rm -rf charts/aibom-workload-namespace/files
+    mkdir -p charts/aibom-workload-namespace/files
+    cp scripts/aibom-scripts/generate_snapshot.py scripts/aibom-scripts/runtime_detector.py \
+        scripts/aibom-scripts/k8s_api.py charts/aibom-workload-namespace/files/
+    helm package charts/aibom-webhook -d "$pkg_dir"
+    helm package charts/aibom-workload-namespace -d "$pkg_dir"
+    helm push "$pkg_dir"/aibom-webhook-*.tgz oci://{{ repo }}
+    helm push "$pkg_dir"/aibom-workload-namespace-*.tgz oci://{{ repo }}
