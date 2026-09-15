@@ -443,16 +443,22 @@ uninstall-namespace namespace skip_label="false": _check-auth
 # there's exactly one source of truth for the scripts and this recipe is the
 # only place responsible for keeping the packaged copy fresh.
 #
-# Versions each chart by commit, mirroring the images' own --version=<sha>
-# scheme: every chart-push is tied to the exact commit it was built from, one
-# immutable tag per commit, no separate mutable "latest" to keep track of.
-# Chart.yaml's own version (e.g. 0.1.0) is used as the SemVer base, with the
-# git short SHA appended as build metadata ("-dirty" suffixed the same way
-# deploy-local's image tag is, if the working tree has uncommitted changes) —
-# e.g. 0.1.0+abc1234. OCI tags can't contain "+", so Helm substitutes "_" when
-# pushing/pulling (the tag actually stored in Quay is 0.1.0_abc1234) and
-# converts back transparently — pass --version with the "+" form to `helm
-# install`/`helm show chart`, not the underscore form.
+# Publishes each chart under two tags per run, mirroring the images' own
+# mutable-latest/immutable-<sha> split (see "Setting Up Quay Auto-Build" in the
+# README — every image build produces both):
+#   - <Chart.yaml version> (e.g. 0.1.0) — mutable, overwritten on every
+#     chart-push, since Chart.yaml's version isn't bumped automatically.
+#     `helm upgrade --install ... oci://.../aibom-webhook` with no --version
+#     resolves here.
+#   - <Chart.yaml version>-<git sha> (e.g. 0.1.0-abc1234, "-dirty" suffixed the
+#     same way deploy-local's tag is if the working tree has uncommitted
+#     changes) — immutable, one per chart-push, for pinning/rollback.
+# The pinned tag uses SemVer *prerelease* syntax (hyphen), not build metadata
+# (plus): a prerelease has strictly lower precedence than the plain release
+# per the SemVer spec, so "no --version" reliably and deterministically
+# resolves to the mutable tag above rather than being an unpredictable tie —
+# build metadata is ignored for precedence entirely, which is what made an
+# earlier version of this recipe (using "+<sha>") ambiguous.
 [group('charts')]
 chart-push repo="quay.io/gsanders":
     #!/usr/bin/env bash
@@ -467,8 +473,10 @@ chart-push repo="quay.io/gsanders":
     git diff --quiet HEAD || sha="${sha}-dirty"
     for chart in aibom-webhook aibom-workload-namespace; do
         base_version="$(grep '^version:' "charts/$chart/Chart.yaml" | awk '{print $2}')"
-        version="${base_version}+${sha}"
-        helm package "charts/$chart" -d "$pkg_dir" --version "$version"
-        helm push "$pkg_dir/$chart-${version}.tgz" oci://{{ repo }}
-        echo "pushed oci://{{ repo }}/$chart — install with: --version=$version"
+        pinned_version="${base_version}-${sha}"
+        helm package "charts/$chart" -d "$pkg_dir"
+        helm package "charts/$chart" -d "$pkg_dir" --version "$pinned_version"
+        helm push "$pkg_dir/$chart-$base_version.tgz" oci://{{ repo }}
+        helm push "$pkg_dir/$chart-${pinned_version}.tgz" oci://{{ repo }}
+        echo "pushed oci://{{ repo }}/$chart — mutable: $base_version, pin with: --version=$pinned_version"
     done
