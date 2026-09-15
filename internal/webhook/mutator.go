@@ -382,8 +382,25 @@ func (m *Mutator) buildDatasetSidecarContainer(pod *corev1.Pod) corev1.Container
 		Name:          "aibom-dataset-sidecar",
 		Image:         m.DatasetSidecarImage,
 		RestartPolicy: &containerRestartPolicyAlways,
-		Command:       []string{"/bin/bash", "-c"},
-		Args:          []string{"python3 /scripts/dataset_sidecar.py"},
+		Command: []string{"/bin/bash", "-c"},
+		// A namespace whose aibom-workload-namespace chart install predates
+		// this container's addition has an empty dataset_sidecar.py key in
+		// its aibom-scripts ConfigMap (see values.yaml's scripts.datasetSidecar
+		// default) -- mirroring how buildDatasetSigningKeyVolume's Secret
+		// mount degrades gracefully for the same rollout window. Unlike that
+		// Secret mount, running an empty/missing script isn't a graceful
+		// no-op: python3 would just exit 0 immediately, and a native sidecar
+		// (RestartPolicy: Always) that exits gets restarted by the kubelet
+		// in a tight backoff loop. Guard for that here instead, idling
+		// quietly until the namespace is upgraded.
+		Args: []string{
+			"if [ -s /scripts/dataset_sidecar.py ]; then " +
+				"exec python3 /scripts/dataset_sidecar.py; " +
+				"else " +
+				"echo 'aibom-dataset-sidecar: dataset_sidecar.py not configured for this namespace yet, idling' >&2; " +
+				"exec sleep infinity; " +
+				"fi",
+		},
 		Env:           env,
 		VolumeMounts: []corev1.VolumeMount{
 			// Same aibom-data emptyDir the app container writes
