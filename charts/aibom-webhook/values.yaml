@@ -39,6 +39,14 @@ webhook:
   namespaceSelectorLabel:
     key: aibom.io/enabled
     value: "true"
+  # Full username the cluster's built-in Job controller uses when creating a
+  # Job's pods (commonly system:serviceaccount:kube-system:job-controller,
+  # depending on kube-controller-manager's --use-service-account-credentials
+  # flag). Verify this on your own cluster before setting it -- an incorrect
+  # value misclassifies real postprocess pods, not just spoofed ones. Left
+  # empty (the default), only the weaker ownerReference-only check applies;
+  # see CLAUDE.md's postprocess-for trust boundary section.
+  trustedJobControllerIdentity: ""
 
 # OpenShift BuildConfig/ImageStream resources that build the webhook and
 # postprocess images from source in-cluster. Opt-in (via `just deploy`) for

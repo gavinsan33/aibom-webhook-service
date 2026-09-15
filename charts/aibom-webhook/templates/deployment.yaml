@@ -42,6 +42,17 @@ spec:
             - --port=8443
             - --postprocess-image={{ .Values.image.postprocess.repository }}:{{ .Values.image.postprocess.tag }}
             - --enable-watcher={{ .Values.watcher.enabled }}
+            # Matches this Deployment's own serviceAccountName above -- the
+            # watcher (running in this same binary) creates postprocess Jobs
+            # as this identity, so the webhook can verify a Job claiming
+            # aibom.io/postprocess-for was actually created by the watcher
+            # and not a workload spoofing the label. See jobguard.go.
+            - --trusted-watcher-identity=system:serviceaccount:{{ include "aibom-webhook.namespace" . }}:aibom-webhook
+            {{- if .Values.webhook.trustedJobControllerIdentity }}
+            # Tightens isPostprocessPod's Job-owner check -- see
+            # values.yaml's comment on this setting before enabling it.
+            - --trusted-job-controller-identity={{ .Values.webhook.trustedJobControllerIdentity }}
+            {{- end }}
           volumeMounts:
             - name: certs
               mountPath: /certs

@@ -22,6 +22,18 @@ webhooks:
         operations: ["CREATE"]
         resources: ["pods"]
         scope: Namespaced
+      # Job create/update is also intercepted so aibom.io/postprocess-for can
+      # be checked against the requester's identity -- see
+      # SanitizeJobPostprocessLabel's doc comment for why this can't be
+      # verified from the Pod alone, and why UPDATE has to be covered too
+      # (a Job created without the label, then patched to add it afterward,
+      # would otherwise bypass a CREATE-only check entirely). Same
+      # clientConfig/failurePolicy/namespaceSelector as the pods rule above.
+      - apiGroups: ["batch"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["jobs"]
+        scope: Namespaced
     clientConfig:
       service:
         name: aibom-webhook
