@@ -190,10 +190,33 @@ deploy-buildconfig *args: _check-auth
     oc -n {{ webhook_namespace }} rollout status deployment/aibom-webhook --timeout=120s
     echo "NOTE: run 'just setup-namespace <namespace>' for each workload namespace"
 
+# Usage: just undeploy [--skip-crds]
+#
+# The chart's cluster-scoped RBAC (ClusterRole/ClusterRoleBinding) and the
+# MutatingWebhookConfiguration are owned by this release too, so `helm uninstall`
+# needs the same cluster-admin impersonation `deploy`/`deploy-buildconfig`/
+# `deploy-local` need to install them — without it, expect a partial uninstall
+# that removes namespace-scoped resources but errors out on (and leaves behind)
+# the cluster-scoped ones. --skip-crds mirrors the deploy recipes' flag name for
+# consistency, dropping --kube-as-user=system:admin for a caller who already
+# holds that permission some other way — nothing here actually touches the
+# aiboms.aibom.io CRD, which `helm uninstall` never removes regardless (see the
+# confirmation message below).
 [group('deploy')]
 [confirm("Uninstall the aibom-webhook release? This removes the webhook, RBAC, and Deployment (the CRD and any AIBOM resources are left in place).")]
-undeploy: _check-auth
-    helm uninstall aibom-webhook -n {{ webhook_namespace }}
+undeploy *args: _check-auth
+    #!/usr/bin/env bash
+    set -euo pipefail
+    skip_crds=false
+    for arg in {{ args }}; do
+        case "$arg" in
+            --skip-crds) skip_crds=true ;;
+            *) echo "error: unknown argument '$arg' (expected --skip-crds)" >&2; exit 1 ;;
+        esac
+    done
+    kube_as_user_args=()
+    [[ "$skip_crds" = true ]] || kube_as_user_args=(--kube-as-user=system:admin)
+    helm uninstall aibom-webhook -n {{ webhook_namespace }} "${kube_as_user_args[@]}"
 
 # Build both images locally and push them to quay.io, then install/upgrade the
 # chart with build.enabled=false so the Deployment pulls those pushed images
@@ -380,6 +403,27 @@ setup-namespace namespace skip_label="false": _check-auth
         --set-file scripts.generateSnapshot=scripts/aibom-scripts/generate_snapshot.py \
         --set-file scripts.runtimeDetector=scripts/aibom-scripts/runtime_detector.py \
         --set-file scripts.k8sApi=scripts/aibom-scripts/k8s_api.py
+
+# Reverses `just setup-namespace`: uninstalls the aibom-ns-<namespace> release
+# (removing the image-puller RoleBinding, aibom-scripts ConfigMap, aibom-postprocess
+# ServiceAccount/RBAC, aibom-workload-data/aibom-workload-inferenceservices RBAC, the
+# discovery-HMAC Secret, and the cluster-scoped ClusterRoleBinding it created) and
+# removes the aibom.io/enabled label. Needs the same cluster-admin impersonation as
+# setup-namespace and for the same reason — the ClusterRoleBinding/cross-namespace
+# RoleBinding this release owns aren't things a namespace-scoped admin can delete
+# either. Pass skip_label=true to leave the label alone and skip impersonation,
+# mirroring setup-namespace's flag.
+[group('deploy')]
+[confirm("Uninstall the aibom-ns-<namespace> release and remove the aibom.io/enabled label from that namespace?")]
+uninstall-namespace namespace skip_label="false": _check-auth
+    #!/usr/bin/env bash
+    set -euo pipefail
+    kube_as_user_args=()
+    [[ "{{ skip_label }}" = "true" ]] || kube_as_user_args=(--kube-as-user=system:admin)
+    helm uninstall aibom-ns-{{ namespace }} -n {{ namespace }} "${kube_as_user_args[@]}"
+    if [ "{{ skip_label }}" != "true" ]; then
+        oc label namespace {{ namespace }} aibom.io/enabled- --as=system:admin
+    fi
 
 # --- Chart publishing -----------------------------------------------------
 #

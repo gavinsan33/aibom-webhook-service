@@ -61,6 +61,8 @@ just setup-namespace my-ai-workloads
 
 **Upgrading an existing namespace**: re-run `just setup-namespace <ns>` any time `scripts/aibom-scripts/*.py` changes — `helm upgrade --install` is idempotent. A stale `aibom-scripts` ConfigMap can fail *pod startup* for every instrumented workload in the namespace (not just silently skip dataset detection), since the dataset detector hook mounts `k8s_api.py` via a `subPath` volume mount.
 
+**Removing a namespace's setup**: `just uninstall-namespace <ns>` reverses it — uninstalls the `aibom-ns-<ns>` release and removes the `aibom.io/enabled` label.
+
 ## Cluster Deployment
 
 Deployment is a Helm chart (`charts/aibom-webhook`), covering the `aibom-system` namespace, RBAC, cert-manager `Issuer`/`Certificate`, the webhook `Deployment`/`Service`, the `MutatingWebhookConfiguration`, and (opt-in) the OpenShift `BuildConfig`/`ImageStream` pair used to build both images in-cluster from source. Every `just deploy*` recipe requires cert-manager to already be installed — it issues the webhook's TLS certificate and keeps it renewed automatically.
@@ -81,6 +83,17 @@ helm upgrade --install aibom-ns-<namespace> oci://quay.io/gsanders/aibom-workloa
 ```
 
 Replace `<namespace>` with your workload namespace name (e.g., `my-ai-workloads`) — it must already exist. `--kube-as-user=system:admin` is required for both: the webhook chart installs cluster-scoped RBAC, and the workload-namespace chart creates a `ClusterRoleBinding` plus a `RoleBinding` into `aibom-system`, neither of which a namespace-scoped admin can grant themselves.
+
+To remove either, uninstall the release the same way it was installed — reverse order (namespace first, then the webhook), since the workload-namespace chart's `ClusterRoleBinding`/`RoleBinding` reference the webhook namespace:
+
+```bash
+# Remove a workload namespace's setup
+oc label namespace <namespace> aibom.io/enabled- --as=system:admin
+helm uninstall aibom-ns-<namespace> -n <namespace> --kube-as-user=system:admin
+
+# Uninstall the webhook (the aiboms.aibom.io CRD and any AIBOM CRs are left in place — see below)
+helm uninstall aibom-webhook -n project-aibom --kube-as-user=system:admin
+```
 
 ### Alternative: Using `just` Recipes
 
@@ -125,6 +138,8 @@ oc get pod <pod-name> -n my-ai-workloads -o jsonpath='{.spec.initContainers[*].n
 oc get pod <pod-name> -n my-ai-workloads -o jsonpath='{.spec.containers[0].env[*].name}'
 # Should include: AIBOM_DATASET_DETECT AIBOM_DEBUG AIBOM_DATASET_OUTPUT PYTHONPATH
 ```
+
+To remove a workload namespace's setup: `just uninstall-namespace <ns>` (runs `helm uninstall aibom-ns-<ns>` and removes the `aibom.io/enabled` label, after a confirmation prompt).
 
 To remove the deployment: `just undeploy` (runs `helm uninstall aibom-webhook`, after a confirmation prompt). Helm installs CRDs once but never upgrades or removes them automatically — schema changes to `aiboms.aibom.io` need a manual `oc apply -f charts/aibom-webhook/crds/aibom-crd.yaml`, and `helm uninstall` leaves the CRD (and any AIBOM custom resources) in place.
 
