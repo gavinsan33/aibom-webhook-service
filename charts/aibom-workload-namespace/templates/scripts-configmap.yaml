@@ -15,3 +15,5 @@ data:
     {{- .Values.scripts.runtimeDetector | nindent 4 }}
   k8s_api.py: |
     {{- .Values.scripts.k8sApi | nindent 4 }}
+  dataset_sidecar.py: |
+    {{- .Values.scripts.datasetSidecar | nindent 4 }}
