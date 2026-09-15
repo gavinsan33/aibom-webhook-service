@@ -25,12 +25,11 @@ image:
   # no extra setup; swap for something already mirrored in-cluster (e.g. an
   # OpenShift AI runtime ImageStream) to avoid an external pull per pod.
   discovery:
-    repository: pytorch/pytorch
-    tag: 2.2.0-cuda12.1-cudnn8-runtime
+    repository: image-registry.openshift-image-registry.svc:5000/redhat-ods-applications/runtime-pytorch
+    tag: pytorch
   pullPolicy: Always
 
 replicaCount: 1
-
 resources:
   requests:
     cpu: 50m
