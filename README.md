@@ -164,6 +164,8 @@ One-time setup so `helm upgrade --install ... oci://quay.io/<org>/aibom-webhook`
 
 Re-run `just chart-push` any time `charts/aibom-webhook`, `charts/aibom-workload-namespace`, or `scripts/aibom-scripts/*.py` changes — chart versions aren't bumped automatically, so a republish under the same `Chart.yaml` version overwrites the existing OCI tag.
 
+**Automating it**: unlike the images, Quay's own GitHub build trigger can't drive this (it only knows how to run a `docker build`), so `.github/workflows/chart-publish.yml` runs `just chart-push` in GitHub Actions instead — triggered only on a push to `main` (i.e. a merge, not every feature-branch commit) that touches `charts/aibom-webhook/**`, `charts/aibom-workload-namespace/**`, or `scripts/aibom-scripts/**`. One-time setup: create a Quay **robot account** scoped to push access on the `aibom-webhook`/`aibom-workload-namespace` repos, then add its username/token as the `QUAY_ROBOT_USERNAME`/`QUAY_ROBOT_TOKEN` repo secrets (Settings → Secrets and variables → Actions).
+
 ## Local Testing (without a cluster)
 
 ```bash
