@@ -98,8 +98,11 @@ func TestMutate_FallsBackToSharedTokenWhenOwnerUnknown(t *testing.T) {
 // guards the #47 behavior change: previously, a per-job identity being
 // provisioned meant the app container's own pre-existing default-SA token
 // mount got retargeted to it. Since the app container no longer talks to
-// the Kubernetes API for anything, that's no longer necessary or done --
-// its own mount, whatever it is, is left completely alone.
+// the Kubernetes API for anything, retargeting is no longer necessary --
+// its pre-existing mount is stripped outright instead (see
+// TestMutate_StripsExistingDefaultTokenMountFromAppContainer), never
+// replaced with another token, regardless of whether a per-job identity
+// was provisioned.
 func TestMutate_DoesNotReplaceAppContainerTokenMountEvenWhenIdentityProvisioned(t *testing.T) {
 	m, _ := newTestMutatorWithClientset()
 	pod := podWithOwner("Job")

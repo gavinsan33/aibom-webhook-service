@@ -655,14 +655,17 @@ func TestMutate_AppContainerNeverGetsTokenMountOrK8sAPIScript(t *testing.T) {
 	}
 }
 
-// TestMutate_DoesNotAddSecondMountAtExistingTokenPath guards against the
-// real failure mode this exists to avoid: if automountServiceAccountToken
-// wasn't disabled, the built-in ServiceAccount admission controller
-// already mounted a token at this exact path before our webhook ran — a
-// second volumeMount at an identical path fails pod admission outright.
-// Since #47, this container's pre-existing mount (whatever it is) is left
-// completely alone; there's nothing here for it to need access to anymore.
-func TestMutate_DoesNotAddSecondMountAtExistingTokenPath(t *testing.T) {
+// TestMutate_StripsExistingDefaultTokenMountFromAppContainer covers the
+// gap flagged in review on #50: if automountServiceAccountToken wasn't
+// disabled, the built-in ServiceAccount admission controller already
+// mounted the pod's own (namespace-wide, via aibom-workload-data) default
+// token into this container before our webhook ran. Since #47, the app
+// container has no remaining use for any Kubernetes API token at all, so
+// leaving that mount in place would give it broader ConfigMap access than
+// it had before #47 (when it was retargeted to a narrower per-job token
+// instead of just being left alone). The webhook must now remove it
+// outright rather than leaving it untouched.
+func TestMutate_StripsExistingDefaultTokenMountFromAppContainer(t *testing.T) {
 	m := newTestMutator()
 	pod := podWithOwner("Job")
 	pod.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{
@@ -675,13 +678,21 @@ func TestMutate_DoesNotAddSecondMountAtExistingTokenPath(t *testing.T) {
 	}
 
 	mounts := collectContainerVolumeMountPatches(patches, 0)
-	if len(mounts) == 0 {
-		t.Fatal("container volumeMounts patch not found")
-	}
 	for _, mount := range mounts {
 		if mount.Name == "aibom-token" {
 			t.Fatal("should not add a second volumeMount at a path the container already mounts")
 		}
+	}
+
+	wantRemovePath := "/spec/containers/0/volumeMounts/0"
+	found := false
+	for _, p := range patches {
+		if p.Op == "remove" && p.Path == wantRemovePath {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a remove patch at %q stripping the app container's pre-existing default token mount", wantRemovePath)
 	}
 }
 
