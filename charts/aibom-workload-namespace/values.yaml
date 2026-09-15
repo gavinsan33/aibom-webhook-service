@@ -3,7 +3,13 @@
 # granted from the image's own namespace, not the consuming namespace).
 aibomSystemNamespace: project-aibom
 
-# Populate via --set-file at install time, e.g.:
+# Only needed for a local install from a checked-out repo (`just setup-namespace`
+# sets these via --set-file, reading straight from scripts/aibom-scripts/*.py, so
+# script edits take effect on the very next install). Leave unset for an OCI
+# install (`helm upgrade --install ... oci://.../aibom-workload-namespace`) — the
+# packaged chart already embeds these scripts under files/ (see `just chart-push`),
+# and templates/scripts-configmap.yaml falls back to that embedded copy when these
+# are empty.
 #   helm install aibom-ns-<team> ./charts/aibom-workload-namespace -n <team> \
 #     --set-file scripts.generateSnapshot=scripts/aibom-scripts/generate_snapshot.py \
 #     --set-file scripts.runtimeDetector=scripts/aibom-scripts/runtime_detector.py \

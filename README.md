@@ -61,9 +61,43 @@ just setup-namespace my-ai-workloads
 
 **Upgrading an existing namespace**: re-run `just setup-namespace <ns>` any time `scripts/aibom-scripts/*.py` changes — `helm upgrade --install` is idempotent. A stale `aibom-scripts` ConfigMap can fail *pod startup* for every instrumented workload in the namespace (not just silently skip dataset detection), since the dataset detector hook mounts `k8s_api.py` via a `subPath` volume mount.
 
+**Removing a namespace's setup**: `just uninstall-namespace <ns>` reverses it — uninstalls the `aibom-ns-<ns>` release and removes the `aibom.io/enabled` label.
+
 ## Cluster Deployment
 
 Deployment is a Helm chart (`charts/aibom-webhook`), covering the `aibom-system` namespace, RBAC, cert-manager `Issuer`/`Certificate`, the webhook `Deployment`/`Service`, the `MutatingWebhookConfiguration`, and (opt-in) the OpenShift `BuildConfig`/`ImageStream` pair used to build both images in-cluster from source. Every `just deploy*` recipe requires cert-manager to already be installed — it issues the webhook's TLS certificate and keeps it renewed automatically.
+
+### Primary Installation Method
+
+Install the webhook and set up a workload namespace in one go, with no checked-out copy of this repo needed — both charts are published as OCI artifacts to Quay (see [Setting Up Chart Publishing](#setting-up-chart-publishing)):
+
+```bash
+# Install the webhook
+helm upgrade --install aibom-webhook oci://quay.io/gsanders/aibom-webhook --version <chart-version> \
+  -n project-aibom --create-namespace --kube-as-user=system:admin
+
+# Set up a workload namespace (label, image pull access, scripts ConfigMap)
+oc label namespace <namespace> aibom.io/enabled=true --overwrite
+helm upgrade --install aibom-ns-<namespace> oci://quay.io/gsanders/aibom-workload-namespace --version <chart-version> \
+  -n <namespace> --kube-as-user=system:admin
+```
+
+Replace `<namespace>` with your workload namespace name (e.g., `my-ai-workloads`) — it must already exist. `--kube-as-user=system:admin` is required for both: the webhook chart installs cluster-scoped RBAC, and the workload-namespace chart creates a `ClusterRoleBinding` plus a `RoleBinding` into `aibom-system`, neither of which a namespace-scoped admin can grant themselves.
+
+`--version` is required — every `just chart-push` (see [Setting Up Chart Publishing](#setting-up-chart-publishing)) ties each chart to the exact commit it was built from (e.g. `0.1.0+abc1234`), with no separate mutable "latest" tag, so there's no default to fall back to. Find the current version from the Quay UI (repo → Tags), or from `just chart-push`'s own output the last time it ran.
+
+To remove either, uninstall the release the same way it was installed — reverse order (namespace first, then the webhook), since the workload-namespace chart's `ClusterRoleBinding`/`RoleBinding` reference the webhook namespace:
+
+```bash
+# Remove a workload namespace's setup
+oc label namespace <namespace> aibom.io/enabled- --as=system:admin
+helm uninstall aibom-ns-<namespace> -n <namespace> --kube-as-user=system:admin
+
+# Uninstall the webhook (the aiboms.aibom.io CRD and any AIBOM CRs are left in place — see below)
+helm uninstall aibom-webhook -n project-aibom --kube-as-user=system:admin
+```
+
+### Alternative: Using `just` Recipes
 
 There are three ways to get images into the cluster — pick whichever fits:
 
@@ -107,6 +141,8 @@ oc get pod <pod-name> -n my-ai-workloads -o jsonpath='{.spec.containers[0].env[*
 # Should include: AIBOM_DATASET_DETECT AIBOM_DEBUG AIBOM_DATASET_OUTPUT PYTHONPATH
 ```
 
+To remove a workload namespace's setup: `just uninstall-namespace <ns>` (runs `helm uninstall aibom-ns-<ns>` and removes the `aibom.io/enabled` label, after a confirmation prompt).
+
 To remove the deployment: `just undeploy` (runs `helm uninstall aibom-webhook`, after a confirmation prompt). Helm installs CRDs once but never upgrades or removes them automatically — schema changes to `aiboms.aibom.io` need a manual `oc apply -f charts/aibom-webhook/crds/aibom-crd.yaml`, and `helm uninstall` leaves the CRD (and any AIBOM custom resources) in place.
 
 ### Setting Up Quay Auto-Build
@@ -119,6 +155,18 @@ One-time setup, done in the Quay web UI (not scriptable — it requires a GitHub
 4. Tagging options: add a template so each build produces both `latest` and a short-commit-SHA tag, keeping rollback ("redeploy an older SHA") consistent with `just deploy-buildconfig`'s path
 
 Once set up, every push to `master` produces new `latest` and `<sha>` tags automatically — `just deploy` (no arguments) always deploys whatever was built most recently.
+
+### Setting Up Chart Publishing
+
+One-time setup so `helm upgrade --install ... oci://quay.io/<org>/aibom-webhook` (and `.../aibom-workload-namespace`) work for anyone, without a checked-out copy of this repo:
+
+1. `helm registry login quay.io` with an account (or robot account) that has push access under your Quay org
+2. `just chart-push` — packages both charts (embedding `scripts/aibom-scripts/*.py` into the workload-namespace chart so it doesn't need `--set-file`) and pushes them to `oci://quay.io/<org>/aibom-webhook` / `.../aibom-workload-namespace`, each tagged `<Chart.yaml version>+<git short SHA>` (e.g. `0.1.0+abc1234`) — one immutable version per commit, mirroring `just deploy-buildconfig --version=<sha>` for the images. Defaults to `quay.io/gsanders`; pass a different org as the first argument. Prints the exact `--version` value to use for install once it's done
+3. In the Quay web UI, make both chart repos public (or otherwise arrange pull credentials) so `helm upgrade --install` can pull them anonymously
+
+Re-run `just chart-push` any time `charts/aibom-webhook`, `charts/aibom-workload-namespace`, or `scripts/aibom-scripts/*.py` changes — since there's no mutable tag, an install pointed at an older `--version` keeps working unaffected by a new push.
+
+**Automating it**: unlike the images, Quay's own GitHub build trigger can't drive this (it only knows how to run a `docker build`), so `.github/workflows/chart-publish.yml` runs `just chart-push` in GitHub Actions instead — triggered only on a push to `main` (i.e. a merge, not every feature-branch commit) that touches `charts/aibom-webhook/**`, `charts/aibom-workload-namespace/**`, or `scripts/aibom-scripts/**`. One-time setup: create a Quay **robot account** scoped to push access on the `aibom-webhook`/`aibom-workload-namespace` repos, then add its username/token as the `QUAY_ROBOT_USERNAME`/`QUAY_ROBOT_TOKEN` repo secrets (Settings → Secrets and variables → Actions).
 
 ## Local Testing (without a cluster)
 
