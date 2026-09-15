@@ -1,6 +1,10 @@
 # Must exist in each namespace where instrumented workloads run (pods can
-# only mount ConfigMaps from their own namespace). Populated at install time
-# via --set-file — see values.yaml.
+# only mount ConfigMaps from their own namespace). Content comes from
+# .Values.scripts.* (--set-file, for a local `just setup-namespace` install
+# reading straight from a checked-out scripts/aibom-scripts/*.py — takes effect
+# immediately on the next install, no chart republish needed) if set, else
+# falls back to the copies embedded under files/ at chart-package time (see
+# `just chart-push`), so an OCI install with no repo checkout still works.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -10,8 +14,8 @@ metadata:
     app.kubernetes.io/managed-by: aibom-webhook-service
 data:
   generate_snapshot.py: |
-    {{- .Values.scripts.generateSnapshot | nindent 4 }}
+    {{- (.Values.scripts.generateSnapshot | default (.Files.Get "files/generate_snapshot.py")) | nindent 4 }}
   runtime_detector.py: |
-    {{- .Values.scripts.runtimeDetector | nindent 4 }}
+    {{- (.Values.scripts.runtimeDetector | default (.Files.Get "files/runtime_detector.py")) | nindent 4 }}
   k8s_api.py: |
-    {{- .Values.scripts.k8sApi | nindent 4 }}
+    {{- (.Values.scripts.k8sApi | default (.Files.Get "files/k8s_api.py")) | nindent 4 }}
