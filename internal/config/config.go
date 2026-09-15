@@ -1,11 +1,25 @@
 package config
 
 type Config struct {
-	TLSCertPath      string
-	TLSKeyPath       string
-	Port             int
-	DiscoveryImage   string
-	DatasetDetection bool
-	EnableWatcher    bool
-	PostprocessImage string
+	TLSCertPath          string
+	TLSKeyPath           string
+	Port                 int
+	DiscoveryImage       string
+	DatasetDetection     bool
+	EnableWatcher        bool
+	PostprocessImage     string
+	PrometheusURL        string
+	GrafanaURL           string
+	GrafanaDatasourceUID string
+	// DebugKeepPostprocessJobs skips the usual cleanup of a succeeded postprocess
+	// Job/data ConfigMap (see watcher.collectAIBOM) — for inspecting postprocess
+	// pod logs/exit state or the data ConfigMap's contents after the fact. Left on,
+	// this leaks a Job+ConfigMap per completed workload indefinitely; not meant for
+	// routine production use.
+	DebugKeepPostprocessJobs bool
+	// DebugTelemetryAllPods is passed through to the postprocess Job, bypassing
+	// postprocess.py's "skip pods with no detected GPU" telemetry check. Intended
+	// for local testing against a mock cluster (e.g. kind) with no real GPU
+	// hardware, where nvidia-smi always reports zero GPUs.
+	DebugTelemetryAllPods bool
 }

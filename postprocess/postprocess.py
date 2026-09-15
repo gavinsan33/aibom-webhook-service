@@ -3,13 +3,15 @@
 
 Runs as a Kubernetes Job after an instrumented workload completes.
 Reads discovery and dataset data from a ConfigMap mount, optionally
-queries Grafana for telemetry, and produces an AIBOM JSON document.
+queries Prometheus for telemetry, and produces an AIBOM JSON document.
 """
 
 import json
+import math
 import os
 import re
 import shlex
+import ssl
 import sys
 import time
 from datetime import datetime
@@ -27,60 +29,103 @@ import k8s_api
 INPUT_DIR = os.environ.get("AIBOM_INPUT_DIR", "/data/input")
 JOB_NAME = os.environ.get("AIBOM_JOB_NAME", "")
 JOB_NAMESPACE = os.environ.get("AIBOM_JOB_NAMESPACE", "")
+PROMETHEUS_URL = os.environ.get("PROMETHEUS_URL", "")
+
+# Used only to build a clickable Grafana Explore deep link into
+# resource_utilization.grafana_links — actual telemetry queries always go straight to
+# PROMETHEUS_URL above, never through Grafana. Either being empty just omits the link.
 GRAFANA_URL = os.environ.get("GRAFANA_URL", "")
-GRAFANA_API_TOKEN = os.environ.get("GRAFANA_API_TOKEN", "")
 GRAFANA_DATASOURCE_UID = os.environ.get("GRAFANA_DATASOURCE_UID", "")
 
+# Auth is always automatic, never configured per-query: the postprocess Job's own
+# ServiceAccount token (Kubernetes auto-mounts and rotates this in place, roughly
+# hourly) is read fresh on every request and sent as a Bearer token; the cluster's
+# service-serving CA bundle (injected into a ConfigMap by the service-ca operator,
+# see watcher.go's serviceCAConfigMapName) is trusted for TLS if present. Either
+# file being absent (a plain-HTTP dev Prometheus, or running outside a pod) falls
+# back to no Authorization header / the system trust store rather than erroring —
+# mirrors gpu-quota-operator's metrics.Client (metrics/prometheus.go).
+SERVICE_ACCOUNT_TOKEN_FILE = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+SERVICE_CA_CERT_FILE = "/etc/aibom-postprocess/service-ca/service-ca.crt"
+
 # The observability backend can lag behind real time before freshly-scraped
-# samples become queryable, so a summary query fired immediately after the
+# samples become queryable, so a range query fired immediately after the
 # workload's pod completes can race that ingestion delay and come back empty
-# even though the same query succeeds moments later. Retry missing summary
-# metrics with a delay rather than accepting the first empty result.
+# even though the same query succeeds moments later. Retry metrics with no
+# data points with a delay rather than accepting the first empty result.
 TELEMETRY_RETRY_ATTEMPTS = int(os.environ.get("AIBOM_TELEMETRY_RETRY_ATTEMPTS", "3"))
 TELEMETRY_RETRY_DELAY_S = int(os.environ.get("AIBOM_TELEMETRY_RETRY_DELAY_S", "45"))
 
+# Normally a pod with no detected GPU (gpu_count 0/missing, e.g. nvidia-smi found
+# nothing) is skipped for telemetry entirely -- there's no GPU utilization to query.
+# On a mock cluster (e.g. kind) with no real GPU hardware at all, that means every
+# pod gets skipped and telemetry never gets exercised. Debug-only escape hatch to
+# query telemetry for every pod regardless of detected GPU count.
+DEBUG_TELEMETRY_ALL_PODS = os.environ.get("AIBOM_DEBUG_TELEMETRY_ALL_PODS", "").lower() == "true"
+
+# Each query's raw range data points are kept (not just reduced to a single
+# average) so stats -- min/max/p95 and a first/middle/last-third breakdown --
+# can be derived from the same series a run's shape actually traced out,
+# instead of needing a second `avg_over_time` query per metric. See
+# compute_metric_stats() and CLAUDE.md's Grafana Telemetry Retries section.
 TELEMETRY_QUERIES = {
-    "gpu_utilization": 'nerc:dcgm_gpu_util:avg5m{exported_pod="{pod_name}"}',
-    "gpu_memory_used": 'nerc:dcgm_fb_used:avg5m{exported_pod="{pod_name}"}',
-    "gpu_power": 'nerc:dcgm_power_usage:avg5m{exported_pod="{pod_name}"}',
-    "cpu_usage": 'rate(container_cpu_usage_seconds_total{pod="{pod_name}", container!="POD", container!=""}[10m])',
-    "memory_usage": 'container_memory_working_set_bytes{pod="{pod_name}", container!="POD", container!=""}',
-    "network_receive": 'rate(container_network_receive_bytes_total{pod="{pod_name}"}[10m])',
-    "network_transmit": 'rate(container_network_transmit_bytes_total{pod="{pod_name}"}[10m])',
+    "gpu_utilization": {
+        "query": 'nerc:dcgm_gpu_util:avg5m{exported_pod="{pod_name}"}',
+        "unit": "percent",
+    },
+    "gpu_memory_used": {
+        "query": 'nerc:dcgm_fb_used:avg5m{exported_pod="{pod_name}"}',
+        "unit": "MiB",
+    },
+    "gpu_power": {
+        "query": 'nerc:dcgm_power_usage:avg5m{exported_pod="{pod_name}"}',
+        "unit": "watts",
+    },
+    # rate()'s [5m] window matches what the pre-segmented-stats avg_* fields
+    # used (a separate avg_over_time(rate(...[5m])[...]) summary query) --
+    # keep it tight rather than widening it, since a wider window smooths out
+    # exactly the mid-run detail compute_metric_stats' segments exist to show.
+    "cpu_usage": {
+        "query": 'rate(container_cpu_usage_seconds_total{pod="{pod_name}", container!="POD", container!=""}[5m])',
+        "unit": "cores",
+    },
+    "memory_usage": {
+        "query": 'container_memory_working_set_bytes{pod="{pod_name}", container!="POD", container!=""}',
+        "unit": "bytes",
+    },
+    "network_receive": {
+        "query": 'rate(container_network_receive_bytes_total{pod="{pod_name}"}[5m])',
+        "unit": "bytes_per_sec",
+    },
+    "network_transmit": {
+        "query": 'rate(container_network_transmit_bytes_total{pod="{pod_name}"}[5m])',
+        "unit": "bytes_per_sec",
+    },
+    # container_fs_* is labeled per-device, unlike network -- sum across
+    # devices so this collapses to one series per pod like every other metric.
+    # Depending on runtime/cgroup version, cAdvisor sometimes only exposes
+    # these at the pod-level cgroup (container="") rather than per-container,
+    # so the primary per-container sum falls back to the pod-level series via
+    # `or` when the per-container one comes back empty for a pod -- the two
+    # are never emitted simultaneously for the same pod, so this can't
+    # double-count.
+    "storage_read_throughput": {
+        "query": (
+            'sum by (pod) (rate(container_fs_reads_bytes_total{pod="{pod_name}", container!="POD", container!=""}[5m]))'
+            ' or sum by (pod) (rate(container_fs_reads_bytes_total{pod="{pod_name}", container=""}[5m]))'
+        ),
+        "unit": "bytes_per_sec",
+    },
+    "storage_write_throughput": {
+        "query": (
+            'sum by (pod) (rate(container_fs_writes_bytes_total{pod="{pod_name}", container!="POD", container!=""}[5m]))'
+            ' or sum by (pod) (rate(container_fs_writes_bytes_total{pod="{pod_name}", container=""}[5m]))'
+        ),
+        "unit": "bytes_per_sec",
+    },
 }
 
 SCRAPE_INTERVAL_MS = 5 * 60 * 1000
-
-SUMMARY_QUERIES = {
-    "avg_gpu_utilization": {
-        "query": 'avg_over_time(nerc:dcgm_gpu_util:avg5m{exported_pod="{pod_name}"}[{duration}])',
-        "unit": "percent",
-    },
-    "avg_gpu_memory_used": {
-        "query": 'avg_over_time(nerc:dcgm_fb_used:avg5m{exported_pod="{pod_name}"}[{duration}])',
-        "unit": "MiB",
-    },
-    "avg_gpu_power": {
-        "query": 'avg_over_time(nerc:dcgm_power_usage:avg5m{exported_pod="{pod_name}"}[{duration}])',
-        "unit": "watts",
-    },
-    "avg_cpu_usage": {
-        "query": 'avg_over_time(rate(container_cpu_usage_seconds_total{pod="{pod_name}", container!="POD", container!=""}[5m])[{duration}:1m])',
-        "unit": "cores",
-    },
-    "avg_memory_usage": {
-        "query": 'avg_over_time(container_memory_working_set_bytes{pod="{pod_name}", container!="POD", container!=""}[{duration}])',
-        "unit": "bytes",
-    },
-    "avg_network_receive": {
-        "query": 'avg_over_time(rate(container_network_receive_bytes_total{pod="{pod_name}"}[5m])[{duration}:1m])',
-        "unit": "bytes_per_sec",
-    },
-    "avg_network_transmit": {
-        "query": 'avg_over_time(rate(container_network_transmit_bytes_total{pod="{pod_name}"}[5m])[{duration}:1m])',
-        "unit": "bytes_per_sec",
-    },
-}
 
 # ---------------------------------------------------------------------------
 # Input loading
@@ -779,59 +824,45 @@ def detect_git_provenance_from_containers(containers):
 # ---------------------------------------------------------------------------
 
 
-def discover_datasource_uid(grafana_url, api_token):
-    try:
-        req = urllib.request.Request(
-            f"{grafana_url}/api/datasources",
-            headers={"Authorization": f"Bearer {api_token}"},
-        )
-        with urllib.request.urlopen(req, timeout=10) as response:
-            datasources = json.loads(response.read())
-            for ds in datasources:
-                if ds.get("type") == "prometheus":
-                    return ds.get("uid")
-        print("WARNING: No Prometheus datasource found", file=sys.stderr)
-        return None
-    except Exception as e:
-        print(f"WARNING: Could not auto-discover datasource: {e}", file=sys.stderr)
-        return None
+def _prometheus_ssl_context():
+    # Falls back to the default context (system trust store) if the service-ca
+    # bundle isn't mounted, e.g. a plain-HTTP dev Prometheus (mock-openshift-cluster)
+    # that doesn't need TLS at all — matches gpu-quota-operator's buildTransport().
+    if os.path.exists(SERVICE_CA_CERT_FILE):
+        return ssl.create_default_context(cafile=SERVICE_CA_CERT_FILE)
+    return None
 
 
-def query_grafana(grafana_url, api_token, datasource_uid, promql, start_ms, end_ms, instant=False):
-    payload = {
-        "queries": [
-            {
-                "datasource": {"uid": datasource_uid},
-                "expr": promql,
-                "refId": "A",
-                "instant": instant,
-                "range": not instant,
-                "maxDataPoints": 1000,
-            }
-        ],
-        "from": str(start_ms),
-        "to": str(end_ms),
-    }
-    try:
-        req = urllib.request.Request(
-            f"{grafana_url}/api/ds/query",
-            data=json.dumps(payload).encode(),
-            headers={
-                "Authorization": f"Bearer {api_token}",
-                "Content-Type": "application/json",
-            },
-        )
-        with urllib.request.urlopen(req, timeout=30) as response:
-            return json.loads(response.read())
-    except urllib.error.HTTPError as e:
-        print(f"HTTP Error {e.code}: {e.read().decode()}", file=sys.stderr)
-        return None
-    except Exception as e:
-        print(f"Query failed: {e}", file=sys.stderr)
-        return None
+def _range_step_seconds(start_ms, end_ms, max_points=1000):
+    span_s = max((end_ms - start_ms) / 1000, 1)
+    return max(int(span_s / max_points), 15)
+
+
+def query_prometheus_range(promql, start_ms, end_ms):
+    return _query_prometheus(
+        "/api/v1/query_range",
+        {
+            "query": promql,
+            "start": start_ms / 1000,
+            "end": end_ms / 1000,
+            "step": _range_step_seconds(start_ms, end_ms),
+        },
+        timeout=30,
+    )
+
+
+def query_prometheus_instant(promql, time_ms):
+    return _query_prometheus(
+        "/api/v1/query",
+        {"query": promql, "time": time_ms / 1000},
+        timeout=30,
+    )
 
 
 def build_grafana_explore_url(grafana_url, datasource_uid, named_queries, start_ms, end_ms):
+    # Purely presentational: builds a link into whatever Grafana instance you point it
+    # at (via GRAFANA_URL/GRAFANA_DATASOURCE_UID), independent of the actual telemetry
+    # queries above, which always go straight to PROMETHEUS_URL.
     end_ms_padded = end_ms + SCRAPE_INTERVAL_MS  # pad to capture the final scrape interval
     # Metrics span wildly different scales (%, MiB, watts, cores, bytes), so
     # plotting all of them by default produces an unreadable graph. Only the
@@ -855,60 +886,59 @@ def build_grafana_explore_url(grafana_url, datasource_uid, named_queries, start_
     return f"{grafana_url}/explore?left={urllib.parse.quote(json.dumps(explore_state))}"
 
 
-def parse_grafana_response(response):
-    if not response or "results" not in response:
+def parse_range_response(response):
+    if not response or response.get("status") != "success":
         return []
     results = []
-    for result_data in response["results"].values():
-        for frame in result_data.get("frames", []):
-            data_points = frame.get("data", {}).get("values", [])
-            if len(data_points) >= 2:
-                for ts, val in zip(data_points[0], data_points[1]):
-                    results.append(
-                        {
-                            "timestamp": datetime.fromtimestamp(ts / 1000).isoformat(),
-                            "value": val,
-                        }
-                    )
+    for series in response.get("data", {}).get("result", []):
+        for ts, val in series.get("values", []):
+            results.append(
+                {
+                    "timestamp": datetime.fromtimestamp(ts).isoformat(),
+                    "value": float(val),
+                }
+            )
     return results
 
 
-def parse_instant_value(response):
-    if not response or "results" not in response:
+def _chunk_avg(values):
+    return round(sum(values) / len(values), 2) if values else None
+
+
+def compute_metric_stats(data_points):
+    """Reduce a metric's raw range data points to min/max/avg/p95 plus a
+    first/middle/last-third breakdown, instead of a single run-wide average.
+    A flat average can't distinguish a run that held steady from one that
+    started high and degraded (thermal throttling, a stalled data loader,
+    checkpoint pauses); the three segments make that shape visible without
+    storing the full series. See CLAUDE.md's Grafana Telemetry Retries
+    section."""
+    if not data_points:
         return None
-    for result_data in response["results"].values():
-        for frame in result_data.get("frames", []):
-            data_points = frame.get("data", {}).get("values", [])
-            if len(data_points) >= 2 and data_points[1]:
-                return data_points[1][-1]
-    return None
-
-
-def ms_to_promql_duration(ms):
-    seconds = max(int(ms / 1000), 60)
-    if seconds >= 3600:
-        return f"{seconds // 3600}h"
-    return f"{seconds // 60}m"
+    values = [p["value"] for p in sorted(data_points, key=lambda p: p["timestamp"])]
+    n = len(values)
+    sorted_values = sorted(values)
+    p95_index = min(n - 1, math.ceil(0.95 * n) - 1)
+    third = n // 3
+    return {
+        "min": round(min(values), 2),
+        "max": round(max(values), 2),
+        "avg": round(sum(values) / n, 2),
+        "p95": round(sorted_values[p95_index], 2),
+        "segments": {
+            "first_third": _chunk_avg(values[:third]),
+            "middle_third": _chunk_avg(values[third : 2 * third]),
+            "last_third": _chunk_avg(values[2 * third :]),
+        },
+    }
 
 
 def collect_telemetry(discoveries):
-    grafana_url = GRAFANA_URL
-    api_token = GRAFANA_API_TOKEN
-    datasource_uid = GRAFANA_DATASOURCE_UID
-
-    if not datasource_uid:
-        print("  Auto-discovering Prometheus datasource...")
-        datasource_uid = discover_datasource_uid(grafana_url, api_token)
-        if not datasource_uid:
-            print("ERROR: Could not find Prometheus datasource", file=sys.stderr)
-            return None
-
     print(f"  Processing {len(discoveries)} pod(s)")
 
     telemetry_summary = {
         "collected_at": datetime.utcnow().isoformat() + "Z",
-        "grafana_url": grafana_url,
-        "datasource_uid": datasource_uid,
+        "prometheus_url": PROMETHEUS_URL,
         "pods": [],
     }
 
@@ -923,7 +953,7 @@ def collect_telemetry(discoveries):
             continue
 
         gpu_count = discovery.get("gpu", {}).get("gpu_count")
-        if not gpu_count or str(gpu_count) == "0":
+        if (not gpu_count or str(gpu_count) == "0") and not DEBUG_TELEMETRY_ALL_PODS:
             print(f"  Skipping {pod_name} (no GPUs)")
             continue
 
@@ -940,87 +970,61 @@ def collect_telemetry(discoveries):
         end_ms = int(end_dt.timestamp() * 1000)
 
         metrics = {
-            name: tmpl.replace("{pod_name}", pod_name)
-            for name, tmpl in TELEMETRY_QUERIES.items()
+            name: info["query"].replace("{pod_name}", pod_name)
+            for name, info in TELEMETRY_QUERIES.items()
         }
+
+        # Exclude the cold-start window (up to one scrape interval with no
+        # updated observation from the hardware) from the stats below. Capped
+        # at half the run length rather than requiring a fixed minimum
+        # runtime, so short runs still get a partial correction instead of
+        # none at all.
+        total_ms = end_ms - start_ms
+        exclude_ms = min(SCRAPE_INTERVAL_MS, total_ms // 2)
+        stats_start_ms = start_ms + exclude_ms
+        includes_cold_start = exclude_ms < SCRAPE_INTERVAL_MS
 
         pod_telemetry = {
             "pod_uid": pod_uid,
             "pod_name": pod_name,
             "start_time": start_time,
             "metrics": {},
-            "grafana_explore_url": build_grafana_explore_url(
-                grafana_url, datasource_uid, list(metrics.items()), start_ms, end_ms
-            ),
+            "includes_cold_start": includes_cold_start,
         }
-
-        for metric_name, promql in metrics.items():
-            print(f"    Querying {metric_name}...")
-            response = query_grafana(
-                grafana_url, api_token, datasource_uid, promql, start_ms, end_ms
+        if GRAFANA_URL and GRAFANA_DATASOURCE_UID:
+            pod_telemetry["grafana_explore_url"] = build_grafana_explore_url(
+                GRAFANA_URL, GRAFANA_DATASOURCE_UID, list(metrics.items()), start_ms, end_ms
             )
-            if response:
-                data_points = parse_grafana_response(response)
-                pod_telemetry["metrics"][metric_name] = {
-                    "data_point_count": len(data_points),
-                }
-                print(f"      {len(data_points)} data points")
-            else:
-                print(f"      WARNING: No data returned")
 
-        if SUMMARY_QUERIES:
-            total_ms = end_ms - start_ms
-            # Exclude the cold-start window (up to one scrape interval with no
-            # updated observation from the hardware) from the averages. Capped
-            # at half the run length rather than requiring a fixed minimum
-            # runtime, so short runs still get a partial correction instead of
-            # none at all.
-            exclude_ms = min(SCRAPE_INTERVAL_MS, total_ms // 2)
-            summary_start_ms = start_ms + exclude_ms
-            includes_cold_start = exclude_ms < SCRAPE_INTERVAL_MS
-
-            duration = ms_to_promql_duration(end_ms - summary_start_ms)
-            print(
-                f"    Running summary queries (duration={duration}, "
-                f"excludes_cold_start={not includes_cold_start})..."
-            )
-            aggregated = {}
-            for attempt in range(1, TELEMETRY_RETRY_ATTEMPTS + 1):
-                pending = {
-                    name: info for name, info in SUMMARY_QUERIES.items() if name not in aggregated
-                }
-                if not pending:
-                    break
-                if attempt > 1:
-                    print(
-                        f"      Retrying {len(pending)} summary quer"
-                        f"{'y' if len(pending) == 1 else 'ies'} after possible ingestion "
-                        f"delay (attempt {attempt}/{TELEMETRY_RETRY_ATTEMPTS}, "
-                        f"waited {TELEMETRY_RETRY_DELAY_S}s)..."
-                    )
-                for sq_name, sq_info in pending.items():
-                    promql = (
-                        sq_info["query"]
-                        .replace("{pod_name}", pod_name)
-                        .replace("{duration}", duration)
-                    )
-                    response = query_grafana(
-                        grafana_url, api_token, datasource_uid, promql,
-                        summary_start_ms, end_ms, instant=True,
-                    )
-                    value = parse_instant_value(response)
-                    if value is not None:
-                        aggregated[sq_name] = {
-                            "value": round(value, 2),
-                            "unit": sq_info.get("unit", ""),
-                        }
-                        print(f"      {sq_name}: {round(value, 2)} {sq_info.get('unit', '')}")
-                    else:
-                        print(f"      {sq_name}: no data (attempt {attempt}/{TELEMETRY_RETRY_ATTEMPTS})")
-                if len(aggregated) < len(SUMMARY_QUERIES) and attempt < TELEMETRY_RETRY_ATTEMPTS:
-                    time.sleep(TELEMETRY_RETRY_DELAY_S)
-            pod_telemetry["aggregated"] = aggregated
-            pod_telemetry["summary_includes_cold_start"] = includes_cold_start
+        collected = {}
+        for attempt in range(1, TELEMETRY_RETRY_ATTEMPTS + 1):
+            pending = {name: q for name, q in metrics.items() if name not in collected}
+            if not pending:
+                break
+            if attempt > 1:
+                print(
+                    f"      Retrying {len(pending)} metric"
+                    f"{'s' if len(pending) != 1 else ''} after possible ingestion "
+                    f"delay (attempt {attempt}/{TELEMETRY_RETRY_ATTEMPTS}, "
+                    f"waited {TELEMETRY_RETRY_DELAY_S}s)..."
+                )
+            for metric_name, promql in pending.items():
+                print(f"    Querying {metric_name}...")
+                response = query_prometheus_range(promql, stats_start_ms, end_ms)
+                data_points = parse_range_response(response) if response else []
+                stats = compute_metric_stats(data_points)
+                if stats:
+                    collected[metric_name] = {
+                        "data_point_count": len(data_points),
+                        "unit": TELEMETRY_QUERIES[metric_name]["unit"],
+                        **stats,
+                    }
+                    print(f"      {len(data_points)} data points, avg={stats['avg']}")
+                else:
+                    print(f"      no data (attempt {attempt}/{TELEMETRY_RETRY_ATTEMPTS})")
+            if len(collected) < len(metrics) and attempt < TELEMETRY_RETRY_ATTEMPTS:
+                time.sleep(TELEMETRY_RETRY_DELAY_S)
+        pod_telemetry["metrics"] = collected
 
         telemetry_summary["pods"].append(pod_telemetry)
 
@@ -1300,42 +1304,64 @@ def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, tel
 
     # Resource utilization from telemetry
     if telemetry and telemetry.get("pods"):
-        all_aggregated = [p.get("aggregated", {}) for p in telemetry["pods"]]
-        merged = {}
-        for agg in all_aggregated:
-            for key, info in agg.items():
-                if isinstance(info, dict) and info.get("value") is not None:
-                    merged.setdefault(key, []).append(info["value"])
+        # display_unit reflects the *scaled* value stored below, not the raw
+        # per_pod_stats unit collect_telemetry recorded (e.g. "bytes") -- the
+        # two diverge for memory/network, where scale converts bytes to
+        # GB/Mbps.
+        unit_map = {
+            "gpu_utilization": (None, "percent"),
+            "gpu_memory_used": (None, "MiB"),
+            "gpu_power": (None, "watts"),
+            "cpu_usage": (None, "cores"),
+            "memory_usage": (1 / (1024**3), "GB"),
+            "network_receive": (8 / (1024 * 1024), "Mbps"),
+            "network_transmit": (8 / (1024 * 1024), "Mbps"),
+            "storage_read_throughput": (1 / (1024 * 1024), "MBps"),
+            "storage_write_throughput": (1 / (1024 * 1024), "MBps"),
+        }
 
         utilization = {"collected_at": telemetry.get("collected_at")}
-        unit_map = {
-            "avg_gpu_utilization": ("avg_gpu_utilization_pct", None),
-            "avg_gpu_memory_used": ("avg_gpu_memory_used_mib", None),
-            "avg_gpu_power": ("avg_gpu_power_watts", None),
-            "avg_cpu_usage": ("avg_cpu_usage_cores", None),
-            "avg_memory_usage": ("avg_memory_usage_gb", 1 / (1024**3)),
-            "avg_network_receive": ("avg_network_receive_mbps", 8 / (1024 * 1024)),
-            "avg_network_transmit": ("avg_network_transmit_mbps", 8 / (1024 * 1024)),
-        }
-        for metric_key, values in merged.items():
-            if metric_key in unit_map:
-                field_name, scale = unit_map[metric_key]
-                avg = sum(values) / len(values)
-                if scale:
-                    avg *= scale
-                utilization[field_name] = round(avg, 2)
+        metric_details = {}
+        for metric_name, (scale, display_unit) in unit_map.items():
+            scale = scale or 1
+            per_pod_stats = [
+                p["metrics"][metric_name] for p in telemetry["pods"] if p.get("metrics", {}).get(metric_name)
+            ]
+            if not per_pod_stats:
+                continue
 
-        utilization["grafana_links"] = [
+            # avg/p95/segments are averaged across a JobSet's sibling pods (an
+            # approximation -- true cross-pod percentiles would need the raw
+            # series from every pod); min/max take the true extreme across all
+            # of them, since a single pod's outlier is still real.
+            segments = {}
+            for seg in ("first_third", "middle_third", "last_third"):
+                seg_values = [s["segments"][seg] for s in per_pod_stats if s["segments"][seg] is not None]
+                segments[seg] = round(_chunk_avg(seg_values) * scale, 2) if seg_values else None
+            metric_details[metric_name] = {
+                "unit": display_unit,
+                "min": round(min(s["min"] for s in per_pod_stats) * scale, 2),
+                "max": round(max(s["max"] for s in per_pod_stats) * scale, 2),
+                "avg": round(_chunk_avg([s["avg"] for s in per_pod_stats]) * scale, 2),
+                "p95": round(_chunk_avg([s["p95"] for s in per_pod_stats]) * scale, 2),
+                "segments": segments,
+            }
+
+        utilization["metrics"] = metric_details
+
+        grafana_links = [
             {"pod_name": p["pod_name"], "explore_url": p["grafana_explore_url"]}
             for p in telemetry["pods"]
             if p.get("grafana_explore_url")
         ]
+        if grafana_links:
+            utilization["grafana_links"] = grafana_links
 
         # True if any pod's run was too short to exclude the cold-start
-        # window, meaning the averages above may include a period of
+        # window, meaning the stats above may include a period of
         # stale/zero readings before the first scrape landed.
         utilization["summary_includes_cold_start"] = any(
-            p.get("summary_includes_cold_start") for p in telemetry["pods"]
+            p.get("includes_cold_start") for p in telemetry["pods"]
         )
 
         aibom["resource_utilization"] = utilization
@@ -1457,7 +1483,7 @@ def main():
 
     # Telemetry
     telemetry = None
-    if GRAFANA_API_TOKEN:
+    if PROMETHEUS_URL:
         print("--- Phase 1: Telemetry Collection ---")
         try:
             telemetry = collect_telemetry(discoveries)
@@ -1465,7 +1491,7 @@ def main():
             print(f"WARNING: Telemetry collection failed: {e}", file=sys.stderr)
         print()
     else:
-        print("--- Phase 1: Skipped (no GRAFANA_API_TOKEN) ---")
+        print("--- Phase 1: Skipped (no PROMETHEUS_URL) ---")
         print()
 
     # AIBOM compilation
@@ -1523,9 +1549,9 @@ def main():
     ds = aibom.get("dataset", {})
     if ds.get("auto_detected"):
         print(f"  Datasets detected: {len(ds['auto_detected'])}")
-    util = aibom.get("resource_utilization", {})
-    if util.get("avg_gpu_utilization_pct") is not None:
-        print(f"  Avg GPU utilization: {util['avg_gpu_utilization_pct']}%")
+    gpu_util = aibom.get("resource_utilization", {}).get("metrics", {}).get("gpu_utilization")
+    if gpu_util is not None:
+        print(f"  Avg GPU utilization: {gpu_util['avg']}%")
     print()
 
     print("=" * 60)

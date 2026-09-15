@@ -110,7 +110,7 @@ _check-auth:
 # path the BuildConfig actually writes to — the two must move together, or the
 # Deployment ends up pointed at an image the BuildConfig never produced.
 #
-# With no arguments, deploys build.gitRef from values.yaml (master) at its current
+# With no arguments, deploys build.gitRef from values.yaml (main) at its current
 # remote tip — NOT your local checkout or branch, which this recipe never inspects.
 # --branch[=<name>] deploys a different branch instead: defaults to whatever branch
 # is currently checked out locally if no name is given, resolves it to its remote
@@ -238,7 +238,7 @@ undeploy *args: _check-auth
 # --skip-crds behaves the same as in `just deploy-buildconfig`.
 # Usage: just deploy-local <repo> [--version=<tag>] [--values=<file>] [--skip-crds]
 [group('deploy')]
-deploy-local repo *args: _check-auth
+deploy-local repo="quay.io/gsanders" *args: _check-auth
     #!/usr/bin/env bash
     set -euo pipefail
     engine=docker
@@ -284,12 +284,12 @@ deploy-local repo *args: _check-auth
 # The seamless default: install/upgrade the chart against images Quay already
 # built — no build, no push, just a helm install pointing at a tag. Works once
 # Quay's GitHub build triggers are set up (see README) to auto-build both
-# images on every push to master: nothing runs locally at all, this just tells
+# images on every push to main: nothing runs locally at all, this just tells
 # the cluster where to pull from. Also matches values.yaml's own defaults
 # (quay.io/gsanders, tag latest), so `just deploy` with no arguments is
 # equivalent to a plain `helm upgrade --install` with no --set overrides —
 # repo/version only matter when deploying a different quay org or pinning to
-# an immutable SHA tag instead of the mutable "latest" Quay's master trigger
+# an immutable SHA tag instead of the mutable "latest" Quay's main trigger
 # keeps overwriting. For in-cluster builds instead, see `just deploy-buildconfig`.
 # Usage: just deploy [<repo>] [--version=<tag>] [--values=<file>] [--skip-crds]
 [group('deploy')]
@@ -335,8 +335,12 @@ deploy repo="quay.io/gsanders" *args: _check-auth
 # ImagePullBackOff since the image never actually landed on its node.
 # build.enabled is set to false on deploy (that template is OpenShift-only)
 # and image.*.repository/tag point at the locally-loaded tags instead of the
-# in-cluster registry. Requires the kind cluster to already be up with
-# cert-manager installed (templates/certificates.yaml still needs it).
+# in-cluster registry. prometheus.url points at mock-openshift-cluster's plain
+# HTTP Prometheus (manifests/prometheus) instead of the default Thanos Querier
+# route — no auth/TLS needed there, which postprocess.py already tolerates
+# (see SERVICE_ACCOUNT_TOKEN_FILE/SERVICE_CA_CERT_FILE's missing-file
+# fallbacks). Requires the kind cluster to already be up with cert-manager
+# installed (templates/certificates.yaml still needs it).
 
 kind_cluster_name := "mock-openshift"
 kind_webhook_img := "localhost/aibom-webhook-service:dev"
@@ -370,7 +374,8 @@ kind-deploy: kind-image
         --set build.enabled=false \
         --set image.webhook.repository=localhost/aibom-webhook-service --set image.webhook.tag=dev \
         --set image.postprocess.repository=localhost/aibom-postprocess --set image.postprocess.tag=dev \
-        --set image.pullPolicy=IfNotPresent
+        --set image.pullPolicy=IfNotPresent \
+        --set prometheus.url=http://prometheus.monitoring.svc:9090
     kubectl --context kind-{{ kind_cluster_name }} -n {{ webhook_namespace }} rollout restart deployment/aibom-webhook
     kubectl --context kind-{{ kind_cluster_name }} -n {{ webhook_namespace }} rollout status deployment/aibom-webhook --timeout=120s
 
@@ -389,8 +394,16 @@ kind-undeploy:
 # can't patch it — see the ClusterRoleBinding/cross-namespace RoleBinding note on the helm
 # call), so a caller without cluster-admin impersonation rights needs someone else to have
 # already labeled it (skip_label=true) before this can run at all.
+#
+# skip_monitoring_access=true is for accounts without cluster-scoped create/patch
+# permission on ClusterRoleBindings — same problem as `deploy --skip-crds`, different
+# resource. It skips the cluster-monitoring-view ClusterRoleBinding that lets the
+# postprocess Job query Prometheus/Thanos Querier directly; a cluster-admin can apply
+# charts/aibom-workload-namespace/templates/monitoring.yaml's ClusterRoleBinding once
+# instead. Telemetry collection just comes back empty for this namespace until then,
+# rather than the install failing.
 [group('deploy')]
-setup-namespace namespace skip_label="false": _check-auth
+setup-namespace namespace skip_label="false" skip_monitoring_access="false": _check-auth
     #!/usr/bin/env bash
     set -euo pipefail
     kube_as_user_args=()
@@ -398,8 +411,11 @@ setup-namespace namespace skip_label="false": _check-auth
         oc label namespace {{ namespace }} aibom.io/enabled=true --overwrite --as=system:admin
         kube_as_user_args=(--kube-as-user=system:admin)
     fi
+    monitoring_args=()
+    [ "{{ skip_monitoring_access }}" = "true" ] && monitoring_args=(--set monitoringAccess.enabled=false)
     helm upgrade --install aibom-ns-{{ namespace }} charts/aibom-workload-namespace -n {{ namespace }} \
         "${kube_as_user_args[@]}" \
+        "${monitoring_args[@]}" \
         --set-file scripts.generateSnapshot=scripts/aibom-scripts/generate_snapshot.py \
         --set-file scripts.runtimeDetector=scripts/aibom-scripts/runtime_detector.py \
         --set-file scripts.k8sApi=scripts/aibom-scripts/k8s_api.py

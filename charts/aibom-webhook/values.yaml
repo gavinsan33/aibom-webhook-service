@@ -1,5 +1,5 @@
 # Defaults to the Quay build triggers that auto-build both images on every push
-# to master (see README's Cluster Deployment section) — the seamless, no-cluster-
+# to main (see README's Cluster Deployment section) — the seamless, no-cluster-
 # permission-needed path. `just deploy` (build.enabled=true) overrides both
 # repositories to the in-cluster registry path instead, since that's where its
 # BuildConfig actually writes; see justfile.
@@ -15,10 +15,21 @@ image:
   postprocess:
     repository: quay.io/gsanders/aibom-postprocess
     tag: latest
+  # Image for the aibom-discovery init container injected into instrumented
+  # pods (see CLAUDE.md's "Pod Matching and Injection") — unlike webhook/
+  # postprocess above, this is never built by this project's BuildConfig
+  # (build.enabled has no effect on it); it only needs python3 + bash on
+  # PATH, since generate_snapshot.py uses stdlib only and shells out to
+  # nvidia-smi (which the NVIDIA Container Toolkit injects at runtime
+  # regardless of base image). Defaults to a public image so this works with
+  # no extra setup; swap for something already mirrored in-cluster (e.g. an
+  # OpenShift AI runtime ImageStream) to avoid an external pull per pod.
+  discovery:
+    repository: image-registry.openshift-image-registry.svc:5000/redhat-ods-applications/runtime-pytorch
+    tag: pytorch
   pullPolicy: Always
 
 replicaCount: 1
-
 resources:
   requests:
     cpu: 50m
@@ -47,7 +58,40 @@ webhook:
 build:
   enabled: false
   gitRepo: https://github.com/gavinsan33/aibom-webhook-service.git
-  gitRef: master
+  gitRef: main
 
 watcher:
   enabled: true
+
+# Prometheus/Thanos endpoint the postprocess Job queries directly for telemetry.
+# Auth (bearer ServiceAccount token) and TLS trust (the service-ca ConfigMap
+# aibom-workload-namespace creates per opted-in namespace, or the system trust
+# store if that's absent) are always automatic — see postprocess.py. Empty
+# disables telemetry collection entirely.
+prometheus:
+  url: https://thanos-querier.openshift-monitoring.svc:9091
+
+# Optional, purely for a clickable Grafana Explore deep link in the AIBOM
+# (resource_utilization.grafana_links) — actual telemetry queries always go
+# straight to prometheus.url above, never through Grafana. datasourceUid is
+# the UID of the Grafana datasource pointing at that same Prometheus. Leave
+# both empty to omit the link entirely.
+grafana:
+  url: ""
+  datasourceUid: ""
+
+# debug.keepPostprocessJobs skips the usual cleanup of a succeeded (or failed)
+# postprocess Job/data ConfigMap, for inspecting postprocess pod logs/exit
+# state or the data ConfigMap's contents after the fact. Leaves one Job and
+# one ConfigMap behind per completed workload indefinitely — a debugging aid,
+# not something to leave on in production.
+#
+# debug.telemetryAllPods makes postprocess Jobs query Prometheus telemetry for
+# every pod regardless of detected GPU count (postprocess.py normally skips a
+# pod with gpu_count 0/missing, since there's no GPU utilization to query).
+# Intended for local testing on clusters with no real GPU hardware (e.g. kind),
+# where nvidia-smi always reports zero GPUs and telemetry would otherwise never
+# run at all — not something to leave on in production.
+debug:
+  keepPostprocessJobs: false
+  telemetryAllPods: false

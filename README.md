@@ -57,7 +57,7 @@ just setup-namespace my-ai-workloads
 
 `just setup-namespace`:
 1. Labels the namespace `aibom.io/enabled=true` — opts it into webhook instrumentation
-2. Runs `helm upgrade --install aibom-ns-<namespace> charts/aibom-workload-namespace -n <namespace>`, which creates the image-puller RoleBinding, the `aibom-scripts` ConfigMap, the `aibom-postprocess` ServiceAccount/RBAC, the `aibom-workload-data` RBAC, and the `aibom-discovery-hmac-key` Secret used to sign discovery data (see `charts/aibom-workload-namespace/templates/`)
+2. Runs `helm upgrade --install aibom-ns-<namespace> charts/aibom-workload-namespace -n <namespace>`, which creates the image-puller RoleBinding, the `aibom-scripts` ConfigMap, the `aibom-postprocess` ServiceAccount/RBAC, the `aibom-workload-data` RBAC, the `aibom-discovery-hmac-key` Secret used to sign discovery data, and the `aibom-service-ca`/`cluster-monitoring-view` telemetry resources (see `charts/aibom-workload-namespace/templates/`)
 
 **Upgrading an existing namespace**: re-run `just setup-namespace <ns>` any time `scripts/aibom-scripts/*.py` changes — `helm upgrade --install` is idempotent. A stale `aibom-scripts` ConfigMap can fail *pod startup* for every instrumented workload in the namespace (not just silently skip dataset detection), since the dataset detector hook mounts `k8s_api.py` via a `subPath` volume mount.
 
@@ -103,7 +103,7 @@ There are three ways to get images into the cluster — pick whichever fits:
 
 | Situation | Recipe |
 |---|---|
-| Default — Quay's GitHub build triggers already build both images on every push to `master` | `just deploy` |
+| Default — Quay's GitHub build triggers already build both images on every push to `main` | `just deploy` |
 | No egress to quay.io, or no external registry account | `just deploy-buildconfig` (in-cluster OpenShift BuildConfig) |
 | Iterating locally, don't want to wait on Quay or a git push | `just deploy-local <repo>` |
 
@@ -150,11 +150,11 @@ To remove the deployment: `just undeploy` (runs `helm uninstall aibom-webhook`, 
 One-time setup, done in the Quay web UI (not scriptable — it requires a GitHub OAuth authorization). Repeat for both `aibom-webhook-service` and `aibom-postprocess` repos on quay.io:
 
 1. Repo → **Builds** tab → **Add Build Trigger** → **GitHub Repository Push**, authorizing Quay against GitHub if prompted
-2. Source repo: this repo; branch filter restricted to `master` only
+2. Source repo: this repo; branch filter restricted to `main` only
 3. Dockerfile location: `/Dockerfile` for `aibom-webhook-service`, `/postprocess/Dockerfile` for `aibom-postprocess`; context `/` for both (the postprocess Dockerfile `COPY`s files from outside its own directory)
 4. Tagging options: add a template so each build produces both `latest` and a short-commit-SHA tag, keeping rollback ("redeploy an older SHA") consistent with `just deploy-buildconfig`'s path
 
-Once set up, every push to `master` produces new `latest` and `<sha>` tags automatically — `just deploy` (no arguments) always deploys whatever was built most recently.
+Once set up, every push to `main` produces new `latest` and `<sha>` tags automatically — `just deploy` (no arguments) always deploys whatever was built most recently.
 
 ### Setting Up Chart Publishing
 
@@ -239,6 +239,7 @@ charts/
       serviceaccount.yaml
       rbac.yaml
       scripts-configmap.yaml
+      monitoring.yaml                # service-ca ConfigMap + cluster-monitoring-view ClusterRoleBinding
 scripts/
   generate-certs.sh                 # Self-signed TLS cert generation for local dev only (cluster deploy uses cert-manager)
   remote-build-sha.sh                # Resolves the short SHA `just deploy`'s --version defaults to (justfile helper)
@@ -271,10 +272,10 @@ The webhook server accepts these flags:
 | `--tls-cert` | `/certs/tls.crt` | Path to TLS certificate |
 | `--tls-key` | `/certs/tls.key` | Path to TLS private key |
 | `--port` | `8443` | Server port |
-| `--discovery-image` | `pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime` | Image for the discovery init container |
+| `--discovery-image` | `pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime` | Image for the discovery init container — set via `image.discovery.repository`/`.tag` in `charts/aibom-webhook/values.yaml`, not passed directly when deploying through the chart. Only needs `python3`/`bash`; swap for anything already available in-cluster (e.g. an OpenShift AI runtime image) to avoid an external pull per pod |
 | `--dataset-detection` | `true` | Inject dataset detection hooks into application containers |
 | `--enable-watcher` | `true` | Start the Job completion watcher |
-| `--postprocess-image` | `busybox:latest` | Image for AIBOM postprocess Jobs (set to the aibom-postprocess image) |
+| `--postprocess-image` | `busybox:latest` | Image for AIBOM postprocess Jobs — this default is a placeholder only (unlike discovery, `busybox` genuinely doesn't work here, see below); the chart always overrides it via `image.postprocess.repository`/`.tag` |
 
 ## What Gets Injected
 
@@ -300,7 +301,7 @@ See `CLAUDE.md` for the detection internals (CLI-arg parsing, runtime hooks, KSe
 
 When a Job completes or is being deleted (held by the finalizer), the watcher creates an AIBOM postprocess Job that reads/merges the workload's data ConfigMap, removes the holding finalizer, runs `postprocess.py` to compile and create the `AIBOM` custom resource, and cleans up the postprocess Job and ConfigMap on success.
 
-Full rules for which Jobs/pods qualify, how JobSet siblings are merged, model/dataset auto-detection, git provenance detection, and Grafana telemetry retries are documented in `CLAUDE.md`.
+Full rules for which Jobs/pods qualify, how JobSet siblings are merged, model/dataset auto-detection, git provenance detection, and Prometheus telemetry retries are documented in `CLAUDE.md`.
 
 ### AIBOM Annotations
 
@@ -327,16 +328,11 @@ Users can optionally annotate their Jobs with `aibom.io/*` keys to provide exper
 
 Without annotations, the AIBOM is still generated from auto-detected data (hardware discovery, dataset detection, telemetry). Auto-detected values are used as defaults; any corresponding annotation always overrides them.
 
-### Grafana Credentials
+### Telemetry (Prometheus)
 
-To enable telemetry collection, create a secret in each instrumented namespace:
+The postprocess Job queries Prometheus/Thanos Querier directly — no credentials to create. Auth (the Job's own ServiceAccount token) and TLS trust (the cluster's service-ca bundle, via the `aibom-service-ca` ConfigMap `just setup-namespace` creates) are automatic. Point the webhook at your cluster's endpoint via the chart's `prometheus.url` value (defaults to OpenShift's `https://thanos-querier.openshift-monitoring.svc:9091`); leave it empty to disable telemetry collection entirely.
 
-```bash
-oc create secret generic aibom-config \
-  --from-literal=grafana-url=https://grafana.example.com \
-  --from-literal=grafana-api-token=<token> \
-  -n my-ai-workloads
-```
+Reading cluster-wide platform metrics from Thanos Querier requires a `cluster-monitoring-view` ClusterRoleBinding, which `just setup-namespace` creates per-namespace by default — this needs cluster-admin permission, unlike everything else that recipe sets up. If your account doesn't have it, pass `just setup-namespace my-ai-workloads skip_monitoring_access=true` and have a cluster-admin apply `charts/aibom-workload-namespace/templates/monitoring.yaml`'s `ClusterRoleBinding` once instead; telemetry just comes back empty for that namespace until then, rather than the install failing.
 
 ### AIBOM Storage
 
