@@ -93,6 +93,9 @@ _check-auth:
 # CRD/Namespace: it never touches the Namespace object and skips the aiboms.aibom.io
 # CRD, which must then already exist — a cluster-admin runs
 # `oc apply -f charts/aibom-webhook/crds/aibom-crd.yaml` and creates the namespace once.
+# It also drops --kube-as-user=system:admin from the helm call for the same reason —
+# that flag requires cluster-admin impersonation rights, which a non-admin install is
+# specifically trying to avoid needing.
 #
 # Install/upgrade the webhook chart, build both images in-cluster from source, and
 # roll out the result. Requires cert-manager already installed in the cluster.
@@ -143,6 +146,8 @@ deploy-buildconfig *args: _check-auth
     [[ -n "$version" ]] || version="$(scripts/remote-build-sha.sh)"
     ns_flag="--create-namespace"
     [[ "$skip_crds" = true ]] && ns_flag="--skip-crds"
+    kube_as_user_args=()
+    [[ "$skip_crds" = true ]] || kube_as_user_args=(--kube-as-user=system:admin)
     values_args=()
     [[ -n "$values_file" ]] && values_args=(-f "$values_file")
     gitref_args=()
@@ -150,6 +155,7 @@ deploy-buildconfig *args: _check-auth
     first_install=false
     helm status aibom-webhook -n {{ webhook_namespace }} >/dev/null 2>&1 || first_install=true
     helm upgrade --install aibom-webhook charts/aibom-webhook -n {{ webhook_namespace }} "$ns_flag" \
+        "${kube_as_user_args[@]}" \
         "${values_args[@]}" \
         --set build.enabled=true \
         --set image.webhook.repository="image-registry.openshift-image-registry.svc:5000/{{ webhook_namespace }}/aibom-webhook-service" \
@@ -237,9 +243,12 @@ deploy-local repo *args: _check-auth
     "$engine" push "$postprocess_ref"
     ns_flag="--create-namespace"
     [[ "$skip_crds" = true ]] && ns_flag="--skip-crds"
+    kube_as_user_args=()
+    [[ "$skip_crds" = true ]] || kube_as_user_args=(--kube-as-user=system:admin)
     values_args=()
     [[ -n "$values_file" ]] && values_args=(-f "$values_file")
     helm upgrade --install aibom-webhook charts/aibom-webhook -n {{ webhook_namespace }} "$ns_flag" \
+        "${kube_as_user_args[@]}" \
         "${values_args[@]}" \
         --set build.enabled=false \
         --set image.webhook.repository="{{ repo }}/aibom-webhook-service" \
@@ -277,9 +286,12 @@ deploy repo="quay.io/gsanders" *args: _check-auth
     done
     ns_flag="--create-namespace"
     [[ "$skip_crds" = true ]] && ns_flag="--skip-crds"
+    kube_as_user_args=()
+    [[ "$skip_crds" = true ]] || kube_as_user_args=(--kube-as-user=system:admin)
     values_args=()
     [[ -n "$values_file" ]] && values_args=(-f "$values_file")
     helm upgrade --install aibom-webhook charts/aibom-webhook -n {{ webhook_namespace }} "$ns_flag" \
+        "${kube_as_user_args[@]}" \
         "${values_args[@]}" \
         --set build.enabled=false \
         --set image.webhook.repository="{{ repo }}/aibom-webhook-service" \
@@ -349,15 +361,22 @@ kind-undeploy:
 #
 # Opt an existing namespace into webhook instrumentation by labeling it aibom.io/enabled=true.
 # Pass skip_label=true to leave the namespace label alone (e.g. it's already labeled, or
-# labeling is managed elsewhere).
+# labeling is managed elsewhere) — also skips --kube-as-user=system:admin on the helm call,
+# since the chart creates a ClusterRoleBinding and a cross-namespace RoleBinding into
+# aibom-system, neither of which a namespace-scoped admin can create on their own; a caller
+# who already labeled the namespace themselves (skip_label=true) is assumed to also already
+# hold the cluster-scoped RBAC this needs some other way.
 [group('deploy')]
 setup-namespace namespace skip_label="false": _check-auth
     #!/usr/bin/env bash
     set -euo pipefail
+    kube_as_user_args=()
     if [ "{{ skip_label }}" != "true" ]; then
         oc label namespace {{ namespace }} aibom.io/enabled=true --overwrite
+        kube_as_user_args=(--kube-as-user=system:admin)
     fi
     helm upgrade --install aibom-ns-{{ namespace }} charts/aibom-workload-namespace -n {{ namespace }} \
+        "${kube_as_user_args[@]}" \
         --set-file scripts.generateSnapshot=scripts/aibom-scripts/generate_snapshot.py \
         --set-file scripts.runtimeDetector=scripts/aibom-scripts/runtime_detector.py \
         --set-file scripts.k8sApi=scripts/aibom-scripts/k8s_api.py
