@@ -12,7 +12,7 @@ import re
 import shlex
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 import urllib.request
 import urllib.parse
@@ -1054,6 +1054,11 @@ def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, tel
         )
     print(f"  Telemetry: {'available' if telemetry else 'not available'}")
 
+    # Computed once and reused for both _metadata.generated_at and the
+    # duration_seconds calculation below, so the two can't drift apart.
+    generated_at_dt = datetime.utcnow()
+    generated_at = generated_at_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
     aibom = {}
 
     # Experiment metadata from annotations
@@ -1101,10 +1106,29 @@ def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, tel
             }
         )
 
+    # duration_seconds spans from the earliest pod's start (a JobSet can have
+    # sibling pods that started at slightly different times) to now --
+    # postprocess runs immediately after the workload's Job completes/is
+    # deleted, so "now" is the closest available proxy for when it finished.
+    # Only the duration itself is stored here: the start/end timestamps it's
+    # derived from already exist as pods[].start_time above and _metadata's
+    # generated_at below, and duplicating them would give this AIBOM two
+    # sources of truth for the same fact -- permanently, since spec is
+    # immutable once created.
+    pod_start_times = [p["start_time"] for p in pods if p.get("start_time")]
+    duration_seconds = None
+    if pod_start_times:
+        try:
+            earliest_dt = min(datetime.fromisoformat(t.replace("Z", "+00:00")) for t in pod_start_times)
+            duration_seconds = round(generated_at_dt.timestamp() - earliest_dt.timestamp())
+        except (ValueError, AttributeError):
+            print(f"  WARNING: Invalid pod start_time in {pod_start_times}, omitting duration_seconds", file=sys.stderr)
+
     aibom["execution_metadata"] = {
         "job_id": JOB_NAME,
         "namespace": JOB_NAMESPACE,
         "pods": pods,
+        "duration_seconds": duration_seconds,
     }
 
     # Model info: auto-detected (container commands, then runtime hooks for
@@ -1323,7 +1347,7 @@ def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, tel
     # Metadata
     aibom["_metadata"] = {
         "aibom_version": "0.1.0",
-        "generated_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "generated_at": generated_at,
         "generator": "aibom-webhook postprocess",
         "schema_compliance": "partial - focuses on reproducibility and telemetry fields",
         "dataset_detection": (
@@ -1472,7 +1496,11 @@ def main():
             "jobName": JOB_NAME,
             "modelName": safe_get(aibom, "model", "name", default=""),
             "experimentIntent": aibom.get("experiment_intent") or "",
-            "collectedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            # Same value as spec.data._metadata.generated_at -- computed once
+            # in compile_aibom rather than a second independent datetime.now()
+            # call, so there's a single canonical "when did this finish"
+            # timestamp instead of two that could drift apart.
+            "collectedAt": aibom["_metadata"]["generated_at"],
             "data": aibom,
         },
     }
