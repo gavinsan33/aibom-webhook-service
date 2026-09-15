@@ -442,6 +442,17 @@ uninstall-namespace namespace skip_label="false": _check-auth
 # .Values.scripts.* isn't set — see that file) rather than committed, so
 # there's exactly one source of truth for the scripts and this recipe is the
 # only place responsible for keeping the packaged copy fresh.
+#
+# Versions each chart by commit, mirroring the images' own --version=<sha>
+# scheme: every chart-push is tied to the exact commit it was built from, one
+# immutable tag per commit, no separate mutable "latest" to keep track of.
+# Chart.yaml's own version (e.g. 0.1.0) is used as the SemVer base, with the
+# git short SHA appended as build metadata ("-dirty" suffixed the same way
+# deploy-local's image tag is, if the working tree has uncommitted changes) —
+# e.g. 0.1.0+abc1234. OCI tags can't contain "+", so Helm substitutes "_" when
+# pushing/pulling (the tag actually stored in Quay is 0.1.0_abc1234) and
+# converts back transparently — pass --version with the "+" form to `helm
+# install`/`helm show chart`, not the underscore form.
 [group('charts')]
 chart-push repo="quay.io/gsanders":
     #!/usr/bin/env bash
@@ -452,7 +463,12 @@ chart-push repo="quay.io/gsanders":
     mkdir -p charts/aibom-workload-namespace/files
     cp scripts/aibom-scripts/generate_snapshot.py scripts/aibom-scripts/runtime_detector.py \
         scripts/aibom-scripts/k8s_api.py charts/aibom-workload-namespace/files/
-    helm package charts/aibom-webhook -d "$pkg_dir"
-    helm package charts/aibom-workload-namespace -d "$pkg_dir"
-    helm push "$pkg_dir"/aibom-webhook-*.tgz oci://{{ repo }}
-    helm push "$pkg_dir"/aibom-workload-namespace-*.tgz oci://{{ repo }}
+    sha="$(git rev-parse --short HEAD)"
+    git diff --quiet HEAD || sha="${sha}-dirty"
+    for chart in aibom-webhook aibom-workload-namespace; do
+        base_version="$(grep '^version:' "charts/$chart/Chart.yaml" | awk '{print $2}')"
+        version="${base_version}+${sha}"
+        helm package "charts/$chart" -d "$pkg_dir" --version "$version"
+        helm push "$pkg_dir/$chart-${version}.tgz" oci://{{ repo }}
+        echo "pushed oci://{{ repo }}/$chart — install with: --version=$version"
+    done
