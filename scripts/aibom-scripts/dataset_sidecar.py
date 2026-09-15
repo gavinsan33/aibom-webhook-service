@@ -42,7 +42,7 @@ import json
 import os
 import signal
 import sys
-import time
+import threading
 
 import k8s_api
 
@@ -61,7 +61,7 @@ _SIGNING_KEY_PATH = "/var/run/secrets/aibom/dataset-signing/hmac-key"
 # container(s) exit (see _run_once's use at shutdown, below).
 _POLL_INTERVAL_S = float(os.environ.get("AIBOM_DATASET_SIDECAR_POLL_INTERVAL", "5"))
 
-_shutdown_requested = False
+_shutdown_event = threading.Event()
 
 
 def _dbg(msg):
@@ -70,8 +70,12 @@ def _dbg(msg):
 
 
 def _handle_sigterm(signum, frame):
-    global _shutdown_requested
-    _shutdown_requested = True
+    # PEP 475 makes time.sleep() resume its remaining duration after a
+    # handled signal rather than returning early, so a plain sleep-based
+    # wait would delay the final shutdown flush below by up to
+    # _POLL_INTERVAL_S. threading.Event.wait() doesn't have that problem --
+    # set() wakes it immediately.
+    _shutdown_event.set()
     _dbg("received SIGTERM, will do one final pass before exiting")
 
 
@@ -155,9 +159,9 @@ def main():
     _dbg(f"watching {_OUTPUT_PATH} for pod {_POD_NAMESPACE}/{_POD_NAME}, configmap={_DATA_CONFIGMAP}")
 
     last_mtime = None
-    while not _shutdown_requested:
+    while not _shutdown_event.is_set():
         last_mtime = _run_once(last_mtime)
-        time.sleep(_POLL_INTERVAL_S)
+        _shutdown_event.wait(_POLL_INTERVAL_S)
 
     # Native sidecars (restartPolicy: Always init containers) are only sent
     # SIGTERM after every main container has already exited, so this is the
