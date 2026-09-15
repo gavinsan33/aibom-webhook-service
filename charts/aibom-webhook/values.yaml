@@ -15,6 +15,18 @@ image:
   postprocess:
     repository: quay.io/gsanders/aibom-postprocess
     tag: latest
+  # Image for the aibom-discovery init container injected into instrumented
+  # pods (see CLAUDE.md's "Pod Matching and Injection") — unlike webhook/
+  # postprocess above, this is never built by this project's BuildConfig
+  # (build.enabled has no effect on it); it only needs python3 + bash on
+  # PATH, since generate_snapshot.py uses stdlib only and shells out to
+  # nvidia-smi (which the NVIDIA Container Toolkit injects at runtime
+  # regardless of base image). Defaults to a public image so this works with
+  # no extra setup; swap for something already mirrored in-cluster (e.g. an
+  # OpenShift AI runtime ImageStream) to avoid an external pull per pod.
+  discovery:
+    repository: pytorch/pytorch
+    tag: 2.2.0-cuda12.1-cudnn8-runtime
   pullPolicy: Always
 
 replicaCount: 1
