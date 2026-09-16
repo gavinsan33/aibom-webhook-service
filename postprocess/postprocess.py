@@ -1046,6 +1046,49 @@ def pod_status_from_containers(pod_name, containers):
     return pod_containers[0]["terminated_reason"], pod_containers[0].get("exit_code")
 
 
+# Maps a resource_utilization metric name to the containers.json field
+# holding its configured limit -- only memory/cpu have a Kubernetes resource
+# limit concept; GPU/network/storage don't, so those metrics never get a
+# "limit" key.
+_METRIC_LIMIT_KEYS = {
+    "memory_usage": "memory_limit_bytes",
+    "cpu_usage": "cpu_limit_millis",
+}
+
+
+def pod_resource_limit(pod_name, containers, resource_key):
+    """Sum one pod's own container limits for a single resource -- the same
+    cgroup-level rollup the kubelet enforces when a pod has multiple
+    containers sharing one memory/cpu ceiling. None if no container in this
+    pod reports a limit for that resource (not the same as a limit of 0,
+    which would mean "no memory available at all")."""
+    limits = [c[resource_key] for c in containers if c.get("pod_name") == pod_name and c.get(resource_key) is not None]
+    return sum(limits) if limits else None
+
+
+def compute_metric_limit(metric_name, pod_names, containers, scale):
+    """Resolves resource_utilization.metrics.<metric_name>.limit: the
+    configured ceiling usage was measured against, scaled the same way the
+    metric's own min/max/avg already are so the two are directly comparable
+    (e.g. "used 7.8 of an 8.0 GB limit"). When a JobSet's sibling pods carry
+    different limits, the tightest one wins -- the ceiling closest to
+    actually constraining usage -- mirroring the same "pods can disagree"
+    tension CLAUDE.md's Segmented Performance Stats section already notes
+    for avg/p95 across pods. None if the metric has no limit concept
+    (_METRIC_LIMIT_KEYS) or no pod in this workload reported one."""
+    resource_key = _METRIC_LIMIT_KEYS.get(metric_name)
+    if not resource_key or not containers:
+        return None
+    pod_limits = [pod_resource_limit(pod_name, containers, resource_key) for pod_name in pod_names]
+    pod_limits = [limit for limit in pod_limits if limit is not None]
+    if not pod_limits:
+        return None
+    limit = min(pod_limits)
+    if resource_key == "cpu_limit_millis":
+        limit = limit / 1000  # millicores -> cores, matching cpu_usage's own display unit
+    return round(limit * scale, 2)
+
+
 def compile_aibom(
     discoveries, detected_datasets, runtime_info, annotations, telemetry,
     detected_model=None, cli_dataset=None, detected_provenance=None, containers=None,
@@ -1345,11 +1388,12 @@ def compile_aibom(
         metric_details = {}
         for metric_name, (field_name, scale, display_unit) in unit_map.items():
             scale = scale or 1
-            per_pod_stats = [
-                p["metrics"][metric_name] for p in telemetry["pods"] if p.get("metrics", {}).get(metric_name)
+            per_pod_entries = [
+                (p["pod_name"], p["metrics"][metric_name]) for p in telemetry["pods"] if p.get("metrics", {}).get(metric_name)
             ]
-            if not per_pod_stats:
+            if not per_pod_entries:
                 continue
+            per_pod_stats = [stats for _, stats in per_pod_entries]
 
             # avg/p95/segments are averaged across a JobSet's sibling pods (an
             # approximation -- true cross-pod percentiles would need the raw
@@ -1368,6 +1412,11 @@ def compile_aibom(
                 "p95": round(_chunk_avg([s["p95"] for s in per_pod_stats]) * scale, 2),
                 "segments": segments,
             }
+            limit = compute_metric_limit(
+                metric_name, [pod_name for pod_name, _ in per_pod_entries], containers or [], scale
+            )
+            if limit is not None:
+                metric_details[metric_name]["limit"] = limit
 
         utilization["metrics"] = metric_details
 
