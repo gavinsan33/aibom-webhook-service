@@ -1068,7 +1068,7 @@ func TestPostprocessDropsForgedDatasetData(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, pod, dataConfigMap, secret)
-	w := New(client, "aibom-postprocess:latest")
+	w := New(client, Config{PostprocessImage: "aibom-postprocess:latest"})
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
@@ -1105,7 +1105,7 @@ func TestPostprocessKeepsValidlySignedDatasetData(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, pod, dataConfigMap, secret)
-	w := New(client, "aibom-postprocess:latest")
+	w := New(client, Config{PostprocessImage: "aibom-postprocess:latest"})
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
@@ -1141,7 +1141,7 @@ func TestPostprocessKeepsUnverifiedDatasetWhenNoSigningKeyConfigured(t *testing.
 
 	// Deliberately no datasetSigningSecret in the fake clientset.
 	client := fake.NewSimpleClientset(ns, pod, dataConfigMap)
-	w := New(client, "aibom-postprocess:latest")
+	w := New(client, Config{PostprocessImage: "aibom-postprocess:latest"})
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
