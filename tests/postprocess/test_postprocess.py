@@ -770,6 +770,100 @@ def test_compile_aibom_duration_omitted_when_no_pod_start_time():
 
 
 # ---------------------------------------------------------------------------
+# pod_status_from_containers / execution_metadata status
+# ---------------------------------------------------------------------------
+
+
+def test_pod_status_from_containers_oomkilled():
+    containers = [
+        {"pod_name": "job-abc", "name": "training", "terminated_reason": "OOMKilled", "exit_code": 137},
+    ]
+    status, exit_code = pp.pod_status_from_containers("job-abc", containers)
+    assert status == "OOMKilled"
+    assert exit_code == 137
+
+
+def test_pod_status_from_containers_oomkilled_wins_over_other_container():
+    # A sidecar exiting cleanly shouldn't hide the main container's OOM kill.
+    containers = [
+        {"pod_name": "job-abc", "name": "sidecar", "terminated_reason": "Completed", "exit_code": 0},
+        {"pod_name": "job-abc", "name": "training", "terminated_reason": "OOMKilled", "exit_code": 137},
+    ]
+    status, exit_code = pp.pod_status_from_containers("job-abc", containers)
+    assert status == "OOMKilled"
+    assert exit_code == 137
+
+
+def test_pod_status_from_containers_completed():
+    containers = [
+        {"pod_name": "job-abc", "name": "training", "terminated_reason": "Completed", "exit_code": 0},
+    ]
+    status, exit_code = pp.pod_status_from_containers("job-abc", containers)
+    assert status == "Completed"
+    assert exit_code == 0
+
+
+def test_pod_status_from_containers_no_status_reported():
+    status, exit_code = pp.pod_status_from_containers("job-abc", [])
+    assert status is None
+    assert exit_code is None
+
+
+def test_pod_status_from_containers_ignores_other_pods():
+    containers = [
+        {"pod_name": "other-pod", "name": "training", "terminated_reason": "OOMKilled", "exit_code": 137},
+    ]
+    status, exit_code = pp.pod_status_from_containers("job-abc", containers)
+    assert status is None
+    assert exit_code is None
+
+
+def test_compile_aibom_pod_status_oomkilled():
+    discoveries = [{"pod_metadata": {"name": "job-abc", "start_time": "2024-01-01T00:05:00"}}]
+    containers = [
+        {"pod_name": "job-abc", "name": "training", "terminated_reason": "OOMKilled", "exit_code": 137},
+    ]
+    aibom = pp.compile_aibom(
+        discoveries=discoveries, detected_datasets=[], runtime_info={},
+        annotations={}, telemetry=None, containers=containers,
+    )
+    pod = aibom["execution_metadata"]["pods"][0]
+    assert pod["status"] == "OOMKilled"
+    assert pod["exit_code"] == 137
+    assert aibom["execution_metadata"]["status"] == "OOMKilled"
+
+
+def test_compile_aibom_status_rolls_up_oomkilled_across_jobset_siblings():
+    discoveries = [
+        {"pod_metadata": {"name": "server-0"}},
+        {"pod_metadata": {"name": "server-1"}},
+    ]
+    containers = [
+        {"pod_name": "server-0", "name": "server", "terminated_reason": "Completed", "exit_code": 0},
+        {"pod_name": "server-1", "name": "server", "terminated_reason": "OOMKilled", "exit_code": 137},
+    ]
+    aibom = pp.compile_aibom(
+        discoveries=discoveries, detected_datasets=[], runtime_info={},
+        annotations={}, telemetry=None, containers=containers,
+    )
+    # One sibling OOMing should still surface at the job level even though
+    # the other completed cleanly.
+    assert aibom["execution_metadata"]["status"] == "OOMKilled"
+
+
+def test_compile_aibom_status_none_when_no_container_status_reported():
+    discoveries = [{"pod_metadata": {"name": "job-abc"}}]
+    aibom = pp.compile_aibom(
+        discoveries=discoveries, detected_datasets=[], runtime_info={},
+        annotations={}, telemetry=None,
+    )
+    pod = aibom["execution_metadata"]["pods"][0]
+    assert pod["status"] is None
+    assert pod["exit_code"] is None
+    assert aibom["execution_metadata"]["status"] is None
+
+
+# ---------------------------------------------------------------------------
 # compute_metric_stats
 # ---------------------------------------------------------------------------
 
