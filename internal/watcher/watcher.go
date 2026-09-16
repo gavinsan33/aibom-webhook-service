@@ -711,6 +711,14 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 		ImageID string   `json:"image_id"`
 		Command []string `json:"command"`
 		Args    []string `json:"args"`
+		// TerminatedReason/ExitCode come from the live Pod object read here at
+		// postprocess time (unlike discovery/dataset data, which the init
+		// container/app process captured at pod startup and can't know how the
+		// pod eventually ended) -- e.g. "OOMKilled", "Completed", "Error". Only
+		// set once the container has actually terminated; omitted for a
+		// container the API never reported a terminated state for.
+		TerminatedReason string `json:"terminated_reason,omitempty"`
+		ExitCode         *int32 `json:"exit_code,omitempty"`
 	}
 	var containers []containerInfo
 	for _, pod := range pods {
@@ -720,18 +728,30 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 		// this digest specifically so a re-tagged image can't spoof the commit labels
 		// baked onto the original build (see CLAUDE.md's git provenance section).
 		imageIDs := make(map[string]string, len(pod.Status.ContainerStatuses))
+		terminatedReasons := make(map[string]string, len(pod.Status.ContainerStatuses))
+		exitCodes := make(map[string]int32, len(pod.Status.ContainerStatuses))
 		for _, cs := range pod.Status.ContainerStatuses {
 			imageIDs[cs.Name] = cs.ImageID
+			if cs.State.Terminated != nil {
+				terminatedReasons[cs.Name] = cs.State.Terminated.Reason
+				exitCodes[cs.Name] = cs.State.Terminated.ExitCode
+			}
 		}
 		for _, c := range pod.Spec.Containers {
-			containers = append(containers, containerInfo{
+			ci := containerInfo{
 				PodName: pod.Name,
 				Name:    c.Name,
 				Image:   c.Image,
 				ImageID: imageIDs[c.Name],
 				Command: c.Command,
 				Args:    c.Args,
-			})
+			}
+			if reason, ok := terminatedReasons[c.Name]; ok {
+				ci.TerminatedReason = reason
+				exitCode := exitCodes[c.Name]
+				ci.ExitCode = &exitCode
+			}
+			containers = append(containers, ci)
 		}
 	}
 	raw, _ := json.Marshal(containers)

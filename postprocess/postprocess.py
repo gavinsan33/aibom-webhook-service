@@ -1042,7 +1042,32 @@ def safe_get(data, *keys, default=None):
     return data if data != {} else default
 
 
-def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, telemetry, detected_model=None, cli_dataset=None, detected_provenance=None):
+def pod_status_from_containers(pod_name, containers):
+    """Reduce a pod's container statuses (terminated_reason/exit_code, captured by
+    the watcher from the live Pod object at postprocess time -- see
+    buildPostprocessInputs in watcher.go) to a single pod-level status/exit_code,
+    the same way `kubectl get pods` picks one representative status per pod.
+    OOMKilled takes priority over any other non-zero exit even if only one of
+    several containers in the pod hit it, since it's the more actionable signal.
+    Returns (status, exit_code), both None if no container in this pod reported
+    a terminated state yet (e.g. the watcher couldn't read Pod status, or --
+    for the bare-pod finalizer path -- the pod hadn't actually stopped)."""
+    pod_containers = [c for c in containers if c.get("pod_name") == pod_name and c.get("terminated_reason")]
+    if not pod_containers:
+        return None, None
+    for c in pod_containers:
+        if c["terminated_reason"] == "OOMKilled":
+            return "OOMKilled", c.get("exit_code")
+    for c in pod_containers:
+        if c.get("exit_code") not in (0, None):
+            return c["terminated_reason"], c.get("exit_code")
+    return pod_containers[0]["terminated_reason"], pod_containers[0].get("exit_code")
+
+
+def compile_aibom(
+    discoveries, detected_datasets, runtime_info, annotations, telemetry,
+    detected_model=None, cli_dataset=None, detected_provenance=None, containers=None,
+):
     print(f"  Discovery files: {len(discoveries)}")
     print(f"  Auto-detected datasets: {len(detected_datasets)}")
     if detected_model:
@@ -1090,21 +1115,60 @@ def compile_aibom(discoveries, detected_datasets, runtime_info, annotations, tel
     pods = []
     for discovery in discoveries:
         pod_meta = discovery.get("pod_metadata", {})
+        pod_name = pod_meta.get("name")
+        status, exit_code = pod_status_from_containers(pod_name, containers or [])
         pods.append(
             {
-                "pod_name": pod_meta.get("name"),
+                "pod_name": pod_name,
                 "pod_uid": pod_meta.get("uid"),
                 "pod_namespace": pod_meta.get("namespace"),
                 "pod_ip": pod_meta.get("ip"),
                 "node_name": pod_meta.get("node"),
                 "start_time": pod_meta.get("start_time"),
+                "status": status,
+                "exit_code": exit_code,
             }
         )
+
+    # duration_seconds spans from the earliest pod's start (a JobSet can have
+    # sibling pods that started at slightly different times) to now --
+    # postprocess runs immediately after the workload's Job completes/is
+    # deleted, so "now" is the closest available proxy for when it finished.
+    # Only the duration itself is stored here: the start/end timestamps it's
+    # derived from already exist as pods[].start_time above and _metadata's
+    # generated_at below, and duplicating them would give this AIBOM two
+    # sources of truth for the same fact -- permanently, since spec is
+    # immutable once created.
+    pod_start_times = [p["start_time"] for p in pods if p.get("start_time")]
+    duration_seconds = None
+    if pod_start_times:
+        try:
+            earliest_dt = min(datetime.fromisoformat(t.replace("Z", "+00:00")) for t in pod_start_times)
+            duration_seconds = round(generated_at_dt.timestamp() - earliest_dt.timestamp())
+        except (ValueError, AttributeError):
+            print(f"  WARNING: Invalid pod start_time in {pod_start_times}, omitting duration_seconds", file=sys.stderr)
+
+    # status rolls up pods[].status to a single value for the whole workload --
+    # OOMKilled if any pod hit it (the most actionable failure mode, even if
+    # only one pod of a JobSet OOMed while its siblings completed normally),
+    # else any other non-Completed status, else "Completed" once every pod that
+    # reported a status did so cleanly, else None if no pod reported one at all.
+    pod_statuses = [p["status"] for p in pods if p.get("status")]
+    if "OOMKilled" in pod_statuses:
+        status = "OOMKilled"
+    elif any(s != "Completed" for s in pod_statuses):
+        status = next(s for s in pod_statuses if s != "Completed")
+    elif pod_statuses:
+        status = "Completed"
+    else:
+        status = None
 
     aibom["execution_metadata"] = {
         "job_id": JOB_NAME,
         "namespace": JOB_NAMESPACE,
         "pods": pods,
+        "duration_seconds": duration_seconds,
+        "status": status,
     }
 
     # Model info: auto-detected (container commands, then runtime hooks for
@@ -1450,7 +1514,7 @@ def main():
         aibom = compile_aibom(
             discoveries, detected_datasets, runtime_info, annotations, telemetry,
             detected_model=detected_model, cli_dataset=cli_dataset,
-            detected_provenance=detected_provenance,
+            detected_provenance=detected_provenance, containers=containers,
         )
     except Exception as e:
         print(f"ERROR: AIBOM compilation failed: {e}", file=sys.stderr)
