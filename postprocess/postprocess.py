@@ -833,6 +833,31 @@ def _prometheus_ssl_context():
     return None
 
 
+def _prometheus_auth_headers():
+    # Read fresh on every call rather than once at startup: Kubernetes rotates a
+    # projected ServiceAccount token in place roughly hourly, so caching it would
+    # risk auth silently failing partway through a long-running postprocess Job.
+    try:
+        with open(SERVICE_ACCOUNT_TOKEN_FILE) as f:
+            return {"Authorization": f"Bearer {f.read().strip()}"}
+    except FileNotFoundError:
+        return {}
+
+
+def _query_prometheus(path, params, timeout):
+    url = f"{PROMETHEUS_URL}{path}?{urllib.parse.urlencode(params)}"
+    try:
+        req = urllib.request.Request(url, headers=_prometheus_auth_headers())
+        with urllib.request.urlopen(req, timeout=timeout, context=_prometheus_ssl_context()) as response:
+            return json.loads(response.read())
+    except urllib.error.HTTPError as e:
+        print(f"HTTP Error {e.code}: {e.read().decode()}", file=sys.stderr)
+        return None
+    except Exception as e:
+        print(f"Query failed: {e}", file=sys.stderr)
+        return None
+
+
 def _range_step_seconds(start_ms, end_ms, max_points=1000):
     span_s = max((end_ms - start_ms) / 1000, 1)
     return max(int(span_s / max_points), 15)
