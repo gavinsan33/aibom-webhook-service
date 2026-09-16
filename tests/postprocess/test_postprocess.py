@@ -699,6 +699,262 @@ def test_compile_aibom_no_telemetry_notes_unavailable():
 
 
 # ---------------------------------------------------------------------------
+# compile_aibom: execution_metadata.duration_seconds
+# ---------------------------------------------------------------------------
+
+
+def test_compile_aibom_computes_duration_from_earliest_pod_start():
+    discoveries = [
+        {"pod_metadata": {"name": "job-abc", "start_time": "2024-01-01T00:05:00"}},
+    ]
+    aibom = pp.compile_aibom(
+        discoveries=discoveries, detected_datasets=[], runtime_info={},
+        annotations={}, telemetry=None,
+    )
+    assert aibom["execution_metadata"]["duration_seconds"] >= 0
+
+
+def test_compile_aibom_duration_uses_earliest_of_jobset_sibling_pods():
+    discoveries = [
+        {"pod_metadata": {"name": "server-0", "start_time": "2024-01-01T00:10:00"}},
+        {"pod_metadata": {"name": "server-1", "start_time": "2024-01-01T00:02:00"}},
+    ]
+    aibom_late_start_only = pp.compile_aibom(
+        discoveries=discoveries[:1], detected_datasets=[], runtime_info={},
+        annotations={}, telemetry=None,
+    )
+    aibom_with_earlier_sibling = pp.compile_aibom(
+        discoveries=discoveries, detected_datasets=[], runtime_info={},
+        annotations={}, telemetry=None,
+    )
+    # Including the earlier-starting sibling pod should only ever lengthen
+    # the computed duration, never shorten it.
+    assert (
+        aibom_with_earlier_sibling["execution_metadata"]["duration_seconds"]
+        >= aibom_late_start_only["execution_metadata"]["duration_seconds"]
+    )
+
+
+def test_compile_aibom_duration_omitted_when_no_pod_start_time():
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info={},
+        annotations={}, telemetry=None,
+    )
+    assert aibom["execution_metadata"]["duration_seconds"] is None
+
+
+# ---------------------------------------------------------------------------
+# pod_status_from_containers / execution_metadata status
+# ---------------------------------------------------------------------------
+
+
+def test_pod_status_from_containers_oomkilled():
+    containers = [
+        {"pod_name": "job-abc", "name": "training", "terminated_reason": "OOMKilled", "exit_code": 137},
+    ]
+    status, exit_code = pp.pod_status_from_containers("job-abc", containers)
+    assert status == "OOMKilled"
+    assert exit_code == 137
+
+
+def test_pod_status_from_containers_oomkilled_wins_over_other_container():
+    # A sidecar exiting cleanly shouldn't hide the main container's OOM kill.
+    containers = [
+        {"pod_name": "job-abc", "name": "sidecar", "terminated_reason": "Completed", "exit_code": 0},
+        {"pod_name": "job-abc", "name": "training", "terminated_reason": "OOMKilled", "exit_code": 137},
+    ]
+    status, exit_code = pp.pod_status_from_containers("job-abc", containers)
+    assert status == "OOMKilled"
+    assert exit_code == 137
+
+
+def test_pod_status_from_containers_completed():
+    containers = [
+        {"pod_name": "job-abc", "name": "training", "terminated_reason": "Completed", "exit_code": 0},
+    ]
+    status, exit_code = pp.pod_status_from_containers("job-abc", containers)
+    assert status == "Completed"
+    assert exit_code == 0
+
+
+def test_pod_status_from_containers_no_status_reported():
+    status, exit_code = pp.pod_status_from_containers("job-abc", [])
+    assert status is None
+    assert exit_code is None
+
+
+def test_pod_status_from_containers_ignores_other_pods():
+    containers = [
+        {"pod_name": "other-pod", "name": "training", "terminated_reason": "OOMKilled", "exit_code": 137},
+    ]
+    status, exit_code = pp.pod_status_from_containers("job-abc", containers)
+    assert status is None
+    assert exit_code is None
+
+
+def test_compile_aibom_pod_status_oomkilled():
+    discoveries = [{"pod_metadata": {"name": "job-abc", "start_time": "2024-01-01T00:05:00"}}]
+    containers = [
+        {"pod_name": "job-abc", "name": "training", "terminated_reason": "OOMKilled", "exit_code": 137},
+    ]
+    aibom = pp.compile_aibom(
+        discoveries=discoveries, detected_datasets=[], runtime_info={},
+        annotations={}, telemetry=None, containers=containers,
+    )
+    pod = aibom["execution_metadata"]["pods"][0]
+    assert pod["status"] == "OOMKilled"
+    assert pod["exit_code"] == 137
+    assert aibom["execution_metadata"]["status"] == "OOMKilled"
+
+
+def test_compile_aibom_status_rolls_up_oomkilled_across_jobset_siblings():
+    discoveries = [
+        {"pod_metadata": {"name": "server-0"}},
+        {"pod_metadata": {"name": "server-1"}},
+    ]
+    containers = [
+        {"pod_name": "server-0", "name": "server", "terminated_reason": "Completed", "exit_code": 0},
+        {"pod_name": "server-1", "name": "server", "terminated_reason": "OOMKilled", "exit_code": 137},
+    ]
+    aibom = pp.compile_aibom(
+        discoveries=discoveries, detected_datasets=[], runtime_info={},
+        annotations={}, telemetry=None, containers=containers,
+    )
+    # One sibling OOMing should still surface at the job level even though
+    # the other completed cleanly.
+    assert aibom["execution_metadata"]["status"] == "OOMKilled"
+
+
+def test_compile_aibom_status_none_when_no_container_status_reported():
+    discoveries = [{"pod_metadata": {"name": "job-abc"}}]
+    aibom = pp.compile_aibom(
+        discoveries=discoveries, detected_datasets=[], runtime_info={},
+        annotations={}, telemetry=None,
+    )
+    pod = aibom["execution_metadata"]["pods"][0]
+    assert pod["status"] is None
+    assert pod["exit_code"] is None
+    assert aibom["execution_metadata"]["status"] is None
+
+
+# ---------------------------------------------------------------------------
+# compute_metric_stats
+# ---------------------------------------------------------------------------
+
+
+def _points(*values):
+    return [{"timestamp": f"2024-01-01T00:{i:02d}:00", "value": v} for i, v in enumerate(values)]
+
+
+def test_compute_metric_stats_empty_returns_none():
+    assert pp.compute_metric_stats([]) is None
+
+
+def test_compute_metric_stats_min_max_avg_p95():
+    stats = pp.compute_metric_stats(_points(10, 20, 30, 40, 50, 60, 70, 80, 90, 100))
+    assert stats["min"] == 10
+    assert stats["max"] == 100
+    assert stats["avg"] == 55
+    assert stats["p95"] == 100
+
+
+def test_compute_metric_stats_segments_reflect_run_shape():
+    # A run that starts hot and cools off -- the average alone hides this.
+    stats = pp.compute_metric_stats(_points(90, 90, 90, 50, 50, 50, 10, 10, 10))
+    assert stats["segments"]["first_third"] == 90
+    assert stats["segments"]["middle_third"] == 50
+    assert stats["segments"]["last_third"] == 10
+
+
+def test_compute_metric_stats_uses_timestamp_order_not_input_order():
+    points = [
+        {"timestamp": "2024-01-01T00:02:00", "value": 10},
+        {"timestamp": "2024-01-01T00:00:00", "value": 90},
+        {"timestamp": "2024-01-01T00:01:00", "value": 50},
+    ]
+    stats = pp.compute_metric_stats(points)
+    assert stats["segments"]["first_third"] == 90
+    assert stats["segments"]["last_third"] == 10
+
+
+def test_compute_metric_stats_too_few_points_for_thirds_omits_empty_segments():
+    # With fewer than 3 points, first/middle_third have no whole slice to
+    # average -- only last_third (the remainder) gets a value.
+    stats = pp.compute_metric_stats(_points(10, 20))
+    assert stats["segments"] == {"first_third": None, "middle_third": None, "last_third": 15}
+
+
+# ---------------------------------------------------------------------------
+# compile_aibom: resource_utilization from segmented telemetry
+# ---------------------------------------------------------------------------
+
+
+def _pod_metrics(avg, min_, max_, p95, unit="percent"):
+    return {
+        "data_point_count": 10,
+        "unit": unit,
+        "min": min_,
+        "max": max_,
+        "avg": avg,
+        "p95": p95,
+        "segments": {"first_third": max_, "middle_third": avg, "last_third": min_},
+    }
+
+
+def test_compile_aibom_utilization_reports_segmented_metrics():
+    telemetry = {
+        "collected_at": "2024-01-01T00:00:00Z",
+        "pods": [
+            {
+                "pod_name": "job-abc",
+                "metrics": {"gpu_utilization": _pod_metrics(avg=60, min_=10, max_=95, p95=94)},
+            }
+        ],
+    }
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info={},
+        annotations={}, telemetry=telemetry,
+    )
+    utilization = aibom["resource_utilization"]
+    assert utilization["avg_gpu_utilization_pct"] == 60
+    detail = utilization["metrics"]["gpu_utilization"]
+    assert detail == {
+        "unit": "percent",
+        "min": 10,
+        "max": 95,
+        "avg": 60,
+        "p95": 94,
+        "segments": {"first_third": 95, "middle_third": 60, "last_third": 10},
+    }
+
+
+def test_compile_aibom_utilization_merges_jobset_sibling_pods():
+    telemetry = {
+        "collected_at": "2024-01-01T00:00:00Z",
+        "pods": [
+            {
+                "pod_name": "server-0",
+                "metrics": {"gpu_utilization": _pod_metrics(avg=40, min_=5, max_=80, p95=75)},
+            },
+            {
+                "pod_name": "server-1",
+                "metrics": {"gpu_utilization": _pod_metrics(avg=60, min_=20, max_=99, p95=95)},
+            },
+        ],
+    }
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info={},
+        annotations={}, telemetry=telemetry,
+    )
+    detail = aibom["resource_utilization"]["metrics"]["gpu_utilization"]
+    # True min/max across sibling pods; avg/p95 averaged across them.
+    assert detail["min"] == 5
+    assert detail["max"] == 99
+    assert detail["avg"] == 50
+    assert detail["p95"] == 85
+
+
+# ---------------------------------------------------------------------------
 # compile_aibom: runtime_info fallbacks (transformers/peft runtime hooks,
 # for scripts with no CLI flags for detect_trl_from_command to see)
 # ---------------------------------------------------------------------------
