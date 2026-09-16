@@ -7,6 +7,9 @@ binary_name := "webhook-server"
 # separate namespace value, it always installs into the release namespace passed here.
 # Override with `just --set webhook_namespace <ns> <recipe>` if it's ever not project-aibom.
 webhook_namespace := "project-aibom"
+# quay.io org/user that deploy/deploy-local/chart-push push to and pull from by default.
+# Override per-invocation with --repo=<repo>, or with `just --set default_repo <repo> <recipe>`.
+default_repo := "quay.io/gsanders"
 
 # --- Build & test ------------------------------------------------------------
 
@@ -54,20 +57,56 @@ clean:
 # --- Container images ---------------------------------------------------------
 
 [group('images')]
-docker-build img="aibom-webhook-service:latest":
-    docker build -t {{ img }} .
+docker-build *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    img="aibom-webhook-service:latest"
+    for arg in {{ args }}; do
+        case "$arg" in
+            --img=*) img="${arg#--img=}" ;;
+            *) echo "error: unknown argument '$arg' (expected --img=<image>)" >&2; exit 1 ;;
+        esac
+    done
+    docker build -t "$img" .
 
 [group('images')]
-docker-push img="aibom-webhook-service:latest":
-    docker push {{ img }}
+docker-push *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    img="aibom-webhook-service:latest"
+    for arg in {{ args }}; do
+        case "$arg" in
+            --img=*) img="${arg#--img=}" ;;
+            *) echo "error: unknown argument '$arg' (expected --img=<image>)" >&2; exit 1 ;;
+        esac
+    done
+    docker push "$img"
 
 [group('images')]
-docker-build-postprocess img="aibom-postprocess:latest":
-    docker build -t {{ img }} -f postprocess/Dockerfile .
+docker-build-postprocess *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    img="aibom-postprocess:latest"
+    for arg in {{ args }}; do
+        case "$arg" in
+            --img=*) img="${arg#--img=}" ;;
+            *) echo "error: unknown argument '$arg' (expected --img=<image>)" >&2; exit 1 ;;
+        esac
+    done
+    docker build -t "$img" -f postprocess/Dockerfile .
 
 [group('images')]
-docker-push-postprocess img="aibom-postprocess:latest":
-    docker push {{ img }}
+docker-push-postprocess *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    img="aibom-postprocess:latest"
+    for arg in {{ args }}; do
+        case "$arg" in
+            --img=*) img="${arg#--img=}" ;;
+            *) echo "error: unknown argument '$arg' (expected --img=<image>)" >&2; exit 1 ;;
+        esac
+    done
+    docker push "$img"
 
 # --- Cluster deployment --------------------------------------------------------
 
@@ -236,30 +275,32 @@ undeploy *args: _check-auth
 # are uncommitted changes — unlike `just deploy-buildconfig`, there's no git
 # remote tip to resolve here, since this builds whatever's on disk right now.
 # --skip-crds behaves the same as in `just deploy-buildconfig`.
-# Usage: just deploy-local <repo> [--version=<tag>] [--values=<file>] [--skip-crds]
+# Usage: just deploy-local [--repo=<repo>] [--version=<tag>] [--values=<file>] [--skip-crds]
 [group('deploy')]
-deploy-local repo="quay.io/gsanders" *args: _check-auth
+deploy-local *args: _check-auth
     #!/usr/bin/env bash
     set -euo pipefail
     engine=docker
     command -v docker >/dev/null 2>&1 || engine=podman
+    repo="{{ default_repo }}"
     version=""
     values_file=""
     skip_crds=false
     for arg in {{ args }}; do
         case "$arg" in
             --skip-crds) skip_crds=true ;;
+            --repo=*) repo="${arg#--repo=}" ;;
             --version=*) version="${arg#--version=}" ;;
             --values=*) values_file="${arg#--values=}" ;;
-            *) echo "error: unknown argument '$arg' (expected --version=<tag>, --values=<file>, or --skip-crds)" >&2; exit 1 ;;
+            *) echo "error: unknown argument '$arg' (expected --repo=<repo>, --version=<tag>, --values=<file>, or --skip-crds)" >&2; exit 1 ;;
         esac
     done
     if [[ -z "$version" ]]; then
         version="$(git rev-parse --short HEAD)"
         git diff --quiet HEAD || version="${version}-dirty"
     fi
-    webhook_ref="{{ repo }}/aibom-webhook-service:${version}"
-    postprocess_ref="{{ repo }}/aibom-postprocess:${version}"
+    webhook_ref="${repo}/aibom-webhook-service:${version}"
+    postprocess_ref="${repo}/aibom-postprocess:${version}"
     "$engine" build -t "$webhook_ref" .
     "$engine" build -t "$postprocess_ref" -f postprocess/Dockerfile .
     "$engine" push "$webhook_ref"
@@ -274,8 +315,8 @@ deploy-local repo="quay.io/gsanders" *args: _check-auth
         "${kube_as_user_args[@]}" \
         "${values_args[@]}" \
         --set build.enabled=false \
-        --set image.webhook.repository="{{ repo }}/aibom-webhook-service" \
-        --set image.postprocess.repository="{{ repo }}/aibom-postprocess" \
+        --set image.webhook.repository="${repo}/aibom-webhook-service" \
+        --set image.postprocess.repository="${repo}/aibom-postprocess" \
         --set image.webhook.tag="$version" --set image.postprocess.tag="$version"
     oc -n {{ webhook_namespace }} rollout restart deployment/aibom-webhook
     oc -n {{ webhook_namespace }} rollout status deployment/aibom-webhook --timeout=120s
@@ -291,20 +332,22 @@ deploy-local repo="quay.io/gsanders" *args: _check-auth
 # repo/version only matter when deploying a different quay org or pinning to
 # an immutable SHA tag instead of the mutable "latest" Quay's main trigger
 # keeps overwriting. For in-cluster builds instead, see `just deploy-buildconfig`.
-# Usage: just deploy [<repo>] [--version=<tag>] [--values=<file>] [--skip-crds]
+# Usage: just deploy [--repo=<repo>] [--version=<tag>] [--values=<file>] [--skip-crds]
 [group('deploy')]
-deploy repo="quay.io/gsanders" *args: _check-auth
+deploy *args: _check-auth
     #!/usr/bin/env bash
     set -euo pipefail
+    repo="{{ default_repo }}"
     version="latest"
     values_file=""
     skip_crds=false
     for arg in {{ args }}; do
         case "$arg" in
             --skip-crds) skip_crds=true ;;
+            --repo=*) repo="${arg#--repo=}" ;;
             --version=*) version="${arg#--version=}" ;;
             --values=*) values_file="${arg#--values=}" ;;
-            *) echo "error: unknown argument '$arg' (expected --version=<tag>, --values=<file>, or --skip-crds)" >&2; exit 1 ;;
+            *) echo "error: unknown argument '$arg' (expected --repo=<repo>, --version=<tag>, --values=<file>, or --skip-crds)" >&2; exit 1 ;;
         esac
     done
     ns_flag="--create-namespace"
@@ -317,8 +360,8 @@ deploy repo="quay.io/gsanders" *args: _check-auth
         "${kube_as_user_args[@]}" \
         "${values_args[@]}" \
         --set build.enabled=false \
-        --set image.webhook.repository="{{ repo }}/aibom-webhook-service" \
-        --set image.postprocess.repository="{{ repo }}/aibom-postprocess" \
+        --set image.webhook.repository="${repo}/aibom-webhook-service" \
+        --set image.postprocess.repository="${repo}/aibom-postprocess" \
         --set image.webhook.tag="$version" --set image.postprocess.tag="$version"
     oc -n {{ webhook_namespace }} rollout restart deployment/aibom-webhook
     oc -n {{ webhook_namespace }} rollout status deployment/aibom-webhook --timeout=120s
@@ -388,32 +431,45 @@ kind-undeploy:
 # aibom-workload-namespace chart.
 #
 # Opt an existing namespace into webhook instrumentation by labeling it aibom.io/enabled=true.
-# Pass skip_label=true to leave the namespace label alone (e.g. it's already labeled, or
+# Pass --skip-label to leave the namespace label alone (e.g. it's already labeled, or
 # labeling is managed elsewhere) — also skips --as/--kube-as-user=system:admin on both calls
 # below, since the Namespace object itself is cluster-scoped (a plain project/namespace admin
 # can't patch it — see the ClusterRoleBinding/cross-namespace RoleBinding note on the helm
 # call), so a caller without cluster-admin impersonation rights needs someone else to have
-# already labeled it (skip_label=true) before this can run at all.
+# already labeled it (--skip-label) before this can run at all.
 #
-# skip_monitoring_access=true is for accounts without cluster-scoped create/patch
+# --skip-monitoring-access is for accounts without cluster-scoped create/patch
 # permission on ClusterRoleBindings — same problem as `deploy --skip-crds`, different
 # resource. It skips the cluster-monitoring-view ClusterRoleBinding that lets the
 # postprocess Job query Prometheus/Thanos Querier directly; a cluster-admin can apply
 # charts/aibom-workload-namespace/templates/monitoring.yaml's ClusterRoleBinding once
 # instead. Telemetry collection just comes back empty for this namespace until then,
 # rather than the install failing.
+# Usage: just setup-namespace --namespace=<ns> [--skip-label] [--skip-monitoring-access]
 [group('deploy')]
-setup-namespace namespace skip_label="false" skip_monitoring_access="false": _check-auth
+setup-namespace *args: _check-auth
     #!/usr/bin/env bash
     set -euo pipefail
+    namespace=""
+    skip_label=false
+    skip_monitoring_access=false
+    for arg in {{ args }}; do
+        case "$arg" in
+            --namespace=*) namespace="${arg#--namespace=}" ;;
+            --skip-label) skip_label=true ;;
+            --skip-monitoring-access) skip_monitoring_access=true ;;
+            *) echo "error: unknown argument '$arg' (expected --namespace=<ns>, --skip-label, or --skip-monitoring-access)" >&2; exit 1 ;;
+        esac
+    done
+    [[ -n "$namespace" ]] || { echo "error: --namespace=<ns> is required" >&2; exit 1; }
     kube_as_user_args=()
-    if [ "{{ skip_label }}" != "true" ]; then
-        oc label namespace {{ namespace }} aibom.io/enabled=true --overwrite --as=system:admin
+    if [ "$skip_label" != true ]; then
+        oc label namespace "$namespace" aibom.io/enabled=true --overwrite --as=system:admin
         kube_as_user_args=(--kube-as-user=system:admin)
     fi
     monitoring_args=()
-    [ "{{ skip_monitoring_access }}" = "true" ] && monitoring_args=(--set monitoringAccess.enabled=false)
-    helm upgrade --install aibom-ns-{{ namespace }} charts/aibom-workload-namespace -n {{ namespace }} \
+    [ "$skip_monitoring_access" = true ] && monitoring_args=(--set monitoringAccess.enabled=false)
+    helm upgrade --install "aibom-ns-$namespace" charts/aibom-workload-namespace -n "$namespace" \
         "${kube_as_user_args[@]}" \
         "${monitoring_args[@]}" \
         --set-file scripts.generateSnapshot=scripts/aibom-scripts/generate_snapshot.py \
@@ -427,18 +483,29 @@ setup-namespace namespace skip_label="false" skip_monitoring_access="false": _ch
 # removes the aibom.io/enabled label. Needs the same cluster-admin impersonation as
 # setup-namespace and for the same reason — the ClusterRoleBinding/cross-namespace
 # RoleBinding this release owns aren't things a namespace-scoped admin can delete
-# either. Pass skip_label=true to leave the label alone and skip impersonation,
+# either. Pass --skip-label to leave the label alone and skip impersonation,
 # mirroring setup-namespace's flag.
+# Usage: just uninstall-namespace --namespace=<ns> [--skip-label]
 [group('deploy')]
 [confirm("Uninstall the aibom-ns-<namespace> release and remove the aibom.io/enabled label from that namespace?")]
-uninstall-namespace namespace skip_label="false": _check-auth
+uninstall-namespace *args: _check-auth
     #!/usr/bin/env bash
     set -euo pipefail
+    namespace=""
+    skip_label=false
+    for arg in {{ args }}; do
+        case "$arg" in
+            --namespace=*) namespace="${arg#--namespace=}" ;;
+            --skip-label) skip_label=true ;;
+            *) echo "error: unknown argument '$arg' (expected --namespace=<ns> or --skip-label)" >&2; exit 1 ;;
+        esac
+    done
+    [[ -n "$namespace" ]] || { echo "error: --namespace=<ns> is required" >&2; exit 1; }
     kube_as_user_args=()
-    [[ "{{ skip_label }}" = "true" ]] || kube_as_user_args=(--kube-as-user=system:admin)
-    helm uninstall aibom-ns-{{ namespace }} -n {{ namespace }} "${kube_as_user_args[@]}"
-    if [ "{{ skip_label }}" != "true" ]; then
-        oc label namespace {{ namespace }} aibom.io/enabled- --as=system:admin
+    [[ "$skip_label" = true ]] || kube_as_user_args=(--kube-as-user=system:admin)
+    helm uninstall "aibom-ns-$namespace" -n "$namespace" "${kube_as_user_args[@]}"
+    if [ "$skip_label" != true ]; then
+        oc label namespace "$namespace" aibom.io/enabled- --as=system:admin
     fi
 
 # --- Chart publishing -----------------------------------------------------
@@ -475,10 +542,18 @@ uninstall-namespace namespace skip_label="false": _check-auth
 # resolves to the mutable tag above rather than being an unpredictable tie —
 # build metadata is ignored for precedence entirely, which is what made an
 # earlier version of this recipe (using "+<sha>") ambiguous.
+# Usage: just chart-push [--repo=<repo>]
 [group('charts')]
-chart-push repo="quay.io/gsanders":
+chart-push *args:
     #!/usr/bin/env bash
     set -euo pipefail
+    repo="{{ default_repo }}"
+    for arg in {{ args }}; do
+        case "$arg" in
+            --repo=*) repo="${arg#--repo=}" ;;
+            *) echo "error: unknown argument '$arg' (expected --repo=<repo>)" >&2; exit 1 ;;
+        esac
+    done
     pkg_dir="$(mktemp -d)"
     trap 'rm -rf charts/aibom-workload-namespace/files "$pkg_dir"' EXIT
     rm -rf charts/aibom-workload-namespace/files
@@ -492,7 +567,7 @@ chart-push repo="quay.io/gsanders":
         pinned_version="${base_version}-${sha}"
         helm package "charts/$chart" -d "$pkg_dir"
         helm package "charts/$chart" -d "$pkg_dir" --version "$pinned_version"
-        helm push "$pkg_dir/$chart-$base_version.tgz" oci://{{ repo }}
-        helm push "$pkg_dir/$chart-${pinned_version}.tgz" oci://{{ repo }}
-        echo "pushed oci://{{ repo }}/$chart — mutable: $base_version, pin with: --version=$pinned_version"
+        helm push "$pkg_dir/$chart-$base_version.tgz" "oci://$repo"
+        helm push "$pkg_dir/$chart-${pinned_version}.tgz" "oci://$repo"
+        echo "pushed oci://$repo/$chart — mutable: $base_version, pin with: --version=$pinned_version"
     done

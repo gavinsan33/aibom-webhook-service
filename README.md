@@ -52,16 +52,16 @@ just run
 Each namespace that runs instrumented workloads needs the `aibom.io/enabled` label, image pull access to `aibom-system`, the `aibom-scripts` ConfigMap, and RBAC letting workload pods and the postprocess Job write their own data directly via the Kubernetes API. The namespace itself must already exist; a single command handles the rest:
 
 ```bash
-just setup-namespace my-ai-workloads
+just setup-namespace --namespace=my-ai-workloads
 ```
 
 `just setup-namespace`:
 1. Labels the namespace `aibom.io/enabled=true` — opts it into webhook instrumentation
 2. Runs `helm upgrade --install aibom-ns-<namespace> charts/aibom-workload-namespace -n <namespace>`, which creates the image-puller RoleBinding, the `aibom-scripts` ConfigMap, the `aibom-postprocess` ServiceAccount/RBAC, the `aibom-workload-data` RBAC, the `aibom-discovery-hmac-key` Secret used to sign discovery data, and the `aibom-service-ca`/`cluster-monitoring-view` telemetry resources (see `charts/aibom-workload-namespace/templates/`)
 
-**Upgrading an existing namespace**: re-run `just setup-namespace <ns>` any time `scripts/aibom-scripts/*.py` changes — `helm upgrade --install` is idempotent. A stale `aibom-scripts` ConfigMap can fail *pod startup* for every instrumented workload in the namespace (not just silently skip dataset detection), since the dataset detector hook mounts `k8s_api.py` via a `subPath` volume mount.
+**Upgrading an existing namespace**: re-run `just setup-namespace --namespace=<ns>` any time `scripts/aibom-scripts/*.py` changes — `helm upgrade --install` is idempotent. A stale `aibom-scripts` ConfigMap can fail *pod startup* for every instrumented workload in the namespace (not just silently skip dataset detection), since the dataset detector hook mounts `k8s_api.py` via a `subPath` volume mount.
 
-**Removing a namespace's setup**: `just uninstall-namespace <ns>` reverses it — uninstalls the `aibom-ns-<ns>` release and removes the `aibom.io/enabled` label.
+**Removing a namespace's setup**: `just uninstall-namespace --namespace=<ns>` reverses it — uninstalls the `aibom-ns-<ns>` release and removes the `aibom.io/enabled` label.
 
 ## Cluster Deployment
 
@@ -105,7 +105,7 @@ There are three ways to get images into the cluster — pick whichever fits:
 |---|---|
 | Default — Quay's GitHub build triggers already build both images on every push to `main` | `just deploy` |
 | No egress to quay.io, or no external registry account | `just deploy-buildconfig` (in-cluster OpenShift BuildConfig) |
-| Iterating locally, don't want to wait on Quay or a git push | `just deploy-local <repo>` |
+| Iterating locally, don't want to wait on Quay or a git push | `just deploy-local --repo=<repo>` |
 
 If your account doesn't have cluster-scoped permission to create/patch CRDs, pass `--skip-crds` to any of the three; the `aiboms.aibom.io` CRD and `aibom-system` namespace must then already exist (created once via `oc apply -f charts/aibom-webhook/crds/aibom-crd.yaml` and `oc create namespace aibom-system`).
 
@@ -117,7 +117,7 @@ just deploy
 just deploy --version=<sha>
 
 # Point at a different quay.io org/user than the values.yaml default
-just deploy quay.io/<your-org>
+just deploy --repo=quay.io/<your-org>
 
 # Or, build both images in-cluster from source instead (no quay.io dependency)
 just deploy-buildconfig
@@ -127,10 +127,10 @@ just deploy-buildconfig --version=<older-sha>
 
 # Or, build locally and push to quay.io yourself — for iterating without
 # waiting on Quay's build trigger or pushing a commit
-just deploy-local quay.io/<your-org>
+just deploy-local --repo=quay.io/<your-org>
 
 # Set up a workload namespace (label, image pull access, scripts ConfigMap)
-just setup-namespace my-ai-workloads
+just setup-namespace --namespace=my-ai-workloads
 
 # Verify: submit a Job, check the pod for the init container
 oc get pod <pod-name> -n my-ai-workloads -o jsonpath='{.spec.initContainers[*].name}'
@@ -141,7 +141,7 @@ oc get pod <pod-name> -n my-ai-workloads -o jsonpath='{.spec.containers[0].env[*
 # Should include: AIBOM_DATASET_DETECT AIBOM_DEBUG AIBOM_DATASET_OUTPUT PYTHONPATH
 ```
 
-To remove a workload namespace's setup: `just uninstall-namespace <ns>` (runs `helm uninstall aibom-ns-<ns>` and removes the `aibom.io/enabled` label, after a confirmation prompt).
+To remove a workload namespace's setup: `just uninstall-namespace --namespace=<ns>` (runs `helm uninstall aibom-ns-<ns>` and removes the `aibom.io/enabled` label, after a confirmation prompt).
 
 To remove the deployment: `just undeploy` (runs `helm uninstall aibom-webhook`, after a confirmation prompt). Helm installs CRDs once but never upgrades or removes them automatically — schema changes to `aiboms.aibom.io` need a manual `oc apply -f charts/aibom-webhook/crds/aibom-crd.yaml`, and `helm uninstall` leaves the CRD (and any AIBOM custom resources) in place.
 
@@ -332,7 +332,7 @@ Without annotations, the AIBOM is still generated from auto-detected data (hardw
 
 The postprocess Job queries Prometheus/Thanos Querier directly — no credentials to create. Auth (the Job's own ServiceAccount token) and TLS trust (the cluster's service-ca bundle, via the `aibom-service-ca` ConfigMap `just setup-namespace` creates) are automatic. Point the webhook at your cluster's endpoint via the chart's `prometheus.url` value (defaults to OpenShift's `https://thanos-querier.openshift-monitoring.svc:9091`); leave it empty to disable telemetry collection entirely.
 
-Reading cluster-wide platform metrics from Thanos Querier requires a `cluster-monitoring-view` ClusterRoleBinding, which `just setup-namespace` creates per-namespace by default — this needs cluster-admin permission, unlike everything else that recipe sets up. If your account doesn't have it, pass `just setup-namespace my-ai-workloads skip_monitoring_access=true` and have a cluster-admin apply `charts/aibom-workload-namespace/templates/monitoring.yaml`'s `ClusterRoleBinding` once instead; telemetry just comes back empty for that namespace until then, rather than the install failing.
+Reading cluster-wide platform metrics from Thanos Querier requires a `cluster-monitoring-view` ClusterRoleBinding, which `just setup-namespace` creates per-namespace by default — this needs cluster-admin permission, unlike everything else that recipe sets up. If your account doesn't have it, pass `just setup-namespace --namespace=my-ai-workloads --skip-monitoring-access` and have a cluster-admin apply `charts/aibom-workload-namespace/templates/monitoring.yaml`'s `ClusterRoleBinding` once instead; telemetry just comes back empty for that namespace until then, rather than the install failing.
 
 ### AIBOM Storage
 
