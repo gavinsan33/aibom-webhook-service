@@ -1373,3 +1373,52 @@ func TestJobNameTruncation(t *testing.T) {
 		t.Errorf("postprocess job name length %d exceeds max %d", len(dashResult), maxJobNameLength)
 	}
 }
+
+func TestBuildPostprocessInputs_CapturesOOMKilledStatus(t *testing.T) {
+	pod := instrumentedPod("oom-job", "ns")
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{
+		{
+			Name:    "training",
+			ImageID: "busybox@sha256:abc",
+			State: corev1.ContainerState{
+				Terminated: &corev1.ContainerStateTerminated{
+					Reason:   "OOMKilled",
+					ExitCode: 137,
+				},
+			},
+		},
+	}
+	w := &Watcher{clientset: fake.NewSimpleClientset()}
+
+	_, _, containersJSON, _ := w.buildPostprocessInputs(context.Background(), "ns", "cm-name", []corev1.Pod{*pod})
+
+	var containers []struct {
+		PodName          string `json:"pod_name"`
+		Name             string `json:"name"`
+		TerminatedReason string `json:"terminated_reason"`
+		ExitCode         *int32 `json:"exit_code"`
+	}
+	if err := json.Unmarshal([]byte(containersJSON), &containers); err != nil {
+		t.Fatalf("unmarshal containers.json: %v", err)
+	}
+	if len(containers) != 1 {
+		t.Fatalf("expected 1 container entry, got %d", len(containers))
+	}
+	if containers[0].TerminatedReason != "OOMKilled" {
+		t.Errorf("terminated_reason = %q, want OOMKilled", containers[0].TerminatedReason)
+	}
+	if containers[0].ExitCode == nil || *containers[0].ExitCode != 137 {
+		t.Errorf("exit_code = %v, want 137", containers[0].ExitCode)
+	}
+}
+
+func TestBuildPostprocessInputs_NoStatusOmitsTerminatedFields(t *testing.T) {
+	pod := instrumentedPod("running-job", "ns")
+	w := &Watcher{clientset: fake.NewSimpleClientset()}
+
+	_, _, containersJSON, _ := w.buildPostprocessInputs(context.Background(), "ns", "cm-name", []corev1.Pod{*pod})
+
+	if strings.Contains(containersJSON, "terminated_reason") {
+		t.Errorf("expected no terminated_reason field when no container status is reported, got: %s", containersJSON)
+	}
+}
