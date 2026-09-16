@@ -67,6 +67,12 @@ spec:
               value: /tmp
             - name: AIBOM_DEBUG
               value: "1"
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: HF_TOKEN
+                  optional: true
           resources:
             requests:
               nvidia.com/gpu: "2"
