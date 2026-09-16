@@ -5,7 +5,7 @@
 # model/dataset auto-detection the other examples focus on.
 #
 # The container clones huggingface/trl at pod startup and runs its
-# examples/scripts/sft.py directly against the cloned checkout (installed
+# trl/scripts/sft.py directly against the cloned checkout (installed
 # editable, so the code that actually executes is the clone, not a
 # separately pip-installed release). This exercises two of the five
 # precedence tiers:
@@ -20,11 +20,14 @@
 #     just the clone command's stated intent.
 # In practice the runtime tier wins (it's ranked first), so the AIBOM's
 # source_code.declared_via should come back as "git_directory" with
-# source_code.dirty: false.
+# source_code.dirty: false and source_code.git_branch unset (detached HEAD).
 #
-# No --branch/-b flag is passed, so this clones the default branch (a real
-# ref, not a detached HEAD) -- unlike a tag/SHA checkout, which would leave
-# .git/HEAD detached and git_branch unset in the runtime tier.
+# Pinned to a specific upstream commit (rather than tracking main unpinned,
+# which broke this example once already when huggingface/trl restructured
+# examples/scripts/ -- see git blame) via a checkout after the clone. This
+# leaves .git/HEAD detached, so runtime_detector.py's git_branch comes back
+# unset -- only git_commit/git_repository/dirty are populated for this
+# example now.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -50,9 +53,10 @@ spec:
             - |
               git clone https://github.com/huggingface/trl.git /tmp/trl-repo && \
               cd /tmp/trl-repo && \
+              git checkout 7ea5a08c426e0186f5f84c13a7f13d51f4381688 && \
               pip install --no-cache-dir -e . peft datasets accelerate && \
               export PATH="$HOME/.local/bin:$PATH" && \
-              python examples/scripts/sft.py \
+              python trl/scripts/sft.py \
                 --model_name_or_path ibm-granite/granite-3.3-2b-instruct \
                 --dataset_name tatsu-lab/alpaca \
                 --output_dir /tmp/output \
@@ -71,6 +75,12 @@ spec:
           env:
             - name: HOME
               value: /tmp
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: HF_TOKEN
+                  optional: true
           resources:
             requests:
               nvidia.com/gpu: "1"
