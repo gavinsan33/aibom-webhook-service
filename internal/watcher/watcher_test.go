@@ -1422,3 +1422,42 @@ func TestBuildPostprocessInputs_NoStatusOmitsTerminatedFields(t *testing.T) {
 		t.Errorf("expected no terminated_reason field when no container status is reported, got: %s", containersJSON)
 	}
 }
+
+func TestBuildPostprocessInputs_CapturesResourceLimits(t *testing.T) {
+	pod := instrumentedPod("limited-job", "ns")
+	pod.Spec.Containers[0].Resources.Limits[corev1.ResourceMemory] = resource.MustParse("8Gi")
+	pod.Spec.Containers[0].Resources.Limits[corev1.ResourceCPU] = resource.MustParse("2")
+	w := &Watcher{clientset: fake.NewSimpleClientset()}
+
+	_, _, containersJSON, _ := w.buildPostprocessInputs(context.Background(), "ns", "cm-name", []corev1.Pod{*pod})
+
+	var containers []struct {
+		MemoryLimitBytes *int64 `json:"memory_limit_bytes"`
+		CPULimitMillis   *int64 `json:"cpu_limit_millis"`
+	}
+	if err := json.Unmarshal([]byte(containersJSON), &containers); err != nil {
+		t.Fatalf("unmarshal containers.json: %v", err)
+	}
+	if len(containers) != 1 {
+		t.Fatalf("expected 1 container entry, got %d", len(containers))
+	}
+	wantMem := int64(8 * 1024 * 1024 * 1024)
+	if containers[0].MemoryLimitBytes == nil || *containers[0].MemoryLimitBytes != wantMem {
+		t.Errorf("memory_limit_bytes = %v, want %d", containers[0].MemoryLimitBytes, wantMem)
+	}
+	if containers[0].CPULimitMillis == nil || *containers[0].CPULimitMillis != 2000 {
+		t.Errorf("cpu_limit_millis = %v, want 2000", containers[0].CPULimitMillis)
+	}
+}
+
+func TestBuildPostprocessInputs_NoResourceLimitsOmitsLimitFields(t *testing.T) {
+	// instrumentedPod only sets an nvidia.com/gpu limit -- no memory/cpu limit.
+	pod := instrumentedPod("no-limits-job", "ns")
+	w := &Watcher{clientset: fake.NewSimpleClientset()}
+
+	_, _, containersJSON, _ := w.buildPostprocessInputs(context.Background(), "ns", "cm-name", []corev1.Pod{*pod})
+
+	if strings.Contains(containersJSON, "memory_limit_bytes") || strings.Contains(containersJSON, "cpu_limit_millis") {
+		t.Errorf("expected no limit fields when the container sets no memory/cpu limit, got: %s", containersJSON)
+	}
+}
