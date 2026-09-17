@@ -767,6 +767,14 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 		// container the API never reported a terminated state for.
 		TerminatedReason string `json:"terminated_reason,omitempty"`
 		ExitCode         *int32 `json:"exit_code,omitempty"`
+		// MemoryLimitBytes/CPULimitMillis come from Spec.Containers[].Resources.Limits --
+		// known at pod-creation time, unlike the terminated fields above -- so
+		// postprocess.py can report telemetry usage against the ceiling that
+		// actually governed it (e.g. "OOMKilled" alongside "used 8GB of an 8GB
+		// limit"). nil when the container has no limit set for that resource,
+		// a real and common case, not a zero value.
+		MemoryLimitBytes *int64 `json:"memory_limit_bytes,omitempty"`
+		CPULimitMillis   *int64 `json:"cpu_limit_millis,omitempty"`
 	}
 	var containers []containerInfo
 	for _, pod := range pods {
@@ -798,6 +806,14 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 				ci.TerminatedReason = reason
 				exitCode := exitCodes[c.Name]
 				ci.ExitCode = &exitCode
+			}
+			if mem, ok := c.Resources.Limits[corev1.ResourceMemory]; ok {
+				v := mem.Value()
+				ci.MemoryLimitBytes = &v
+			}
+			if cpu, ok := c.Resources.Limits[corev1.ResourceCPU]; ok {
+				v := cpu.MilliValue()
+				ci.CPULimitMillis = &v
 			}
 			containers = append(containers, ci)
 		}

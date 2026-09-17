@@ -1012,6 +1012,118 @@ def test_compile_aibom_utilization_scales_storage_throughput_to_mbps():
 
 
 # ---------------------------------------------------------------------------
+# compile_aibom: resource_utilization.metrics.<name>.limit
+# ---------------------------------------------------------------------------
+
+
+def test_compile_aibom_memory_usage_reports_limit_in_gb():
+    telemetry = {
+        "collected_at": "2024-01-01T00:00:00Z",
+        "pods": [
+            {
+                "pod_name": "job-abc",
+                "metrics": {"memory_usage": _pod_metrics(avg=6 * 1024**3, min_=2 * 1024**3, max_=8 * 1024**3, p95=7.8 * 1024**3, unit="bytes")},
+            }
+        ],
+    }
+    containers = [
+        {"pod_name": "job-abc", "name": "training", "memory_limit_bytes": 8 * 1024**3},
+    ]
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info={},
+        annotations={}, telemetry=telemetry, containers=containers,
+    )
+    detail = aibom["resource_utilization"]["metrics"]["memory_usage"]
+    assert detail["max"] == 8.0
+    assert detail["limit"] == 8.0
+
+
+def test_compile_aibom_cpu_usage_reports_limit_in_cores():
+    telemetry = {
+        "collected_at": "2024-01-01T00:00:00Z",
+        "pods": [
+            {
+                "pod_name": "job-abc",
+                "metrics": {"cpu_usage": _pod_metrics(avg=1.5, min_=0.5, max_=1.9, p95=1.8, unit="cores")},
+            }
+        ],
+    }
+    containers = [
+        {"pod_name": "job-abc", "name": "training", "cpu_limit_millis": 2000},
+    ]
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info={},
+        annotations={}, telemetry=telemetry, containers=containers,
+    )
+    detail = aibom["resource_utilization"]["metrics"]["cpu_usage"]
+    assert detail["limit"] == 2.0
+
+
+def test_compile_aibom_memory_usage_no_limit_key_when_no_container_limit_set():
+    telemetry = {
+        "collected_at": "2024-01-01T00:00:00Z",
+        "pods": [
+            {
+                "pod_name": "job-abc",
+                "metrics": {"memory_usage": _pod_metrics(avg=6 * 1024**3, min_=2 * 1024**3, max_=8 * 1024**3, p95=7.8 * 1024**3, unit="bytes")},
+            }
+        ],
+    }
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info={},
+        annotations={}, telemetry=telemetry, containers=None,
+    )
+    assert "limit" not in aibom["resource_utilization"]["metrics"]["memory_usage"]
+
+
+def test_compile_aibom_gpu_utilization_never_reports_limit():
+    # GPU/network/storage have no Kubernetes resource-limit concept.
+    telemetry = {
+        "collected_at": "2024-01-01T00:00:00Z",
+        "pods": [{"pod_name": "job-abc", "metrics": {"gpu_utilization": _pod_metrics(avg=60, min_=10, max_=95, p95=94)}}],
+    }
+    containers = [{"pod_name": "job-abc", "name": "training", "memory_limit_bytes": 8 * 1024**3}]
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info={},
+        annotations={}, telemetry=telemetry, containers=containers,
+    )
+    assert "limit" not in aibom["resource_utilization"]["metrics"]["gpu_utilization"]
+
+
+def test_compile_aibom_memory_usage_limit_is_tightest_across_jobset_siblings():
+    telemetry = {
+        "collected_at": "2024-01-01T00:00:00Z",
+        "pods": [
+            {"pod_name": "server-0", "metrics": {"memory_usage": _pod_metrics(avg=4 * 1024**3, min_=2 * 1024**3, max_=6 * 1024**3, p95=5.5 * 1024**3, unit="bytes")}},
+            {"pod_name": "client-0", "metrics": {"memory_usage": _pod_metrics(avg=1 * 1024**3, min_=0.5 * 1024**3, max_=1.5 * 1024**3, p95=1.4 * 1024**3, unit="bytes")}},
+        ],
+    }
+    containers = [
+        {"pod_name": "server-0", "name": "server", "memory_limit_bytes": 16 * 1024**3},
+        {"pod_name": "client-0", "name": "client", "memory_limit_bytes": 2 * 1024**3},
+    ]
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info={},
+        annotations={}, telemetry=telemetry, containers=containers,
+    )
+    # The client's tighter 2GB limit wins even though the server used more memory.
+    assert aibom["resource_utilization"]["metrics"]["memory_usage"]["limit"] == 2.0
+
+
+def test_pod_resource_limit_sums_multiple_containers_in_one_pod():
+    containers = [
+        {"pod_name": "job-abc", "name": "main", "memory_limit_bytes": 4 * 1024**3},
+        {"pod_name": "job-abc", "name": "sidecar", "memory_limit_bytes": 1 * 1024**3},
+    ]
+    assert pp.pod_resource_limit("job-abc", containers, "memory_limit_bytes") == 5 * 1024**3
+
+
+def test_pod_resource_limit_none_when_no_container_reports_it():
+    containers = [{"pod_name": "job-abc", "name": "main"}]
+    assert pp.pod_resource_limit("job-abc", containers, "memory_limit_bytes") is None
+
+
+# ---------------------------------------------------------------------------
 # compile_aibom: runtime_info fallbacks (transformers/peft runtime hooks,
 # for scripts with no CLI flags for detect_trl_from_command to see)
 # ---------------------------------------------------------------------------
