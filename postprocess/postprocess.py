@@ -69,16 +69,21 @@ DEBUG_TELEMETRY_ALL_PODS = os.environ.get("AIBOM_DEBUG_TELEMETRY_ALL_PODS", "").
 # instead of needing a second `avg_over_time` query per metric. See
 # compute_metric_stats() and CLAUDE.md's Grafana Telemetry Retries section.
 TELEMETRY_QUERIES = {
+    # Computed directly from dcgm-exporter's own raw metrics (present on any
+    # standard DCGM install) rather than a "nerc:"-prefixed recording rule --
+    # that rule is a PrometheusRule dependency specific to certain clusters
+    # (e.g. NERC) and isn't present by default elsewhere, which silently
+    # dropped GPU telemetry on any cluster that hadn't separately installed it.
     "gpu_utilization": {
-        "query": 'nerc:dcgm_gpu_util:avg5m{exported_pod="{pod_name}"}',
+        "query": 'avg_over_time(DCGM_FI_DEV_GPU_UTIL{exported_pod="{pod_name}"}[5m])',
         "unit": "percent",
     },
     "gpu_memory_used": {
-        "query": 'nerc:dcgm_fb_used:avg5m{exported_pod="{pod_name}"}',
+        "query": 'avg_over_time(DCGM_FI_DEV_FB_USED{exported_pod="{pod_name}"}[5m])',
         "unit": "MiB",
     },
     "gpu_power": {
-        "query": 'nerc:dcgm_power_usage:avg5m{exported_pod="{pod_name}"}',
+        "query": 'avg_over_time(DCGM_FI_DEV_POWER_USAGE{exported_pod="{pod_name}"}[5m])',
         "unit": "watts",
     },
     # rate()'s [5m] window matches what the pre-segmented-stats avg_* fields
