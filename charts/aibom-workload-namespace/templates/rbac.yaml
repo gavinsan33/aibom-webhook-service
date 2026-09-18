@@ -42,6 +42,13 @@ subjects:
 # yet at admission time (pods created via generateName), so no
 # equivalently-scoped alternative is possible there. That residual gap is
 # accepted, not solved, by this Role's continued existence.
+#
+# Also, less obviously, this is what lets aibom-postprocess publish the
+# aibom-compiled-signing-public-key ConfigMap (see signing.yaml's NOTE next
+# to aibom-postprocess-compiled-signing-key-reader) -- not something this
+# Role was written for, just a side effect of granting every SA in the
+# namespace ConfigMap access. Narrowing this Role needs an explicit grant
+# added there first, or that publish step starts failing silently.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
