@@ -6,6 +6,7 @@ Reads discovery and dataset data from a ConfigMap mount, optionally
 queries Prometheus for telemetry, and produces an AIBOM JSON document.
 """
 
+import base64
 import json
 import math
 import os
@@ -47,6 +48,15 @@ GRAFANA_DATASOURCE_UID = os.environ.get("GRAFANA_DATASOURCE_UID", "")
 # mirrors gpu-quota-operator's metrics.Client (metrics/prometheus.go).
 SERVICE_ACCOUNT_TOKEN_FILE = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 SERVICE_CA_CERT_FILE = "/etc/aibom-postprocess/service-ca/service-ca.crt"
+
+# Path to the per-namespace Ed25519 private key (see charts/aibom-workload-namespace's
+# templates/signing.yaml and CLAUDE.md's Compiled AIBOM Signing section) this Job signs
+# the compiled AIBOM with before creating the custom resource. Empty/missing means the
+# namespace's aibom-workload-namespace chart install predates this Secret -- the AIBOM
+# is still created, just unsigned, mirroring how a missing discovery-signing key degrades
+# to "unverifiable" rather than failing the workload (see generate_snapshot.py's
+# sign_payload).
+SIGNING_KEY_PATH = os.environ.get("AIBOM_SIGNING_KEY_PATH", "")
 
 # The observability backend can lag behind real time before freshly-scraped
 # samples become queryable, so a range query fired immediately after the
@@ -1534,6 +1544,58 @@ def _first_not_none(*values):
 
 
 # ---------------------------------------------------------------------------
+# Compiled AIBOM signing
+# ---------------------------------------------------------------------------
+
+
+def sign_aibom(aibom):
+    """Ed25519-sign aibom's canonical JSON serialization with the
+    per-namespace key at SIGNING_KEY_PATH, so a copy of this AIBOM read
+    outside the cluster entirely (an archived export, or the CR itself
+    fetched by a tool with no reason to trust the cluster it came from) can
+    still be checked against tampering.
+
+    Asymmetric rather than the HMAC used for discovery/dataset data (see
+    generate_snapshot.py's sign_payload): the intended verifiers here --
+    oc-aibom, or anything reading an independently archived copy -- are
+    genuinely untrusted relative to the signer, unlike the watcher verifying
+    discovery/dataset data, which is an equally trusted, project-controlled
+    process. Handing every verifier the same HMAC key here would let any of
+    them forge a signature too.
+
+    Returns (signature_b64, public_key_b64), or (None, None) if
+    SIGNING_KEY_PATH isn't set or the key file isn't mounted -- e.g. a
+    namespace whose aibom-workload-namespace chart install predates
+    signing.yaml's aibom-compiled-signing-key Secret. The AIBOM is still
+    created unsigned in that case rather than failing the Job.
+    """
+    if not SIGNING_KEY_PATH:
+        return None, None
+    try:
+        with open(SIGNING_KEY_PATH, "rb") as f:
+            key_pem = f.read()
+    except OSError:
+        return None, None
+
+    from cryptography.hazmat.primitives import serialization
+
+    private_key = serialization.load_pem_private_key(key_pem, password=None)
+    public_key = private_key.public_key()
+    public_bytes = public_key.public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+
+    # Same canonical form as generate_snapshot.py's discovery/storage
+    # payloads -- sorted keys, no incidental whitespace -- so re-serializing
+    # `data` identically at verification time reproduces the exact bytes
+    # that were signed.
+    canonical = json.dumps(aibom, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    signature = private_key.sign(canonical)
+    return base64.b64encode(signature).decode("ascii"), base64.b64encode(public_bytes).decode("ascii")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -1654,6 +1716,29 @@ def main():
             "data": aibom,
         },
     }
+    try:
+        signature, public_key = sign_aibom(aibom)
+    except Exception as e:
+        print(f"WARNING: could not sign AIBOM: {e}", file=sys.stderr)
+        signature, public_key = None, None
+    if signature:
+        aibom_cr["spec"]["signature"] = signature
+        aibom_cr["spec"]["signaturePublicKey"] = public_key
+        # Idempotent create-or-merge (see k8s_api.patch_configmap) -- the public
+        # key never changes once the Secret above is generated, so this is a
+        # no-op after the first successful run in this namespace. Published
+        # so a verifier working from a live cluster (rather than an archived,
+        # self-contained copy carrying its own signaturePublicKey) has a
+        # cluster-side anchor to cross-check against.
+        try:
+            k8s_api.patch_configmap(
+                JOB_NAMESPACE, "aibom-compiled-signing-public-key", {"ed25519-public-key": public_key}
+            )
+        except Exception as e:
+            print(f"WARNING: could not publish signing public key: {e}", file=sys.stderr)
+        print("  Signed with Ed25519 (see aibom-compiled-signing-public-key ConfigMap)")
+    else:
+        print("  Skipped signing (no AIBOM_SIGNING_KEY_PATH configured for this namespace)")
     try:
         created = k8s_api.create_custom_object(JOB_NAMESPACE, "aibom.io", "v1alpha1", "aiboms", aibom_cr)
     except Exception as e:

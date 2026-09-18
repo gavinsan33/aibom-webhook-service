@@ -1,3 +1,8 @@
+import base64
+import json
+
+import pytest
+
 import postprocess as pp
 
 
@@ -1197,3 +1202,58 @@ def test_compile_aibom_cli_detected_strategy_overrides_device_map_fallback():
         detected_model=detected_model,
     )
     assert aibom["training"]["parallelization_strategy"] == "data_parallel"
+
+
+def _generate_ed25519_pem():
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    key = Ed25519PrivateKey.generate()
+    return key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+
+
+def test_sign_aibom_returns_none_when_no_signing_key_path(monkeypatch):
+    monkeypatch.setattr(pp, "SIGNING_KEY_PATH", "")
+    assert pp.sign_aibom({"a": 1}) == (None, None)
+
+
+def test_sign_aibom_returns_none_when_key_file_missing(monkeypatch, tmp_path):
+    monkeypatch.setattr(pp, "SIGNING_KEY_PATH", str(tmp_path / "does-not-exist"))
+    assert pp.sign_aibom({"a": 1}) == (None, None)
+
+
+def test_sign_aibom_produces_a_verifiable_signature(monkeypatch, tmp_path):
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+    key_path = tmp_path / "ed25519-key"
+    key_path.write_bytes(_generate_ed25519_pem())
+    monkeypatch.setattr(pp, "SIGNING_KEY_PATH", str(key_path))
+
+    aibom = {"b": 2, "a": 1}
+    signature_b64, public_key_b64 = pp.sign_aibom(aibom)
+    assert signature_b64 and public_key_b64
+
+    public_key = Ed25519PublicKey.from_public_bytes(base64.b64decode(public_key_b64))
+    canonical = json.dumps(aibom, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    # Raises if invalid -- no exception here is the assertion.
+    public_key.verify(base64.b64decode(signature_b64), canonical)
+
+
+def test_sign_aibom_signature_changes_if_payload_differs(monkeypatch, tmp_path):
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    from cryptography.exceptions import InvalidSignature
+
+    key_path = tmp_path / "ed25519-key"
+    key_path.write_bytes(_generate_ed25519_pem())
+    monkeypatch.setattr(pp, "SIGNING_KEY_PATH", str(key_path))
+
+    signature_b64, public_key_b64 = pp.sign_aibom({"a": 1})
+    public_key = Ed25519PublicKey.from_public_bytes(base64.b64decode(public_key_b64))
+    tampered = json.dumps({"a": 2}, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    with pytest.raises(InvalidSignature):
+        public_key.verify(base64.b64decode(signature_b64), tampered)
