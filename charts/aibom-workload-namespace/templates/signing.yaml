@@ -153,3 +153,13 @@ subjects:
   - kind: ServiceAccount
     name: aibom-postprocess
     namespace: {{ .Release.Namespace }}
+
+# NOTE: postprocess.py also *writes* a ConfigMap (aibom-compiled-signing-public-key,
+# see main()'s call to k8s_api.patch_configmap) to publish this key's public half.
+# No Role here grants that -- it works only because rbac.yaml's aibom-workload-data
+# Role broadly grants configmap create/get/patch to every ServiceAccount in this
+# namespace (bound via the system:serviceaccounts:{{ .Release.Namespace }} group),
+# and aibom-postprocess is one of them. rbac.yaml's own comment already flags that
+# Role as an accepted-but-unscoped gap; if it's ever narrowed, this publish step
+# will start failing silently (caught, logged as a warning, doesn't fail the Job)
+# and will need its own explicit grant added here.
