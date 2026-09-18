@@ -1577,6 +1577,7 @@ def sign_aibom(aibom):
     except OSError:
         return None, None
 
+    import rfc8785
     from cryptography.hazmat.primitives import serialization
 
     private_key = serialization.load_pem_private_key(key_pem, password=None)
@@ -1586,11 +1587,17 @@ def sign_aibom(aibom):
         format=serialization.PublicFormat.Raw,
     )
 
-    # Same canonical form as generate_snapshot.py's discovery/storage
-    # payloads -- sorted keys, no incidental whitespace -- so re-serializing
-    # `data` identically at verification time reproduces the exact bytes
-    # that were signed.
-    canonical = json.dumps(aibom, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    # RFC 8785 (JSON Canonicalization Scheme), not a hand-rolled sort_keys/
+    # separators convention -- the verifier here (oc-aibom, or anything
+    # reading an archived copy) is written in Go, a different language's
+    # JSON encoder, which doesn't format floats or escape non-ASCII the same
+    # way Python's json module does by default. JCS exists specifically to
+    # make two independent implementations agree on canonical bytes for the
+    # same logical JSON value; both `rfc8785` (this) and the reference-
+    # lineage `gowebpki/jcs` Go package were verified to produce identical
+    # output for representative AIBOM-shaped fixtures (floats, unicode,
+    # nesting, empty collections) before this was wired up.
+    canonical = rfc8785.dumps(aibom)
     signature = private_key.sign(canonical)
     return base64.b64encode(signature).decode("ascii"), base64.b64encode(public_bytes).decode("ascii")
 

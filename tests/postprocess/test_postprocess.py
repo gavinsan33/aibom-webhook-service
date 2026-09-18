@@ -1227,6 +1227,7 @@ def test_sign_aibom_returns_none_when_key_file_missing(monkeypatch, tmp_path):
 
 
 def test_sign_aibom_produces_a_verifiable_signature(monkeypatch, tmp_path):
+    import rfc8785
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
@@ -1239,12 +1240,13 @@ def test_sign_aibom_produces_a_verifiable_signature(monkeypatch, tmp_path):
     assert signature_b64 and public_key_b64
 
     public_key = Ed25519PublicKey.from_public_bytes(base64.b64decode(public_key_b64))
-    canonical = json.dumps(aibom, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    canonical = rfc8785.dumps(aibom)
     # Raises if invalid -- no exception here is the assertion.
     public_key.verify(base64.b64decode(signature_b64), canonical)
 
 
 def test_sign_aibom_signature_changes_if_payload_differs(monkeypatch, tmp_path):
+    import rfc8785
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
     from cryptography.exceptions import InvalidSignature
 
@@ -1254,7 +1256,7 @@ def test_sign_aibom_signature_changes_if_payload_differs(monkeypatch, tmp_path):
 
     signature_b64, public_key_b64 = pp.sign_aibom({"a": 1})
     public_key = Ed25519PublicKey.from_public_bytes(base64.b64decode(public_key_b64))
-    tampered = json.dumps({"a": 2}, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    tampered = rfc8785.dumps({"a": 2})
     with pytest.raises(InvalidSignature):
         public_key.verify(base64.b64decode(signature_b64), tampered)
 
@@ -1264,15 +1266,12 @@ def test_sign_aibom_signature_survives_json_round_trip(monkeypatch, tmp_path):
     sees that object -- it only sees whatever comes back out of the
     Kubernetes API after the AIBOM's `data` went through a JSON encode (the
     POST body k8s_api.create_custom_object sends) and a JSON decode (a GET
-    or `kubectl get -o json` later). If re-serializing *that* round-tripped
-    object canonically didn't reproduce the exact bytes that were signed,
+    or `kubectl get -o json` later). If re-canonicalizing *that*
+    round-tripped object didn't reproduce the exact bytes that were signed,
     verification would spuriously fail for every AIBOM, not just tampered
-    ones. This only proves Python's own json round-trip is stable for the
-    JSON types postprocess.py actually produces (str/int/float/bool/None/
-    list/dict) -- it can't rule out a Go-side apiserver quirk (e.g. int64
-    vs float64 handling), which would need a real cluster round-trip to
-    catch. See CLAUDE.md's Compiled AIBOM Signing section.
+    ones. See CLAUDE.md's Compiled AIBOM Signing section.
     """
+    import rfc8785
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
     key_path = tmp_path / "ed25519-key"
@@ -1293,7 +1292,32 @@ def test_sign_aibom_signature_survives_json_round_trip(monkeypatch, tmp_path):
     # field is sent as JSON and later read back as JSON, never as the same
     # Python object sign_aibom saw.
     round_tripped = json.loads(json.dumps(aibom))
-    canonical = json.dumps(round_tripped, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    canonical = rfc8785.dumps(round_tripped)
 
     # Raises if invalid -- no exception here is the assertion.
     public_key.verify(base64.b64decode(signature_b64), canonical)
+
+
+def test_sign_aibom_matches_go_jcs_reference_output():
+    """RFC 8785 is only useful here because two independent implementations
+    (this repo's Python `rfc8785`, and oc-aibom's Go `gowebpki/jcs`) agree
+    on the canonical bytes for the same logical JSON value -- which a
+    hand-rolled sort_keys/separators convention never guaranteed across
+    languages (different float formatting, different non-ASCII escaping
+    defaults). This locks in a known-good byte string, produced by actually
+    running the Go reference implementation against this exact fixture, so
+    a future rfc8785 upgrade that drifted from the spec would be caught
+    here rather than only showing up as oc-aibom verify failures.
+    """
+    import rfc8785
+
+    aibom = {
+        "model": {"name": "tinyllama-1.1b-chat", "quantization": None},
+        "training": {"learning_rate": 2e-5, "epochs": 3, "random_seed": 42},
+        "tags": ["sft", "lora"],
+        "dirty": False,
+    }
+    assert rfc8785.dumps(aibom) == (
+        b'{"dirty":false,"model":{"name":"tinyllama-1.1b-chat","quantization":null},'
+        b'"tags":["sft","lora"],"training":{"epochs":3,"learning_rate":0.00002,"random_seed":42}}'
+    )
