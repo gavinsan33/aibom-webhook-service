@@ -99,3 +99,57 @@ subjects:
   - kind: ServiceAccount
     name: aibom-webhook
     namespace: {{ .Values.aibomSystemNamespace }}
+---
+# Ed25519 private key postprocess.py signs the compiled AIBOM document with,
+# right before creating the AIBOM custom resource (#27). Unlike the two HMAC
+# keys above -- signed and verified by equally-trusted, project-controlled
+# processes (the discovery init container / dataset sidecar, and the watcher)
+# -- this AIBOM's intended verifiers include parties outside the cluster's
+# trust boundary entirely: oc-aibom, or anything reading an independently
+# archived copy with no cluster access at all. An asymmetric key lets those
+# verifiers check a signature without holding anything that could forge one,
+# which a shared HMAC key could not do once handed to an untrusted verifier.
+#
+# Mounted read-only into the aibom-postprocess Job only (see watcher.go's
+# createPostprocessJobCore) -- never any workload container. Preserved across
+# `helm upgrade --install` re-runs via lookup, same as the HMAC keys, so
+# rotating it doesn't invalidate the signature on every AIBOM already created.
+{{- $compiledSecretName := "aibom-compiled-signing-key" }}
+{{- $existingCompiled := lookup "v1" "Secret" .Release.Namespace $compiledSecretName }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $compiledSecretName }}
+  namespace: {{ .Release.Namespace }}
+type: Opaque
+data:
+  ed25519-key: {{ if $existingCompiled }}{{ index $existingCompiled.data "ed25519-key" }}{{ else }}{{ genPrivateKey "ed25519" | b64enc }}{{ end }}
+---
+# Scoped to the aibom-postprocess ServiceAccount in this same namespace --
+# unlike the HMAC key readers above, no cross-namespace RoleBinding is needed
+# here, since postprocess.py (the only reader) already runs in
+# .Release.Namespace, not the aibom-system namespace the watcher runs in.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: aibom-compiled-signing-key-reader
+  namespace: {{ .Release.Namespace }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+    resourceNames: [{{ $compiledSecretName }}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: aibom-postprocess-compiled-signing-key-reader
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: aibom-compiled-signing-key-reader
+subjects:
+  - kind: ServiceAccount
+    name: aibom-postprocess
+    namespace: {{ .Release.Namespace }}
