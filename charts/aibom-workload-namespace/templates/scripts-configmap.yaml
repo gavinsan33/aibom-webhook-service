@@ -19,3 +19,5 @@ data:
     {{- (.Values.scripts.runtimeDetector | default (.Files.Get "files/runtime_detector.py")) | nindent 4 }}
   k8s_api.py: |
     {{- (.Values.scripts.k8sApi | default (.Files.Get "files/k8s_api.py")) | nindent 4 }}
+  dataset_sidecar.py: |
+    {{- (.Values.scripts.datasetSidecar | default (.Files.Get "files/dataset_sidecar.py")) | nindent 4 }}

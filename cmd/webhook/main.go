@@ -32,6 +32,12 @@ func main() {
 	flag.StringVar(&cfg.PostprocessImage, "postprocess-image", "busybox:latest", "image for postprocess Jobs")
 	flag.StringVar(&cfg.TrustedWatcherIdentity, "trusted-watcher-identity", "", "full username (e.g. system:serviceaccount:aibom-system:aibom-webhook) of this binary's own watcher identity, used to verify a Job claiming aibom.io/postprocess-for was actually created by the watcher; empty disables the check")
 	flag.StringVar(&cfg.TrustedJobControllerIdentity, "trusted-job-controller-identity", "", "full username the cluster's built-in Job controller uses when creating a Job's pods (commonly system:serviceaccount:kube-system:job-controller, but verify on your own cluster -- it depends on kube-controller-manager's --use-service-account-credentials flag); empty disables this extra check, leaving only the weaker ownerReference-only check")
+	flag.StringVar(&cfg.PrometheusURL, "prometheus-url", "https://thanos-querier.openshift-monitoring.svc:9091", "Prometheus/Thanos endpoint the postprocess Job queries for telemetry (empty disables telemetry collection)")
+	flag.StringVar(&cfg.GrafanaURL, "grafana-url", "", "Grafana base URL, used only to build a clickable Explore link in the AIBOM (telemetry itself always queries prometheus-url directly); empty omits the link")
+	flag.StringVar(&cfg.GrafanaDatasourceUID, "grafana-datasource-uid", "", "UID of the Grafana datasource pointing at prometheus-url, needed to build the Explore link above")
+	flag.BoolVar(&cfg.DebugKeepPostprocessJobs, "debug-keep-postprocess-jobs", false, "skip deleting succeeded postprocess Jobs/data ConfigMaps, for inspecting their logs/state after the fact (leaks one of each per completed workload — not for routine production use)")
+	flag.BoolVar(&cfg.DebugTelemetryAllPods, "debug-telemetry-all-pods", false, "postprocess Jobs query Prometheus telemetry for every pod regardless of detected GPU count (for local testing on clusters with no real GPU hardware, e.g. kind — not for routine production use)")
+	flag.StringVar(&cfg.DatasetSidecarImage, "dataset-sidecar-image", "python:3.12-slim", "image for the dataset-signing sidecar container")
 	flag.Parse()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -42,6 +48,7 @@ func main() {
 	}
 
 	mutator := webhook.NewMutator(cfg.DiscoveryImage, cfg.DatasetDetection, cfg.TrustedJobControllerIdentity)
+	mutator.DatasetSidecarImage = cfg.DatasetSidecarImage
 
 	// Built unconditionally (not gated on cfg.EnableWatcher) since the
 	// mutator itself now needs a clientset too, to provision per-job
