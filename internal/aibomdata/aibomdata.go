@@ -52,6 +52,22 @@ const (
 	// DatasetSigningKeyDataKey is the key within that Secret's data map.
 	DatasetSigningKeyDataKey = "hmac-key"
 
+	// CompiledSigningKeySecretName holds the Ed25519 private key
+	// postprocess.py signs the compiled AIBOM document with, created per
+	// workload namespace by aibom-workload-namespace's templates/signing.yaml.
+	// Unlike DiscoverySigningKeySecretName/DatasetSigningKeyDataKey (HMAC,
+	// verified by the watcher -- an equally-trusted process), this AIBOM's
+	// intended verifiers are outside the cluster's trust boundary entirely
+	// (oc-aibom, downstream tooling reading an archived copy) -- an
+	// asymmetric key lets them verify without being able to forge a
+	// signature themselves. The watcher never reads this Secret's contents;
+	// it only mounts it (read-only) into the postprocess Job.
+	CompiledSigningKeySecretName = "aibom-compiled-signing-key"
+
+	// CompiledSigningKeyDataKey is the key within that Secret's data map --
+	// a PEM-encoded PKCS8 Ed25519 private key.
+	CompiledSigningKeyDataKey = "ed25519-key"
+
 	// WorkloadIdentitySuffix names the per-job ServiceAccount/Role/
 	// RoleBinding/Secret the webhook provisions at admission time (see
 	// internal/webhook/identity.go's ensureWorkloadIdentity) so the

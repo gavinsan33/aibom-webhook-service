@@ -65,6 +65,12 @@ const (
 	serviceCAVolumeName    = "service-ca"
 	serviceCAMountPath     = "/etc/aibom-postprocess/service-ca"
 
+	// Mounted as optional for the same reason as the service-ca ConfigMap above:
+	// a namespace whose aibom-workload-namespace chart install predates this
+	// Secret's addition just gets an unsigned AIBOM rather than a blocked pod.
+	compiledSigningVolumeName = "compiled-signing-key"
+	compiledSigningMountPath  = "/etc/aibom-postprocess/compiled-signing"
+
 	resyncPeriod      = 30 * time.Second
 	maxJobNameLength  = aibomdata.MaxJobNameLength
 	postprocessSuffix = aibomdata.PostprocessSuffix
@@ -923,6 +929,7 @@ func (w *Watcher) createPostprocessJobCore(ctx context.Context, namespace, trigg
 								{Name: "GRAFANA_URL", Value: w.grafanaURL},
 								{Name: "GRAFANA_DATASOURCE_UID", Value: w.grafanaDatasourceUID},
 								{Name: "AIBOM_DEBUG_TELEMETRY_ALL_PODS", Value: strconv.FormatBool(w.debugTelemetryAllPods)},
+								{Name: "AIBOM_SIGNING_KEY_PATH", Value: compiledSigningMountPath + "/" + aibomdata.CompiledSigningKeyDataKey},
 							},
 							VolumeMounts: []corev1.VolumeMount{
 								{
@@ -933,6 +940,11 @@ func (w *Watcher) createPostprocessJobCore(ctx context.Context, namespace, trigg
 								{
 									Name:      serviceCAVolumeName,
 									MountPath: serviceCAMountPath,
+									ReadOnly:  true,
+								},
+								{
+									Name:      compiledSigningVolumeName,
+									MountPath: compiledSigningMountPath,
 									ReadOnly:  true,
 								},
 							},
@@ -953,6 +965,15 @@ func (w *Watcher) createPostprocessJobCore(ctx context.Context, namespace, trigg
 								ConfigMap: &corev1.ConfigMapVolumeSource{
 									LocalObjectReference: corev1.LocalObjectReference{Name: serviceCAConfigMapName},
 									Optional:             &optional,
+								},
+							},
+						},
+						{
+							Name: compiledSigningVolumeName,
+							VolumeSource: corev1.VolumeSource{
+								Secret: &corev1.SecretVolumeSource{
+									SecretName: aibomdata.CompiledSigningKeySecretName,
+									Optional:   &optional,
 								},
 							},
 						},
