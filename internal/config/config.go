@@ -8,6 +8,7 @@ type Config struct {
 	DatasetDetection     bool
 	EnableWatcher        bool
 	PostprocessImage     string
+	DatasetSidecarImage  string
 	PrometheusURL        string
 	GrafanaURL           string
 	GrafanaDatasourceUID string
