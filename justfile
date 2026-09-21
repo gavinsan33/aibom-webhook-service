@@ -187,6 +187,15 @@ deploy-buildconfig *args: _check-auth
     [[ "$skip_crds" = true ]] && ns_flag="--skip-crds"
     kube_as_user_args=()
     [[ "$skip_crds" = true ]] || kube_as_user_args=(--kube-as-user=system:admin)
+    # Helm's crds/ directory is install-only -- `helm upgrade --install` never
+    # re-applies it once the release already exists (README's "Helm installs
+    # CRDs once but never upgrades them" note). Left to that alone, a schema
+    # change like #27's spec.signature/spec.signaturePublicKey gets silently
+    # pruned by the apiserver on every AIBOM created from here on -- no error,
+    # postprocess.py still logs success, and spec is CEL-immutable so it can
+    # never be repaired after the fact (review finding, PR #82). Apply it
+    # explicitly on every deploy instead of relying on the manual step.
+    [[ "$skip_crds" = true ]] || oc apply -f charts/aibom-webhook/crds/aibom-crd.yaml --as=system:admin
     values_args=()
     [[ -n "$values_file" ]] && values_args=(-f "$values_file")
     gitref_args=()
@@ -309,6 +318,10 @@ deploy-local *args: _check-auth
     [[ "$skip_crds" = true ]] && ns_flag="--skip-crds"
     kube_as_user_args=()
     [[ "$skip_crds" = true ]] || kube_as_user_args=(--kube-as-user=system:admin)
+    # See deploy-buildconfig's identical step: Helm's crds/ directory is
+    # install-only, so a schema change would otherwise be silently pruned on
+    # every existing install until someone remembers the manual `oc apply`.
+    [[ "$skip_crds" = true ]] || oc apply -f charts/aibom-webhook/crds/aibom-crd.yaml --as=system:admin
     values_args=()
     [[ -n "$values_file" ]] && values_args=(-f "$values_file")
     helm upgrade --install aibom-webhook charts/aibom-webhook -n {{ webhook_namespace }} "$ns_flag" \
@@ -354,6 +367,10 @@ deploy *args: _check-auth
     [[ "$skip_crds" = true ]] && ns_flag="--skip-crds"
     kube_as_user_args=()
     [[ "$skip_crds" = true ]] || kube_as_user_args=(--kube-as-user=system:admin)
+    # See deploy-buildconfig's identical step: Helm's crds/ directory is
+    # install-only, so a schema change would otherwise be silently pruned on
+    # every existing install until someone remembers the manual `oc apply`.
+    [[ "$skip_crds" = true ]] || oc apply -f charts/aibom-webhook/crds/aibom-crd.yaml --as=system:admin
     values_args=()
     [[ -n "$values_file" ]] && values_args=(-f "$values_file")
     helm upgrade --install aibom-webhook charts/aibom-webhook -n {{ webhook_namespace }} "$ns_flag" \
