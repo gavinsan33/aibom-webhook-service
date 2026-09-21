@@ -30,6 +30,8 @@ func main() {
 	flag.BoolVar(&cfg.DatasetDetection, "dataset-detection", true, "inject dataset detection hooks into application containers")
 	flag.BoolVar(&cfg.EnableWatcher, "enable-watcher", true, "start the Job completion watcher")
 	flag.StringVar(&cfg.PostprocessImage, "postprocess-image", "busybox:latest", "image for postprocess Jobs")
+	flag.StringVar(&cfg.TrustedWatcherIdentity, "trusted-watcher-identity", "", "full username (e.g. system:serviceaccount:aibom-system:aibom-webhook) of this binary's own watcher identity, used to verify a Job claiming aibom.io/postprocess-for was actually created by the watcher; empty disables the check")
+	flag.StringVar(&cfg.TrustedJobControllerIdentity, "trusted-job-controller-identity", "", "full username the cluster's built-in Job controller uses when creating a Job's pods (commonly system:serviceaccount:kube-system:job-controller, but verify on your own cluster -- it depends on kube-controller-manager's --use-service-account-credentials flag); empty disables this extra check, leaving only the weaker ownerReference-only check")
 	flag.StringVar(&cfg.PrometheusURL, "prometheus-url", "https://thanos-querier.openshift-monitoring.svc:9091", "Prometheus/Thanos endpoint the postprocess Job queries for telemetry (empty disables telemetry collection)")
 	flag.StringVar(&cfg.GrafanaURL, "grafana-url", "", "Grafana base URL, used only to build a clickable Explore link in the AIBOM (telemetry itself always queries prometheus-url directly); empty omits the link")
 	flag.StringVar(&cfg.GrafanaDatasourceUID, "grafana-datasource-uid", "", "UID of the Grafana datasource pointing at prometheus-url, needed to build the Explore link above")
@@ -41,7 +43,11 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	mutator := webhook.NewMutator(cfg.DiscoveryImage, cfg.DatasetDetection)
+	if cfg.TrustedWatcherIdentity == "" {
+		log.Printf("WARNING: --trusted-watcher-identity not set; aibom.io/postprocess-for spoofing protection is disabled")
+	}
+
+	mutator := webhook.NewMutator(cfg.DiscoveryImage, cfg.DatasetDetection, cfg.TrustedJobControllerIdentity)
 	mutator.DatasetSidecarImage = cfg.DatasetSidecarImage
 
 	// Built unconditionally (not gated on cfg.EnableWatcher) since the
@@ -57,7 +63,7 @@ func main() {
 		mutator.Clientset = clientset
 	}
 
-	handler := webhook.NewHandler(mutator)
+	handler := webhook.NewHandler(mutator, cfg.TrustedWatcherIdentity)
 
 	mux := http.NewServeMux()
 	mux.Handle("/mutate", handler)

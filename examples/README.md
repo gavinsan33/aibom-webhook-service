@@ -1,3 +1,11 @@
+## Prerequisites
+
+Every example below pulls its model (and the git-clone example also pulls `trl` itself) from Hugging Face Hub. All of them read an optional `HF_TOKEN` env var from an `hf-token-secret` Secret's `HF_TOKEN` key in the target namespace (`optional: true`, so a missing Secret/key is fine — the env var is just omitted rather than failing the pod). Only needed for gated models or to avoid anonymous rate limits; every model/dataset used by these examples is public, so none of them require it to run as-is:
+
+```bash
+oc create secret generic hf-token-secret -n project-gavin-test --from-literal=HF_TOKEN=<your-token>
+```
+
 ## Example: vLLM Inference Benchmark
 
 The `examples/vllm-inference.yaml` file shows a JobSet with a vLLM server and a guidellm benchmark client. The server has `aibom.io/*` annotations and GPU resources; the client depends on the server being ready. When the client finishes, the JobSet kills the server — but the finalizer holds it until the watcher reads the pods' data ConfigMap and creates the postprocess Job.
