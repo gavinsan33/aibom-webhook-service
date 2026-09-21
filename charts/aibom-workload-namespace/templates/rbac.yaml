@@ -44,11 +44,16 @@ subjects:
 # accepted, not solved, by this Role's continued existence.
 #
 # Also, less obviously, this is what lets aibom-postprocess publish the
-# aibom-compiled-signing-public-key ConfigMap (see signing.yaml's NOTE next
-# to aibom-postprocess-compiled-signing-key-reader) -- not something this
-# Role was written for, just a side effect of granting every SA in the
-# namespace ConfigMap access. Narrowing this Role needs an explicit grant
-# added there first, or that publish step starts failing silently.
+# aibom-compiled-signing-public-key ConfigMap (see signing.yaml's NOTE) --
+# not something this Role was written for, just a side effect of granting
+# every SA in the namespace ConfigMap access. That side effect used to also
+# mean any workload pod could overwrite that ConfigMap with a forged key;
+# it's now denied at admission time regardless of this Role's breadth (see
+# internal/webhook/configmapguard.go's ValidateSigningPublicKeyConfigMap).
+# Narrowing this Role still needs an explicit create/patch grant added in
+# signing.yaml first, or aibom-postprocess itself loses the ability to
+# publish -- the admission guard only vets *who* is writing, not whether
+# they're allowed to at all.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
