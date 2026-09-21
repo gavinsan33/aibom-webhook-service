@@ -143,7 +143,7 @@ oc get pod <pod-name> -n my-ai-workloads -o jsonpath='{.spec.containers[0].env[*
 
 To remove a workload namespace's setup: `just uninstall-namespace --namespace=<ns>` (runs `helm uninstall aibom-ns-<ns>` and removes the `aibom.io/enabled` label, after a confirmation prompt).
 
-To remove the deployment: `just undeploy` (runs `helm uninstall aibom-webhook`, after a confirmation prompt). Helm installs CRDs once but never upgrades or removes them automatically — schema changes to `aiboms.aibom.io` need a manual `oc apply -f charts/aibom-webhook/crds/aibom-crd.yaml`, and `helm uninstall` leaves the CRD (and any AIBOM custom resources) in place.
+To remove the deployment: `just undeploy` (runs `helm uninstall aibom-webhook`, after a confirmation prompt). Helm installs CRDs once but never upgrades or removes them automatically, so `just deploy`/`deploy-buildconfig`/`deploy-local` each explicitly `oc apply -f charts/aibom-webhook/crds/aibom-crd.yaml` before the `helm upgrade --install` step (skipped along with everything else cluster-scoped when `--skip-crds` is passed — see that flag's own note below). `helm uninstall` still leaves the CRD (and any AIBOM custom resources) in place regardless.
 
 ### Setting Up Quay Auto-Build
 
@@ -343,7 +343,7 @@ Reading cluster-wide platform metrics from Thanos Querier requires a `cluster-mo
 
 ### AIBOM Storage
 
-Completed AIBOMs are stored as namespaced `AIBOM` custom resources (`aiboms.aibom.io`, `charts/aibom-webhook/crds/aibom-crd.yaml`) — one per completed workload, created in the same namespace the workload ran in. `just deploy` registers the CRD; if your account lacks CRD permissions, use `just deploy --skip-crds` instead and have a cluster-admin apply it once via `oc apply -f charts/aibom-webhook/crds/aibom-crd.yaml`.
+Completed AIBOMs are stored as namespaced `AIBOM` custom resources (`aiboms.aibom.io`, `charts/aibom-webhook/crds/aibom-crd.yaml`) — one per completed workload, created in the same namespace the workload ran in. `just deploy` (and `deploy-buildconfig`/`deploy-local`) re-applies this CRD on every run, not just the first install, so schema changes always take effect; if your account lacks CRD permissions, use `just deploy --skip-crds` instead and have a cluster-admin apply it (and re-apply it after any schema change) via `oc apply -f charts/aibom-webhook/crds/aibom-crd.yaml`.
 
 Because `AIBOM` is a namespaced resource, it inherits ordinary Kubernetes RBAC: a user granted `get`/`list` on `aiboms` in namespace `team-a` cannot see `team-b`'s AIBOMs.
 
