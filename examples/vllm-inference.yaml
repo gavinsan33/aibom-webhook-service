@@ -17,6 +17,7 @@ spec:
           parallelism: 1
           completions: 1
           backoffLimit: 0
+          activeDeadlineSeconds: 600
           template:
             spec:
               restartPolicy: Never

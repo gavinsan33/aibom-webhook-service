@@ -37,9 +37,7 @@ spec:
       aibom.io/experiment-name: vllm-granite-rhoai-benchmark
 
     tolerations:
-      - key: nvidia.com/gpu
-        operator: Exists
-        effect: NoSchedule
+      - operator: Exists
     containers:
       - name: kserve-container
         image: nvcr.io/nvidia/vllm:26.03-py3
@@ -85,6 +83,7 @@ metadata:
   namespace: project-gavin-test
 spec:
   backoffLimit: 0
+  activeDeadlineSeconds: 600
   template:
     spec:
       restartPolicy: Never
@@ -101,6 +100,13 @@ spec:
                 echo "waiting for predictor..."
                 sleep 5
               done
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
       containers:
         - name: client
           image: ghcr.io/vllm-project/guidellm@sha256:2d6924f600294d1a3e9b923d3fdd65eeb8e4c8f8cdbb9f120d259749897e67f8
@@ -116,3 +122,78 @@ spec:
           env:
             - name: HOME
               value: /tmp
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "1"
+              memory: "2Gi"
+---
+# The InferenceService has no built-in lifecycle: it's a Deployment-managed
+# predictor pod, not a Job, so activeDeadlineSeconds (which only applies to
+# Job-owned pods, as used above and in vllm-inference.yaml's server Job)
+# can't cap its runtime. This Job instead deletes the InferenceService
+# itself after a fixed delay, so the GPU-holding predictor doesn't run
+# indefinitely if nothing else tears it down.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aibom-vllm-granite-rhoai-cleanup
+  namespace: project-gavin-test
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: aibom-vllm-granite-rhoai-cleanup
+  namespace: project-gavin-test
+rules:
+  - apiGroups: ["serving.kserve.io"]
+    resources: ["inferenceservices"]
+    resourceNames: ["aibom-vllm-granite-rhoai"]
+    verbs: ["delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: aibom-vllm-granite-rhoai-cleanup
+  namespace: project-gavin-test
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: aibom-vllm-granite-rhoai-cleanup
+subjects:
+  - kind: ServiceAccount
+    name: aibom-vllm-granite-rhoai-cleanup
+    namespace: project-gavin-test
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: aibom-vllm-granite-rhoai-cleanup
+  namespace: project-gavin-test
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 660
+  template:
+    spec:
+      restartPolicy: Never
+      serviceAccountName: aibom-vllm-granite-rhoai-cleanup
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: cleanup
+          image: registry.redhat.io/openshift4/ose-cli:latest
+          command:
+            - sh
+            - -c
+            - |
+              sleep 600
+              oc delete inferenceservice aibom-vllm-granite-rhoai -n project-gavin-test --ignore-not-found
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
