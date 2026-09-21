@@ -1055,3 +1055,82 @@ func TestHandleAdmission_WrongContentType(t *testing.T) {
 		t.Errorf("expected 415, got %d", rr.Code)
 	}
 }
+
+func buildConfigMapAdmissionReview(cm *corev1.ConfigMap, username string) admissionv1.AdmissionReview {
+	cmBytes, _ := json.Marshal(cm)
+	return admissionv1.AdmissionReview{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "admission.k8s.io/v1",
+			Kind:       "AdmissionReview",
+		},
+		Request: &admissionv1.AdmissionRequest{
+			UID:      "test-uid",
+			Resource: configMapGVR,
+			UserInfo: authenticationv1.UserInfo{Username: username},
+			Object:   runtime.RawExtension{Raw: cmBytes},
+		},
+	}
+}
+
+func TestHandleAdmission_DeniesForgedSigningPublicKeyConfigMap(t *testing.T) {
+	h := NewHandler(newTestMutator(), "")
+	review := buildConfigMapAdmissionReview(signingPublicKeyConfigMap("ml-team"), "system:serviceaccount:ml-team:some-training-pod-sa")
+
+	body, _ := json.Marshal(review)
+	req := httptest.NewRequest(http.MethodPost, "/mutate", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+
+	var resp admissionv1.AdmissionReview
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	if resp.Response.Allowed {
+		t.Error("expected Allowed=false -- an untrusted identity must not be able to write the signing-public-key anchor")
+	}
+}
+
+func TestHandleAdmission_AllowsTrustedPostprocessSigningPublicKeyWrite(t *testing.T) {
+	h := NewHandler(newTestMutator(), "")
+	review := buildConfigMapAdmissionReview(signingPublicKeyConfigMap("ml-team"), "system:serviceaccount:ml-team:aibom-postprocess")
+
+	body, _ := json.Marshal(review)
+	req := httptest.NewRequest(http.MethodPost, "/mutate", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+
+	var resp admissionv1.AdmissionReview
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	if !resp.Response.Allowed {
+		t.Errorf("expected Allowed=true for the trusted aibom-postprocess identity, got denied: %v", resp.Response.Result)
+	}
+}
+
+func TestHandleAdmission_AllowsUnrelatedConfigMapFromAnyIdentity(t *testing.T) {
+	h := NewHandler(newTestMutator(), "")
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "train-job-aibom-postprocess-data", Namespace: "ml-team"},
+	}
+	review := buildConfigMapAdmissionReview(cm, "system:serviceaccount:ml-team:some-training-pod-sa")
+
+	body, _ := json.Marshal(review)
+	req := httptest.NewRequest(http.MethodPost, "/mutate", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+
+	var resp admissionv1.AdmissionReview
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	if !resp.Response.Allowed {
+		t.Errorf("expected Allowed=true for an unrelated ConfigMap, got denied: %v", resp.Response.Result)
+	}
+}

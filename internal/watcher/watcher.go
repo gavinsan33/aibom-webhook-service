@@ -52,7 +52,7 @@ const (
 	podFinalizerName = "aibom.io/log-extraction-pod"
 
 	postprocessContainerName      = "aibom-postprocess"
-	postprocessServiceAccountName = "aibom-postprocess"
+	postprocessServiceAccountName = aibomdata.PostprocessServiceAccountName
 
 	// serviceCAConfigMapName is created per workload namespace by the
 	// aibom-workload-namespace chart (service.beta.openshift.io/inject-cabundle

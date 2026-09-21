@@ -34,6 +34,22 @@ webhooks:
         operations: ["CREATE", "UPDATE"]
         resources: ["jobs"]
         scope: Namespaced
+      # ConfigMap create/update is also intercepted so
+      # aibom-compiled-signing-public-key -- the cluster-side anchor
+      # oc-aibom cross-checks a compiled AIBOM's embedded signing key
+      # against, see CLAUDE.md's Compiled AIBOM Signing -- can only ever be
+      # written by the aibom-postprocess ServiceAccount that's actually
+      # supposed to publish it. Without this, rbac.yaml's broad
+      # aibom-workload-data Role (bound to every ServiceAccount in the
+      # namespace) would let any workload pod overwrite it with a forged
+      # key. See ValidateSigningPublicKeyConfigMap's doc comment -- this is
+      # the one rule in this webhook that can actually deny a request,
+      # rather than just patch it.
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["configmaps"]
+        scope: Namespaced
     clientConfig:
       service:
         name: aibom-webhook

@@ -84,6 +84,35 @@ const (
 	// ConfigMap this Role would need to name -- doesn't exist yet at
 	// admission time.
 	WorkloadIdentitySuffix = "-aibom-workload-identity"
+
+	// PostprocessServiceAccountName is the ServiceAccount postprocess.py's
+	// Job always runs as, created per workload namespace by rbac.yaml. A
+	// single constant here (rather than separate string literals in
+	// watcher.go and internal/webhook/configmapguard.go) so the watcher
+	// (which sets it on the Job spec) and the webhook (which trusts it as
+	// the only identity allowed to write CompiledSigningPublicKeyConfigMapName)
+	// can't drift apart.
+	PostprocessServiceAccountName = "aibom-postprocess"
+
+	// CompiledSigningPublicKeyConfigMapName is the cluster-side anchor
+	// postprocess.py publishes the compiled-AIBOM Ed25519 public key to
+	// (see sign_aibom / CLAUDE.md's Compiled AIBOM Signing), so a verifier
+	// (oc-aibom) checking an AIBOM's embedded signaturePublicKey has
+	// something to cross-check it against beyond trusting whatever key a
+	// given document claims for itself. ValidateSigningPublicKeyConfigMap
+	// (internal/webhook/configmapguard.go) denies any create/update of this
+	// exact ConfigMap name from an identity other than
+	// PostprocessServiceAccountName in that same namespace -- without that
+	// check, rbac.yaml's broad aibom-workload-data Role (bound to every
+	// ServiceAccount in the namespace, including the workload's own,
+	// untrusted app container) would let a training pod overwrite this
+	// anchor with an attacker-controlled key, making a forged AIBOM signed
+	// with the matching private key verify as fully trusted.
+	CompiledSigningPublicKeyConfigMapName = "aibom-compiled-signing-public-key"
+
+	// CompiledSigningPublicKeyDataKey is the key within that ConfigMap's
+	// data map holding the base64 raw Ed25519 public key.
+	CompiledSigningPublicKeyDataKey = "ed25519-public-key"
 )
 
 // truncatedTriggerBase truncates triggerName to the narrowest budget any of

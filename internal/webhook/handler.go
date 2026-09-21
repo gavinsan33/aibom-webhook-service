@@ -16,8 +16,9 @@ import (
 )
 
 var (
-	podGVR = metav1.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}
-	jobGVR = metav1.GroupVersionResource{Group: "batch", Version: "v1", Resource: "jobs"}
+	podGVR       = metav1.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}
+	jobGVR       = metav1.GroupVersionResource{Group: "batch", Version: "v1", Resource: "jobs"}
+	configMapGVR = metav1.GroupVersionResource{Group: "", Version: "v1", Resource: "configmaps"}
 )
 
 var (
@@ -95,6 +96,8 @@ func (h *Handler) handleAdmission(review *admissionv1.AdmissionReview) *admissio
 		return h.handlePodAdmission(req)
 	case jobGVR:
 		return h.handleJobAdmission(req)
+	case configMapGVR:
+		return h.handleConfigMapAdmission(req)
 	default:
 		return allowResponse("not a supported resource")
 	}
@@ -172,9 +175,41 @@ func (h *Handler) handleJobAdmission(req *admissionv1.AdmissionRequest) *admissi
 	}
 }
 
+// handleConfigMapAdmission runs ValidateSigningPublicKeyConfigMap against
+// every ConfigMap create/update in an opted-in namespace -- see that
+// function's doc comment for why rbac.yaml's existing RBAC can't close this
+// on its own, and why this is the one admission path in this webhook that
+// actually denies a request rather than just patching it. CREATE and UPDATE
+// both need covering: an UPDATE (e.g. `oc patch`/`kubectl apply`) is exactly
+// how the attack this defends against would overwrite an already-published
+// anchor with a forged key, not just a first-write race.
+func (h *Handler) handleConfigMapAdmission(req *admissionv1.AdmissionRequest) *admissionv1.AdmissionResponse {
+	var cm corev1.ConfigMap
+	if err := json.Unmarshal(req.Object.Raw, &cm); err != nil {
+		log.Printf("failed to unmarshal configmap: %v", err)
+		return allowResponse("failed to unmarshal configmap")
+	}
+
+	if reason := ValidateSigningPublicKeyConfigMap(&cm, req.UserInfo.Username); reason != "" {
+		log.Printf("denying configmap write %s/%s: %s (requester %q)", cm.Namespace, cm.Name, reason, req.UserInfo.Username)
+		return denyResponse(reason)
+	}
+
+	return allowResponse("no validation needed")
+}
+
 func allowResponse(reason string) *admissionv1.AdmissionResponse {
 	return &admissionv1.AdmissionResponse{
 		Allowed: true,
+		Result: &metav1.Status{
+			Message: reason,
+		},
+	}
+}
+
+func denyResponse(reason string) *admissionv1.AdmissionResponse {
+	return &admissionv1.AdmissionResponse{
+		Allowed: false,
 		Result: &metav1.Status{
 			Message: reason,
 		},
