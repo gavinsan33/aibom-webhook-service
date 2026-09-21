@@ -1,0 +1,32 @@
+name: Test
+
+# Runs the same `just test all` a contributor would run locally (internal/...
+# Go tests, then the postprocess/aibom-scripts Python suite) on every push and
+# PR, so a regression like a stale test asserting a since-removed AIBOM field
+# gets caught here instead of only being noticed by whoever happens to run
+# the suite locally next.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # postprocess/Dockerfile's runtime image, not whatever Python happens to
+      # be preinstalled on the runner -- keeps CI testing against the same
+      # interpreter version postprocess.py actually ships on.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: extractions/setup-just@v2
+
+      - run: just test all
