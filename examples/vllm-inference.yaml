@@ -67,13 +67,15 @@ spec:
           parallelism: 1
           completions: 1
           backoffLimit: 0
+          activeDeadlineSeconds: 600
           template:
             spec:
               restartPolicy: Never
+              serviceAccountName: aibom-vllm-benchmark-client
               tolerations:
                 - operator: Exists
-              containers:
-                - name: client
+              initContainers:
+                - name: benchmark
                   image: ghcr.io/vllm-project/guidellm@sha256:e3ad2371bfa8e42f2c3d1251b62d0d9c9706c27ae2143c8c048eb5fc6aebb558
                   imagePullPolicy: Always
                   command:
@@ -87,6 +89,35 @@ spec:
                   env:
                     - name: HOME
                       value: /tmp
+              containers:
+                - name: delete-server-job
+                  image: docker.io/curlimages/curl:8.11.0
+                  command:
+                    - sh
+                    - -c
+                    - |
+                      TOKEN=/var/run/secrets/kubernetes.io/serviceaccount/token
+                      CACERT=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+                      NS=project-gavin-test
+                      curl -sf -X DELETE --cacert "$CACERT" \
+                        -H "Authorization: Bearer $(cat $TOKEN)" \
+                        "https://kubernetes.default.svc/apis/batch/v1/namespaces/$NS/jobs/aibom-vllm-benchmark-server-0?propagationPolicy=Background"
+                      curl -sf -X DELETE --cacert "$CACERT" \
+                        -H "Authorization: Bearer $(cat $TOKEN)" \
+                        "https://kubernetes.default.svc/apis/rbac.authorization.k8s.io/v1/namespaces/$NS/rolebindings/aibom-vllm-benchmark-client"
+                      curl -sf -X DELETE --cacert "$CACERT" \
+                        -H "Authorization: Bearer $(cat $TOKEN)" \
+                        "https://kubernetes.default.svc/apis/rbac.authorization.k8s.io/v1/namespaces/$NS/roles/aibom-vllm-benchmark-client"
+                      curl -sf -X DELETE --cacert "$CACERT" \
+                        -H "Authorization: Bearer $(cat $TOKEN)" \
+                        "https://kubernetes.default.svc/api/v1/namespaces/$NS/serviceaccounts/aibom-vllm-benchmark-client"
+                  resources:
+                    requests:
+                      cpu: "100m"
+                      memory: "128Mi"
+                    limits:
+                      cpu: "200m"
+                      memory: "256Mi"
       dependsOn:
         - name: server
           status: Ready
@@ -94,3 +125,42 @@ spec:
     operator: All
     targetReplicatedJobs:
       - client
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aibom-vllm-benchmark-client
+  namespace: project-gavin-test
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: aibom-vllm-benchmark-client
+  namespace: project-gavin-test
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    resourceNames: ["aibom-vllm-benchmark-server-0"]
+    verbs: ["delete"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    resourceNames: ["aibom-vllm-benchmark-client"]
+    verbs: ["delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    resourceNames: ["aibom-vllm-benchmark-client"]
+    verbs: ["delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: aibom-vllm-benchmark-client
+  namespace: project-gavin-test
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: aibom-vllm-benchmark-client
+subjects:
+  - kind: ServiceAccount
+    name: aibom-vllm-benchmark-client
+    namespace: project-gavin-test
