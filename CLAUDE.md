@@ -124,6 +124,17 @@ The `--accelerate_config` file is read from inside the training container itself
 
 In-script sharding with no command/accelerate-config signal at all — e.g. `device_map="auto"` passed directly to `from_pretrained` in Python, common in raw `transformers.Trainer`/QLoRA scripts with no CLI launcher — is covered by a lowest-priority fallback: the `transformers.PreTrainedModel.from_pretrained` runtime hook (`runtime_detector.py`) captures the `device_map` kwarg, and `postprocess.py` maps a multi-device value (anything other than a single `cpu`/`cuda`/`cuda:N` device) to `model_parallel` only if none of the above command/accelerate-config signals produced a strategy first.
 
+## Experiment Intent Detection
+
+`experiment_intent` (`training`/`sft`/`inference`/`unknown`) gates which top-level sections `compile_aibom` populates at all (`training`, `fine_tuning`, `inference`) — so unlike most other declared/auto-detected fields, getting this wrong doesn't just mislabel one value, it silently drops entire sections. It's filled in from two sources, in order of precedence, mirroring `dataset.declared`/`source_code`'s annotation-first-with-auto-detected-fallback pattern rather than defaulting straight to `"unknown"` whenever nobody set the annotation:
+
+1. **Annotation** — `aibom.io/experiment-intent`, if set.
+2. **Inferred from model detection** — `detect_model_from_containers`'s CLI-arg detection (see Model Auto-Detection) already tells us this much for free: a vLLM invocation (`serving_engine` resolved) implies `"inference"`; a trl invocation (`training_framework` resolved) implies `"sft"` if `--use_peft` also resolved an `adaptation_method`, else plain `"training"`.
+
+Whichever source wins is recorded in `experiment_intent_declared_via` (`"annotation"` or `"inferred_from_model_detection"`, `null` if neither resolved anything and it fell through to `"unknown"`), mirroring `dataset.declared.declared_via`.
+
+This only covers the two tools `detect_model_from_containers` already recognizes (vLLM, trl) — a workload using an undetected tool, or building config directly in Python via `runtime_detector.py`'s runtime hooks with no CLI signal at all, still falls through to `"unknown"` without the annotation. It's also coarser than the annotation: nothing here distinguishes `trl dpo` from `trl sft`, or infers `"unknown"` vs. a genuinely ambiguous mixed workload — it's a best-effort default so common cases (a plain `vllm serve ...` or `trl sft ...` command with no annotation) don't lose their `inference`/`training`/`fine_tuning` sections, not a replacement for setting the annotation explicitly when precision matters.
+
 ## Dataset Declaration and Reconciliation
 
 `dataset.declared` is filled in from three sources, in order of precedence:
