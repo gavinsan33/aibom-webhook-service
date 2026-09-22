@@ -357,9 +357,10 @@ func TestOnJobEvent_CreatesPostprocessJob(t *testing.T) {
 	}
 
 	// Verify volume mounts: the data ConfigMap, plus the optional service-ca bundle
-	// used to trust in-cluster Prometheus/Thanos Querier's TLS cert.
-	if len(ppJob.Spec.Template.Spec.Volumes) != 2 {
-		t.Fatalf("expected 2 volumes, got %d", len(ppJob.Spec.Template.Spec.Volumes))
+	// used to trust in-cluster Prometheus/Thanos Querier's TLS cert, plus the
+	// optional compiled-AIBOM Ed25519 signing key (#27).
+	if len(ppJob.Spec.Template.Spec.Volumes) != 3 {
+		t.Fatalf("expected 3 volumes, got %d", len(ppJob.Spec.Template.Spec.Volumes))
 	}
 	if ppJob.Spec.Template.Spec.Volumes[0].ConfigMap.Name != "train-job-aibom-postprocess-data" {
 		t.Errorf("volume configmap name = %q, want %q", ppJob.Spec.Template.Spec.Volumes[0].ConfigMap.Name, "train-job-aibom-postprocess-data")
@@ -370,6 +371,13 @@ func TestOnJobEvent_CreatesPostprocessJob(t *testing.T) {
 	}
 	if serviceCAVolume.ConfigMap.Optional == nil || !*serviceCAVolume.ConfigMap.Optional {
 		t.Error("service-ca volume should be optional")
+	}
+	signingVolume := ppJob.Spec.Template.Spec.Volumes[2]
+	if signingVolume.Secret.SecretName != aibomdata.CompiledSigningKeySecretName {
+		t.Errorf("signing key volume secret name = %q, want %q", signingVolume.Secret.SecretName, aibomdata.CompiledSigningKeySecretName)
+	}
+	if signingVolume.Secret.Optional == nil || !*signingVolume.Secret.Optional {
+		t.Error("compiled signing key volume should be optional")
 	}
 
 	// Verify original job annotated
