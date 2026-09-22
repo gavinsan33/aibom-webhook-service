@@ -130,6 +130,70 @@ TELEMETRY_QUERIES = {
     },
 }
 
+# vLLM's own serving-level metrics (TTFT, ITL, queue depth, KV-cache usage,
+# throughput) -- see CLAUDE.md's Inference Performance Telemetry section.
+# Collected separately from TELEMETRY_QUERIES above and only for pods where
+# detected_model.serving_engine == "vllm" (main()); these are entirely
+# distinct series vLLM exposes on its own /metrics endpoint (confirmed
+# against a live vllm 0.17 server), not DCGM/cAdvisor, and land in
+# aibom["inference"]["performance"] rather than resource_utilization -- a
+# serving-level SLO ("were requests queueing, was the KV cache thrashing")
+# is a different question than a hardware-utilization one.
+#
+# vLLM's own metrics carry no pod/namespace label at all (just `engine` and
+# `model_name`) -- the `pod="{pod_name}"` filter below only works because
+# the aibom-vllm-metrics PodMonitor (charts/aibom-workload-namespace) scrapes
+# it, and Prometheus's own target-discovery relabeling is what attaches the
+# `pod` label, the same mechanism the cAdvisor container_* queries above rely
+# on, not anything vLLM itself provides.
+#
+# TTFT/ITL are histograms; sum-rate-over-count-rate gives the average latency
+# per time window, reusing compute_metric_stats' min/max/avg/p95/segments
+# reduction exactly like every gauge metric above. That "p95" is honestly a
+# p95 of the *windowed average* latency, not a true per-request percentile
+# (which would need histogram_quantile() over the bucket series) -- a known
+# simplification to keep this consistent with the rest of TELEMETRY_QUERIES
+# rather than a second, differently-shaped stats structure for just these
+# two metrics. A workload with zero completed requests in a given 5m window
+# divides 0/0 (NaN); parse_range_response drops NaN samples rather than
+# propagating them into min/max/avg.
+VLLM_TELEMETRY_QUERIES = {
+    "time_to_first_token_seconds": {
+        "query": (
+            'rate(vllm:time_to_first_token_seconds_sum{pod="{pod_name}"}[5m])'
+            ' / rate(vllm:time_to_first_token_seconds_count{pod="{pod_name}"}[5m])'
+        ),
+        "unit": "seconds",
+    },
+    "inter_token_latency_seconds": {
+        "query": (
+            'rate(vllm:inter_token_latency_seconds_sum{pod="{pod_name}"}[5m])'
+            ' / rate(vllm:inter_token_latency_seconds_count{pod="{pod_name}"}[5m])'
+        ),
+        "unit": "seconds",
+    },
+    "num_requests_running": {
+        "query": 'avg_over_time(vllm:num_requests_running{pod="{pod_name}"}[5m])',
+        "unit": "requests",
+    },
+    "num_requests_waiting": {
+        "query": 'avg_over_time(vllm:num_requests_waiting{pod="{pod_name}"}[5m])',
+        "unit": "requests",
+    },
+    "kv_cache_usage": {
+        "query": 'avg_over_time(vllm:kv_cache_usage_perc{pod="{pod_name}"}[5m])',
+        "unit": "percent",
+    },
+    "prompt_throughput": {
+        "query": 'rate(vllm:prompt_tokens_total{pod="{pod_name}"}[5m])',
+        "unit": "tokens_per_sec",
+    },
+    "generation_throughput": {
+        "query": 'rate(vllm:generation_tokens_total{pod="{pod_name}"}[5m])',
+        "unit": "tokens_per_sec",
+    },
+}
+
 SCRAPE_INTERVAL_MS = 5 * 60 * 1000
 
 # ---------------------------------------------------------------------------
@@ -922,10 +986,20 @@ def parse_range_response(response):
     results = []
     for series in response.get("data", {}).get("result", []):
         for ts, val in series.get("values", []):
+            fval = float(val)
+            # A ratio-of-rates query (e.g. VLLM_TELEMETRY_QUERIES' TTFT/ITL
+            # sum-rate/count-rate) divides 0/0 into NaN whenever a window had
+            # zero completed requests. Drop it here rather than in
+            # compute_metric_stats, since a NaN mixed into min()/max()/sum()
+            # silently corrupts the whole reduction depending on comparison
+            # order -- a dropped sample is just a data point this window
+            # didn't have, same as if the window had no scrape at all.
+            if math.isnan(fval):
+                continue
             results.append(
                 {
                     "timestamp": datetime.fromtimestamp(ts).isoformat(),
-                    "value": float(val),
+                    "value": fval,
                 }
             )
     return results
@@ -961,6 +1035,43 @@ def compute_metric_stats(data_points):
             "last_third": _chunk_avg(values[2 * third :]),
         },
     }
+
+
+def _collect_metrics_with_retry(query_defs, metrics, stats_start_ms, end_ms):
+    """Runs one pod's worth of range queries with the shared retry-on-empty
+    logic (see CLAUDE.md's Grafana Telemetry Retries) -- only metrics still
+    missing on a given attempt are re-queried, not the whole batch. query_defs
+    is the {name: {"query": ..., "unit": ...}} dict (e.g. TELEMETRY_QUERIES)
+    that `metrics` (name -> pod-substituted PromQL string) was built from."""
+    collected = {}
+    for attempt in range(1, TELEMETRY_RETRY_ATTEMPTS + 1):
+        pending = {name: q for name, q in metrics.items() if name not in collected}
+        if not pending:
+            break
+        if attempt > 1:
+            print(
+                f"      Retrying {len(pending)} metric"
+                f"{'s' if len(pending) != 1 else ''} after possible ingestion "
+                f"delay (attempt {attempt}/{TELEMETRY_RETRY_ATTEMPTS}, "
+                f"waited {TELEMETRY_RETRY_DELAY_S}s)..."
+            )
+        for metric_name, promql in pending.items():
+            print(f"    Querying {metric_name}...")
+            response = query_prometheus_range(promql, stats_start_ms, end_ms)
+            data_points = parse_range_response(response) if response else []
+            stats = compute_metric_stats(data_points)
+            if stats:
+                collected[metric_name] = {
+                    "data_point_count": len(data_points),
+                    "unit": query_defs[metric_name]["unit"],
+                    **stats,
+                }
+                print(f"      {len(data_points)} data points, avg={stats['avg']}")
+            else:
+                print(f"      no data (attempt {attempt}/{TELEMETRY_RETRY_ATTEMPTS})")
+        if len(collected) < len(metrics) and attempt < TELEMETRY_RETRY_ATTEMPTS:
+            time.sleep(TELEMETRY_RETRY_DELAY_S)
+    return collected
 
 
 def collect_telemetry(discoveries):
@@ -1026,35 +1137,76 @@ def collect_telemetry(discoveries):
                 GRAFANA_URL, GRAFANA_DATASOURCE_UID, list(metrics.items()), start_ms, end_ms
             )
 
-        collected = {}
-        for attempt in range(1, TELEMETRY_RETRY_ATTEMPTS + 1):
-            pending = {name: q for name, q in metrics.items() if name not in collected}
-            if not pending:
-                break
-            if attempt > 1:
-                print(
-                    f"      Retrying {len(pending)} metric"
-                    f"{'s' if len(pending) != 1 else ''} after possible ingestion "
-                    f"delay (attempt {attempt}/{TELEMETRY_RETRY_ATTEMPTS}, "
-                    f"waited {TELEMETRY_RETRY_DELAY_S}s)..."
-                )
-            for metric_name, promql in pending.items():
-                print(f"    Querying {metric_name}...")
-                response = query_prometheus_range(promql, stats_start_ms, end_ms)
-                data_points = parse_range_response(response) if response else []
-                stats = compute_metric_stats(data_points)
-                if stats:
-                    collected[metric_name] = {
-                        "data_point_count": len(data_points),
-                        "unit": TELEMETRY_QUERIES[metric_name]["unit"],
-                        **stats,
-                    }
-                    print(f"      {len(data_points)} data points, avg={stats['avg']}")
-                else:
-                    print(f"      no data (attempt {attempt}/{TELEMETRY_RETRY_ATTEMPTS})")
-            if len(collected) < len(metrics) and attempt < TELEMETRY_RETRY_ATTEMPTS:
-                time.sleep(TELEMETRY_RETRY_DELAY_S)
-        pod_telemetry["metrics"] = collected
+        pod_telemetry["metrics"] = _collect_metrics_with_retry(
+            TELEMETRY_QUERIES, metrics, stats_start_ms, end_ms
+        )
+
+        telemetry_summary["pods"].append(pod_telemetry)
+
+    print(f"  Pods processed: {len(telemetry_summary['pods'])}")
+    return telemetry_summary
+
+
+def collect_vllm_telemetry(discoveries):
+    """Collects vLLM's own serving-level metrics (see VLLM_TELEMETRY_QUERIES)
+    for each pod, mirroring collect_telemetry's per-pod loop and retry logic
+    but querying a disjoint set of series. Callers should only invoke this
+    when detected_model.serving_engine == "vllm" -- there's no cheap way to
+    tell from discovery.json alone whether a given pod is actually running
+    vLLM, and querying vllm: metrics for a pod that isn't just costs a few
+    empty Prometheus queries, so the guard belongs at the caller (main()),
+    not here."""
+    print(f"  Processing {len(discoveries)} pod(s)")
+
+    telemetry_summary = {
+        "collected_at": datetime.utcnow().isoformat() + "Z",
+        "prometheus_url": PROMETHEUS_URL,
+        "pods": [],
+    }
+
+    for discovery in discoveries:
+        pod_metadata = discovery.get("pod_metadata", {})
+        pod_uid = pod_metadata.get("uid")
+        pod_name = pod_metadata.get("name")
+        start_time = pod_metadata.get("start_time")
+
+        if not pod_uid or pod_uid == "unknown":
+            print(f"  WARNING: No pod UID, skipping", file=sys.stderr)
+            continue
+
+        print(f"  Pod: {pod_name} ({pod_uid})")
+
+        try:
+            start_dt = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
+        except (ValueError, AttributeError):
+            print(f"  WARNING: Invalid start_time '{start_time}', skipping", file=sys.stderr)
+            continue
+
+        end_dt = datetime.utcnow()
+        start_ms = int(start_dt.timestamp() * 1000)
+        end_ms = int(end_dt.timestamp() * 1000)
+
+        metrics = {
+            name: info["query"].replace("{pod_name}", pod_name)
+            for name, info in VLLM_TELEMETRY_QUERIES.items()
+        }
+
+        total_ms = end_ms - start_ms
+        exclude_ms = min(SCRAPE_INTERVAL_MS, total_ms // 2)
+        stats_start_ms = start_ms + exclude_ms
+        includes_cold_start = exclude_ms < SCRAPE_INTERVAL_MS
+
+        pod_telemetry = {
+            "pod_uid": pod_uid,
+            "pod_name": pod_name,
+            "start_time": start_time,
+            "metrics": {},
+            "includes_cold_start": includes_cold_start,
+        }
+
+        pod_telemetry["metrics"] = _collect_metrics_with_retry(
+            VLLM_TELEMETRY_QUERIES, metrics, stats_start_ms, end_ms
+        )
 
         telemetry_summary["pods"].append(pod_telemetry)
 
@@ -1141,9 +1293,42 @@ def compute_metric_limit(metric_name, pod_names, containers, scale):
     return round(limit * scale, 2)
 
 
+def aggregate_pod_metrics(pods, unit_map):
+    """Reduces a collect_telemetry()/collect_vllm_telemetry()-shaped
+    telemetry["pods"] list to one {metric_name: {...}} dict, cross-pod (e.g.
+    a JobSet's sibling pods). avg/p95/segments are averaged across pods (an
+    approximation -- a true cross-pod percentile would need every pod's raw
+    series merged first); min/max take the true extreme across all of them,
+    since a single pod's outlier is still real. See CLAUDE.md's Segmented
+    Performance Stats section. Shared by resource_utilization (which adds a
+    k8s resource `limit` on top, a concept these metrics alone don't have)
+    and inference.performance."""
+    metric_details = {}
+    for metric_name, (scale, display_unit) in unit_map.items():
+        scale = scale or 1
+        per_pod_stats = [p["metrics"][metric_name] for p in pods if p.get("metrics", {}).get(metric_name)]
+        if not per_pod_stats:
+            continue
+
+        segments = {}
+        for seg in ("first_third", "middle_third", "last_third"):
+            seg_values = [s["segments"][seg] for s in per_pod_stats if s["segments"][seg] is not None]
+            segments[seg] = round(_chunk_avg(seg_values) * scale, 2) if seg_values else None
+        metric_details[metric_name] = {
+            "unit": display_unit,
+            "min": round(min(s["min"] for s in per_pod_stats) * scale, 2),
+            "max": round(max(s["max"] for s in per_pod_stats) * scale, 2),
+            "avg": round(_chunk_avg([s["avg"] for s in per_pod_stats]) * scale, 2),
+            "p95": round(_chunk_avg([s["p95"] for s in per_pod_stats]) * scale, 2),
+            "segments": segments,
+        }
+    return metric_details
+
+
 def compile_aibom(
     discoveries, detected_datasets, runtime_info, annotations, telemetry,
     detected_model=None, cli_dataset=None, detected_provenance=None, containers=None,
+    vllm_telemetry=None,
 ):
     print(f"  Discovery files: {len(discoveries)}")
     print(f"  Auto-detected datasets: {len(detected_datasets)}")
@@ -1405,6 +1590,32 @@ def compile_aibom(
             "max_tokens": _try_int(annotations.get("max-tokens")),
         }
 
+        # vLLM serving-level SLOs (TTFT, ITL, queue depth, KV-cache usage,
+        # throughput) -- a distinct top-level section from
+        # resource_utilization since these describe the application's own
+        # behavior, not the hardware underneath it (see CLAUDE.md's
+        # Inference Performance Telemetry section). Only populated for vLLM
+        # today (the only serving engine VLLM_TELEMETRY_QUERIES covers, and
+        # the only one detect_model_from_containers recognizes at all).
+        if vllm_telemetry and vllm_telemetry.get("pods"):
+            vllm_unit_map = {
+                "time_to_first_token_seconds": (None, "seconds"),
+                "inter_token_latency_seconds": (None, "seconds"),
+                "num_requests_running": (None, "requests"),
+                "num_requests_waiting": (None, "requests"),
+                "kv_cache_usage": (None, "percent"),
+                "prompt_throughput": (None, "tokens_per_sec"),
+                "generation_throughput": (None, "tokens_per_sec"),
+            }
+            performance = {
+                "collected_at": vllm_telemetry.get("collected_at"),
+                "metrics": aggregate_pod_metrics(vllm_telemetry["pods"], vllm_unit_map),
+            }
+            performance["summary_includes_cold_start"] = any(
+                p.get("includes_cold_start") for p in vllm_telemetry["pods"]
+            )
+            aibom["inference"]["performance"] = performance
+
     # Environment from first discovery
     if discoveries:
         first = discoveries[0]
@@ -1459,35 +1670,14 @@ def compile_aibom(
         }
 
         utilization = {"collected_at": telemetry.get("collected_at")}
-        metric_details = {}
-        for metric_name, (scale, display_unit) in unit_map.items():
-            scale = scale or 1
-            per_pod_entries = [
-                (p["pod_name"], p["metrics"][metric_name]) for p in telemetry["pods"] if p.get("metrics", {}).get(metric_name)
-            ]
-            if not per_pod_entries:
+        metric_details = aggregate_pod_metrics(telemetry["pods"], unit_map)
+        for metric_name, (scale, _display_unit) in unit_map.items():
+            if metric_name not in metric_details:
                 continue
-            per_pod_stats = [stats for _, stats in per_pod_entries]
-
-            # avg/p95/segments are averaged across a JobSet's sibling pods (an
-            # approximation -- true cross-pod percentiles would need the raw
-            # series from every pod); min/max take the true extreme across all
-            # of them, since a single pod's outlier is still real.
-            segments = {}
-            for seg in ("first_third", "middle_third", "last_third"):
-                seg_values = [s["segments"][seg] for s in per_pod_stats if s["segments"][seg] is not None]
-                segments[seg] = round(_chunk_avg(seg_values) * scale, 2) if seg_values else None
-            metric_details[metric_name] = {
-                "unit": display_unit,
-                "min": round(min(s["min"] for s in per_pod_stats) * scale, 2),
-                "max": round(max(s["max"] for s in per_pod_stats) * scale, 2),
-                "avg": round(_chunk_avg([s["avg"] for s in per_pod_stats]) * scale, 2),
-                "p95": round(_chunk_avg([s["p95"] for s in per_pod_stats]) * scale, 2),
-                "segments": segments,
-            }
-            limit = compute_metric_limit(
-                metric_name, [pod_name for pod_name, _ in per_pod_entries], containers or [], scale
-            )
+            pod_names = [
+                p["pod_name"] for p in telemetry["pods"] if p.get("metrics", {}).get(metric_name)
+            ]
+            limit = compute_metric_limit(metric_name, pod_names, containers or [], scale or 1)
             if limit is not None:
                 metric_details[metric_name]["limit"] = limit
 
@@ -1627,12 +1817,19 @@ def main():
 
     # Telemetry
     telemetry = None
+    vllm_telemetry = None
     if PROMETHEUS_URL:
         print("--- Phase 1: Telemetry Collection ---")
         try:
             telemetry = collect_telemetry(discoveries)
         except Exception as e:
             print(f"WARNING: Telemetry collection failed: {e}", file=sys.stderr)
+        if (detected_model or {}).get("serving_engine") == "vllm":
+            print("--- Phase 1b: vLLM Telemetry Collection ---")
+            try:
+                vllm_telemetry = collect_vllm_telemetry(discoveries)
+            except Exception as e:
+                print(f"WARNING: vLLM telemetry collection failed: {e}", file=sys.stderr)
         print()
     else:
         print("--- Phase 1: Skipped (no PROMETHEUS_URL) ---")
@@ -1645,6 +1842,7 @@ def main():
             discoveries, detected_datasets, runtime_info, annotations, telemetry,
             detected_model=detected_model, cli_dataset=cli_dataset,
             detected_provenance=detected_provenance, containers=containers,
+            vllm_telemetry=vllm_telemetry,
         )
     except Exception as e:
         print(f"ERROR: AIBOM compilation failed: {e}", file=sys.stderr)
