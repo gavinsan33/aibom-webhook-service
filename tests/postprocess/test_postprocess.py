@@ -555,6 +555,68 @@ def test_collect_telemetry_debug_flag_includes_pod_with_no_gpu(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+def test_compile_aibom_annotation_intent_overrides_detected_model():
+    detected_model = {"serving_engine": "vllm"}
+    annotations = {"experiment-intent": "training"}
+
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info={}, annotations=annotations,
+        telemetry=None, detected_model=detected_model, cli_dataset=None,
+    )
+
+    assert aibom["experiment_intent"] == "training"
+    assert aibom["experiment_intent_declared_via"] == "annotation"
+
+
+def test_compile_aibom_infers_inference_intent_from_vllm_detection():
+    detected_model = {"serving_engine": "vllm"}
+
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info={}, annotations={},
+        telemetry=None, detected_model=detected_model, cli_dataset=None,
+    )
+
+    assert aibom["experiment_intent"] == "inference"
+    assert aibom["experiment_intent_declared_via"] == "inferred_from_model_detection"
+    assert aibom["inference"]["serving_engine"] == "vllm"
+
+
+def test_compile_aibom_infers_sft_intent_from_trl_peft_detection():
+    detected_model = {"training_framework": "trl", "adaptation_method": "lora"}
+
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info={}, annotations={},
+        telemetry=None, detected_model=detected_model, cli_dataset=None,
+    )
+
+    assert aibom["experiment_intent"] == "sft"
+    assert aibom["experiment_intent_declared_via"] == "inferred_from_model_detection"
+    assert aibom["fine_tuning"]["adaptation_method"] == "lora"
+
+
+def test_compile_aibom_infers_training_intent_from_trl_without_peft():
+    detected_model = {"training_framework": "trl"}
+
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info={}, annotations={},
+        telemetry=None, detected_model=detected_model, cli_dataset=None,
+    )
+
+    assert aibom["experiment_intent"] == "training"
+    assert aibom["experiment_intent_declared_via"] == "inferred_from_model_detection"
+    assert "fine_tuning" not in aibom
+
+
+def test_compile_aibom_intent_unknown_when_nothing_resolves():
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info={}, annotations={},
+        telemetry=None, detected_model=None, cli_dataset=None,
+    )
+
+    assert aibom["experiment_intent"] == "unknown"
+    assert aibom["experiment_intent_declared_via"] is None
+
+
 def test_compile_aibom_merges_cli_detected_model_and_dataset():
     detected_model = {
         "serving_engine": "vllm",

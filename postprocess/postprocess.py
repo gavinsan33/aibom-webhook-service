@@ -1164,7 +1164,28 @@ def compile_aibom(
     aibom = {}
 
     # Experiment metadata from annotations
-    aibom["experiment_intent"] = annotations.get("experiment-intent", "unknown")
+    #
+    # An explicit annotation always wins; otherwise fall back to what
+    # detect_model_from_containers already inferred from the container's own
+    # CLI (a vLLM invocation implies inference; a trl invocation implies
+    # training, or sft specifically if --use_peft resolved an
+    # adaptation_method) -- mirrors dataset.declared/source_code's
+    # annotation-first-with-auto-detected-fallback pattern instead of only
+    # ever defaulting straight to "unknown" when nobody set the annotation.
+    dm = detected_model or {}
+    declared_intent = annotations.get("experiment-intent")
+    if declared_intent:
+        aibom["experiment_intent"] = declared_intent
+        aibom["experiment_intent_declared_via"] = "annotation"
+    elif dm.get("serving_engine"):
+        aibom["experiment_intent"] = "inference"
+        aibom["experiment_intent_declared_via"] = "inferred_from_model_detection"
+    elif dm.get("training_framework"):
+        aibom["experiment_intent"] = "sft" if dm.get("adaptation_method") else "training"
+        aibom["experiment_intent_declared_via"] = "inferred_from_model_detection"
+    else:
+        aibom["experiment_intent"] = "unknown"
+        aibom["experiment_intent_declared_via"] = None
     aibom["experiment_name"] = annotations.get("experiment-name") or JOB_NAME or None
     aibom["experiment_description"] = annotations.get("experiment-description")
 
@@ -1256,7 +1277,6 @@ def compile_aibom(
     # Model info: auto-detected (container commands, then runtime hooks for
     # scripts that build TrainingArguments/from_pretrained directly in
     # Python with no corresponding CLI flags), then annotations override
-    dm = detected_model or {}
     model_name = annotations.get("model-name") or dm.get("model_name") or runtime_info.get("model_name")
     quantization = (
         annotations.get("quantization")
