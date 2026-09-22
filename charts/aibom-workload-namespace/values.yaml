@@ -14,6 +14,21 @@ aibomSystemNamespace: project-aibom
 monitoringAccess:
   enabled: true
 
+# Adds a PodMonitor that scrapes vLLM's own /metrics endpoint (TTFT, ITL,
+# queue depth, KV-cache usage) on port 8000 for every aibom.io/instrumented
+# pod in this namespace, so postprocess.py's inference.performance queries
+# (see CLAUDE.md) have data to read. On by default, mirroring
+# monitoringAccess.enabled -- but unlike that flag, this one requires the
+# Prometheus Operator CRDs (monitoring.coreos.com/v1 PodMonitor) to actually
+# exist on the cluster, or the whole chart install fails outright (an
+# unrecognized CRD, not a soft permission gap like monitoringAccess' missing
+# ClusterRoleBinding). Set to false (`just setup-namespace --skip-vllm-metrics`)
+# on a cluster without the Prometheus Operator installed. Also does nothing
+# useful without monitoringAccess.enabled also being true -- that's what lets
+# postprocess.py actually read the scraped data back out.
+vllmMetrics:
+  enabled: true
+
 # Only needed for a local install from a checked-out repo (`just setup-namespace`
 # sets these via --set-file, reading straight from scripts/aibom-scripts/*.py, so
 # script edits take effect on the very next install). Leave unset for an OCI

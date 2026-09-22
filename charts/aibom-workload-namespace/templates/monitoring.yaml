@@ -46,3 +46,44 @@ subjects:
     name: aibom-postprocess
     namespace: {{ .Release.Namespace }}
 {{- end }}
+{{- if .Values.vllmMetrics.enabled }}
+---
+# Tells OpenShift's user-workload-monitoring Prometheus to scrape vLLM's own
+# /metrics endpoint (TTFT, ITL, queue depth, KV-cache usage -- see CLAUDE.md's
+# Inference Performance Telemetry section) on every instrumented pod in this
+# namespace, so postprocess.py's vLLM queries have something to read from
+# Thanos Querier in the first place. Without this, vLLM's metrics are only
+# ever visible in-process on the pod's own :8000/metrics -- nothing scrapes
+# them into Prometheus at all, the same way DCGM_FI_DEV_GPU_UTIL wouldn't
+# exist in Prometheus without nvidia-gpu-operator's own ServiceMonitor.
+#
+# A PodMonitor, not a ServiceMonitor: KServe's predictor Service only
+# exposes port 80, not the vLLM container's own serving port, so scraping
+# via the Service wouldn't reach it. A PodMonitor scrapes pod IPs directly.
+#
+# Selector is the same aibom.io/instrumented=true label the webhook already
+# stamps on every qualifying pod (mutator.go) -- not a vLLM-specific label,
+# since telling "is this actually vLLM" apart from any other instrumented
+# workload at admission time would require duplicating postprocess.py's own
+# CLI-detection logic in the Go mutator. Port 8000 is vLLM's own upstream
+# default (`vllm serve`'s --port), not just this project's example
+# convention, so scrape targets that aren't vLLM either don't listen on that
+# port at all (scrape just fails, harmless) or coincidentally do and expose
+# unrelated Prometheus-format metrics -- low-probability, and even then
+# postprocess.py's vllm: metrics never match anything else. A workload that
+# runs vLLM on a non-default --port isn't scraped; there's no per-workload
+# override for this yet (see #86).
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: aibom-vllm-metrics
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    matchLabels:
+      aibom.io/instrumented: "true"
+  podMetricsEndpoints:
+    - targetPort: 8000
+      path: /metrics
+      interval: 30s
+{{- end }}
