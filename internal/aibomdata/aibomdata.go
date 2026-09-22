@@ -81,6 +81,18 @@ const (
 // one job's identity cleanup (see watcher.go's collectAIBOM) delete the
 // ServiceAccount/Role/RoleBinding/Secret out from under an unrelated job
 // that happens to collide on the truncated name.
+//
+// scripts/aibom-scripts/k8s_api.py's resolve_data_configmap_name() (used by
+// a bare/ReplicaSet-owned pod's discovery init container, which can't rely
+// on the webhook-injected AIBOM_DATA_CONFIGMAP env var -- see that
+// function's docstring) independently recomputes this same ConfigMap name
+// from POD_NAME and must budget against this exact same length
+// (_WORKLOAD_IDENTITY_SUFFIX_LEN there). A previous mismatch (Python
+// budgeted against its own, shorter _POSTPROCESS_SUFFIX instead) meant the
+// discovery init container wrote into a different ConfigMap than this
+// watcher read from -- silently, since a not-found ConfigMap Get() isn't
+// logged as an error -- so every such pod's AIBOM had empty
+// discovery/environment/pod data with no visible failure at all.
 func truncatedTriggerBase(triggerName string) string {
 	maxBase := MaxJobNameLength - len(WorkloadIdentitySuffix)
 	if len(triggerName) > maxBase {

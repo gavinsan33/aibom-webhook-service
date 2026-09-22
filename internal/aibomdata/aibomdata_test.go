@@ -24,6 +24,24 @@ func TestWorkloadIdentityNameTruncatesLongTriggerNames(t *testing.T) {
 	}
 }
 
+func TestConfigMapNameAndWorkloadIdentityNameShareTruncatedBase(t *testing.T) {
+	// The two must truncate a long trigger name to the exact same base (see
+	// truncatedTriggerBase's comment) -- otherwise a job's identity cleanup
+	// could delete the ServiceAccount/Role/RoleBinding/Secret of a different
+	// job that happens to collide on WorkloadIdentityName alone. This is
+	// also the exact invariant scripts/aibom-scripts/k8s_api.py's
+	// resolve_data_configmap_name() must independently reproduce for
+	// bare/ReplicaSet-owned pods (see aibomdata.go's truncatedTriggerBase
+	// comment) -- a past mismatch there silently broke discovery data for
+	// every such pod.
+	longName := strings.Repeat("a", 100)
+	cmBase := strings.TrimSuffix(strings.TrimSuffix(ConfigMapName(longName), ConfigMapSuffix), PostprocessSuffix)
+	identityBase := strings.TrimSuffix(WorkloadIdentityName(longName), WorkloadIdentitySuffix)
+	if cmBase != identityBase {
+		t.Errorf("ConfigMapName base = %q, WorkloadIdentityName base = %q, want equal", cmBase, identityBase)
+	}
+}
+
 func TestWorkloadIdentityNameTrimsTrailingHyphenAfterTruncation(t *testing.T) {
 	maxBase := MaxJobNameLength - len(WorkloadIdentitySuffix)
 	triggerName := strings.Repeat("a", maxBase-1) + "--extra"

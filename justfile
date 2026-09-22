@@ -462,7 +462,7 @@ kind-undeploy:
 # charts/aibom-workload-namespace/templates/monitoring.yaml's ClusterRoleBinding once
 # instead. Telemetry collection just comes back empty for this namespace until then,
 # rather than the install failing.
-# Usage: just setup-namespace --namespace=<ns> [--skip-label] [--skip-monitoring-access]
+# Usage: just setup-namespace --namespace=<ns> [--skip-label] [--skip-monitoring-access] [--skip-vllm-metrics]
 [group('deploy')]
 setup-namespace *args: _check-auth
     #!/usr/bin/env bash
@@ -470,12 +470,14 @@ setup-namespace *args: _check-auth
     namespace=""
     skip_label=false
     skip_monitoring_access=false
+    skip_vllm_metrics=false
     for arg in {{ args }}; do
         case "$arg" in
             --namespace=*) namespace="${arg#--namespace=}" ;;
             --skip-label) skip_label=true ;;
             --skip-monitoring-access) skip_monitoring_access=true ;;
-            *) echo "error: unknown argument '$arg' (expected --namespace=<ns>, --skip-label, or --skip-monitoring-access)" >&2; exit 1 ;;
+            --skip-vllm-metrics) skip_vllm_metrics=true ;;
+            *) echo "error: unknown argument '$arg' (expected --namespace=<ns>, --skip-label, --skip-monitoring-access, or --skip-vllm-metrics)" >&2; exit 1 ;;
         esac
     done
     [[ -n "$namespace" ]] || { echo "error: --namespace=<ns> is required" >&2; exit 1; }
@@ -486,6 +488,11 @@ setup-namespace *args: _check-auth
     fi
     monitoring_args=()
     [ "$skip_monitoring_access" = true ] && monitoring_args=(--set monitoringAccess.enabled=false)
+    # vLLM metrics default on (values.yaml), but a PodMonitor CRD that doesn't
+    # exist on this cluster (no Prometheus Operator) fails the whole install
+    # outright, unlike monitoringAccess' soft RBAC-permission fallback --
+    # --skip-vllm-metrics is the escape hatch for that.
+    [ "$skip_vllm_metrics" = true ] && monitoring_args+=(--set vllmMetrics.enabled=false)
     helm upgrade --install "aibom-ns-$namespace" charts/aibom-workload-namespace -n "$namespace" \
         "${kube_as_user_args[@]}" \
         "${monitoring_args[@]}" \

@@ -15,12 +15,15 @@ def test_resolve_data_configmap_name_derives_from_pod_name_when_env_var_absent(m
     # Reproduces the bare/ReplicaSet-owned pod case (e.g. a KServe predictor):
     # the webhook can't bake in AIBOM_DATA_CONFIGMAP statically, since the
     # pod's own name isn't assigned yet at admission time — see
-    # mutator.go's dataConfigMapEnvVar.
+    # mutator.go's dataConfigMapEnvVar. Pod name is 39 chars (the truncation
+    # budget itself -- see test below), so it survives untruncated here; a
+    # name one character longer would already lose its last character, per
+    # aibomdata.go's truncatedTriggerBase.
     monkeypatch.delenv("AIBOM_DATA_CONFIGMAP", raising=False)
-    monkeypatch.setenv("POD_NAME", "granite-model-predictor-58f446b5c6-6mmc7")
+    monkeypatch.setenv("POD_NAME", "granite-model-predictor-58f446b5c-6mmc7")
     assert (
         k8s_api.resolve_data_configmap_name()
-        == "granite-model-predictor-58f446b5c6-6mmc7-aibom-postprocess-data"
+        == "granite-model-predictor-58f446b5c-6mmc7-aibom-postprocess-data"
     )
 
 
@@ -63,11 +66,15 @@ def test_get_cluster_object_reraises_other_http_errors(monkeypatch):
 
 
 def test_resolve_data_configmap_name_truncates_long_pod_names(monkeypatch):
-    # Mirrors aibomdata.PostprocessJobName's truncation in watcher.go: names
-    # are cut to fit Kubernetes' 63-character limit before the suffix.
+    # Mirrors aibomdata.ConfigMapName's truncation in aibomdata.go: budgeted
+    # against WorkloadIdentitySuffix's length (the narrowest of the three
+    # suffixes aibomdata.go's truncatedTriggerBase supports), not this
+    # module's own (shorter) _POSTPROCESS_SUFFIX -- see
+    # _WORKLOAD_IDENTITY_SUFFIX_LEN's comment in k8s_api.py for why a past
+    # mismatch here silently broke every long-named bare pod's AIBOM.
     monkeypatch.delenv("AIBOM_DATA_CONFIGMAP", raising=False)
     monkeypatch.setenv("POD_NAME", "a" * 63)
-    max_base = 63 - len("-aibom-postprocess")
+    max_base = 63 - len("-aibom-workload-identity")
     assert (
         k8s_api.resolve_data_configmap_name()
         == ("a" * max_base) + "-aibom-postprocess-data"

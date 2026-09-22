@@ -13,12 +13,31 @@ import urllib.request
 
 _SA_DIR = "/var/run/secrets/kubernetes.io/serviceaccount"
 
-# Mirrors aibomdata's constants in watcher.go — the two must stay in sync,
+# Mirrors aibomdata's constants in aibomdata.go — the two must stay in sync,
 # since the Go watcher and resolve_data_configmap_name() below each
 # independently compute the same deterministic name for the same trigger.
 _MAX_JOB_NAME_LENGTH = 63
 _POSTPROCESS_SUFFIX = "-aibom-postprocess"
 _CONFIGMAP_SUFFIX = "-data"
+
+# aibomdata.go's WorkloadIdentitySuffix -- unrelated to the ConfigMap itself,
+# but its length is what the Go side's truncatedTriggerBase() budgets the
+# truncation against (the narrowest of the three suffixes it needs to
+# support), applied uniformly to the postprocess Job name, the ConfigMap
+# name, and the workload-identity name alike, specifically so one trigger
+# name always maps to the same truncated base across all three -- otherwise
+# two trigger names sharing a prefix up to a shorter cutoff but differing
+# beyond it could produce the same WorkloadIdentityName while getting
+# different ConfigMapNames, letting one job's identity cleanup delete
+# another job's ServiceAccount/Role/RoleBinding/Secret out from under it.
+# _postprocess_job_name() below must budget against this same length, not
+# _POSTPROCESS_SUFFIX's (shorter) own length, or it silently computes a
+# different ConfigMap name than the Go watcher does -- exactly the bug this
+# comment exists to prevent from recurring (a bare/ReplicaSet-owned pod's
+# discovery init container wrote into one ConfigMap name while the watcher
+# read from another, so it always saw empty discovery/dataset data with no
+# error logged, since a not-found ConfigMap Get() is deliberately silent).
+_WORKLOAD_IDENTITY_SUFFIX_LEN = len("-aibom-workload-identity")
 
 
 def _api_server():
@@ -119,7 +138,9 @@ def get_cluster_object(group, version, plural, name):
 
 
 def _postprocess_job_name(trigger_name):
-    max_base = _MAX_JOB_NAME_LENGTH - len(_POSTPROCESS_SUFFIX)
+    # Budgeted against _WORKLOAD_IDENTITY_SUFFIX_LEN, not len(_POSTPROCESS_SUFFIX)
+    # -- see that constant's comment for why.
+    max_base = _MAX_JOB_NAME_LENGTH - _WORKLOAD_IDENTITY_SUFFIX_LEN
     trigger_name = trigger_name[:max_base].rstrip("-")
     return trigger_name + _POSTPROCESS_SUFFIX
 

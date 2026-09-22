@@ -551,6 +551,67 @@ def test_collect_telemetry_debug_flag_includes_pod_with_no_gpu(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# parse_range_response NaN handling
+# ---------------------------------------------------------------------------
+
+
+def test_parse_range_response_drops_nan_samples():
+    # A ratio-of-rates query (e.g. VLLM_TELEMETRY_QUERIES' TTFT sum-rate /
+    # count-rate) divides 0/0 into "NaN" whenever a window had zero completed
+    # requests -- Prometheus's own JSON encoding for it.
+    response = {
+        "status": "success",
+        "data": {
+            "result": [
+                {"values": [[1700000000, "1.5"], [1700000030, "NaN"], [1700000060, "2.5"]]}
+            ]
+        },
+    }
+    points = pp.parse_range_response(response)
+    assert [p["value"] for p in points] == [1.5, 2.5]
+
+
+# ---------------------------------------------------------------------------
+# collect_vllm_telemetry (no GPU-count gate, unlike collect_telemetry)
+# ---------------------------------------------------------------------------
+
+
+def _serving_discovery():
+    return {
+        "pod_metadata": {
+            "uid": "pod-uid-2",
+            "name": "vllm-pod",
+            "start_time": "2026-01-01T00:00:00Z",
+        },
+        "gpu": {"gpu_count": 1},
+    }
+
+
+def test_collect_vllm_telemetry_queries_every_pod_regardless_of_gpu(monkeypatch):
+    # Unlike collect_telemetry, there's no GPU-count skip -- a pod with no
+    # GPU discovery data at all should still be queried.
+    monkeypatch.setattr(pp, "query_prometheus_range", lambda *a, **k: None)
+    monkeypatch.setattr(pp, "TELEMETRY_RETRY_ATTEMPTS", 1)
+    summary = pp.collect_vllm_telemetry([_no_gpu_discovery()])
+    assert [p["pod_name"] for p in summary["pods"]] == ["web-pod"]
+
+
+def test_collect_vllm_telemetry_collects_configured_metrics(monkeypatch):
+    def fake_query_range(promql, start_ms, end_ms):
+        return {
+            "status": "success",
+            "data": {"result": [{"values": [[1700000000, "0.2"], [1700000030, "0.4"]]}]},
+        }
+
+    monkeypatch.setattr(pp, "query_prometheus_range", fake_query_range)
+    summary = pp.collect_vllm_telemetry([_serving_discovery()])
+    assert len(summary["pods"]) == 1
+    metrics = summary["pods"][0]["metrics"]
+    assert set(metrics.keys()) == set(pp.VLLM_TELEMETRY_QUERIES.keys())
+    assert metrics["time_to_first_token_seconds"]["avg"] == 0.3
+
+
+# ---------------------------------------------------------------------------
 # compile_aibom reconciliation
 # ---------------------------------------------------------------------------
 
@@ -1070,6 +1131,60 @@ def test_compile_aibom_utilization_scales_storage_throughput_to_mbps():
     assert metrics["storage_read_throughput"]["max"] == 20
     assert metrics["storage_write_throughput"]["unit"] == "MBps"
     assert metrics["storage_write_throughput"]["avg"] == 5
+
+
+# ---------------------------------------------------------------------------
+# compile_aibom: inference.performance from vLLM telemetry
+# ---------------------------------------------------------------------------
+
+
+def test_compile_aibom_populates_inference_performance_for_vllm():
+    vllm_telemetry = {
+        "collected_at": "2024-01-01T00:00:00Z",
+        "pods": [
+            {
+                "pod_name": "vllm-pod",
+                "includes_cold_start": False,
+                "metrics": {
+                    "time_to_first_token_seconds": _pod_metrics(avg=0.3, min_=0.1, max_=0.5, p95=0.45, unit="seconds"),
+                    "kv_cache_usage": _pod_metrics(avg=40, min_=10, max_=70, p95=65, unit="percent"),
+                },
+            }
+        ],
+    }
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info={},
+        annotations={"experiment-intent": "inference"}, telemetry=None,
+        detected_model={"serving_engine": "vllm"}, vllm_telemetry=vllm_telemetry,
+    )
+    performance = aibom["inference"]["performance"]
+    assert performance["metrics"]["time_to_first_token_seconds"]["avg"] == 0.3
+    assert performance["metrics"]["kv_cache_usage"]["avg"] == 40
+    assert performance["summary_includes_cold_start"] is False
+
+
+def test_compile_aibom_omits_inference_performance_without_vllm_telemetry():
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info={},
+        annotations={"experiment-intent": "inference"}, telemetry=None,
+        detected_model={"serving_engine": "vllm"}, vllm_telemetry=None,
+    )
+    assert "performance" not in aibom["inference"]
+
+
+def test_compile_aibom_ignores_vllm_telemetry_for_non_inference_intent():
+    vllm_telemetry = {
+        "collected_at": "2024-01-01T00:00:00Z",
+        "pods": [{"pod_name": "vllm-pod", "metrics": {
+            "time_to_first_token_seconds": _pod_metrics(avg=0.3, min_=0.1, max_=0.5, p95=0.45, unit="seconds"),
+        }}],
+    }
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info={},
+        annotations={"experiment-intent": "training"}, telemetry=None,
+        vllm_telemetry=vllm_telemetry,
+    )
+    assert "inference" not in aibom
 
 
 # ---------------------------------------------------------------------------
