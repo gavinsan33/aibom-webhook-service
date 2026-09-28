@@ -99,3 +99,46 @@ subjects:
   - kind: ServiceAccount
     name: aibom-webhook
     namespace: {{ .Values.aibomSystemNamespace }}
+---
+# Ed25519 private key postprocess.py signs the compiled AIBOM document with,
+# right before creating the AIBOM custom resource (#27). Unlike the two HMAC
+# keys above -- signed and verified by equally-trusted, project-controlled
+# processes (the discovery init container / dataset sidecar, and the watcher)
+# -- this AIBOM's intended verifiers include parties outside the cluster's
+# trust boundary entirely: oc-aibom, or anything reading an independently
+# archived copy with no cluster access at all. An asymmetric key lets those
+# verifiers check a signature without holding anything that could forge one,
+# which a shared HMAC key could not do once handed to an untrusted verifier.
+#
+# Mounted read-only into the aibom-postprocess Job only (see watcher.go's
+# createPostprocessJobCore) -- never any workload container. Preserved across
+# `helm upgrade --install` re-runs via lookup, same as the HMAC keys, so
+# rotating it doesn't invalidate the signature on every AIBOM already created.
+#
+# Deliberately no Role/RoleBinding granting API-level `get` on this Secret:
+# postprocess.py only ever reads the key off the mounted volume path (see
+# sign_aibom), never via the Kubernetes API. Mounting a Secret is performed
+# by the kubelet under the Node authorizer, which needs no pod-SA RBAC at
+# all -- an API-level get grant here would add nothing sign_aibom actually
+# uses, while needlessly widening what a compromised aibom-postprocess
+# token could read (review finding, PR #82).
+{{- $compiledSecretName := "aibom-compiled-signing-key" }}
+{{- $existingCompiled := lookup "v1" "Secret" .Release.Namespace $compiledSecretName }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $compiledSecretName }}
+  namespace: {{ .Release.Namespace }}
+type: Opaque
+data:
+  ed25519-key: {{ if $existingCompiled }}{{ index $existingCompiled.data "ed25519-key" }}{{ else }}{{ genPrivateKey "ed25519" | b64enc }}{{ end }}
+
+# NOTE: postprocess.py also *writes* a ConfigMap (aibom-compiled-signing-public-key,
+# see main()'s call to k8s_api.patch_configmap) to publish this key's public half.
+# No Role here grants that -- it works only because rbac.yaml's aibom-workload-data
+# Role broadly grants configmap create/get/patch to every ServiceAccount in this
+# namespace (bound via the system:serviceaccounts:{{ .Release.Namespace }} group),
+# and aibom-postprocess is one of them. rbac.yaml's own comment already flags that
+# Role as an accepted-but-unscoped gap; if it's ever narrowed, this publish step
+# will start failing silently (caught, logged as a warning, doesn't fail the Job)
+# and will need its own explicit grant added here.

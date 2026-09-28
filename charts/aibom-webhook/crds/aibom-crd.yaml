@@ -45,6 +45,21 @@ spec:
                   type: object
                   x-kubernetes-preserve-unknown-fields: true
                   description: The full AIBOM JSON document produced by postprocess.py.
+                signature:
+                  type: string
+                  description: >-
+                    Base64 Ed25519 signature over data's canonical
+                    (sort_keys, no whitespace) JSON serialization, or absent
+                    if the namespace has no aibom-compiled-signing-key
+                    Secret (see #27 / CLAUDE.md's Compiled AIBOM Signing).
+                signaturePublicKey:
+                  type: string
+                  description: >-
+                    Base64 raw Ed25519 public key corresponding to the key
+                    that produced signature, embedded so an independently
+                    archived copy is self-contained. Also published
+                    cluster-side as the aibom-compiled-signing-public-key
+                    ConfigMap, for cross-checking against a live cluster.
       additionalPrinterColumns:
         - name: Job
           type: string
