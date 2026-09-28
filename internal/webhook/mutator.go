@@ -387,26 +387,82 @@ func (m *Mutator) buildDiscoveryInitContainer(pod *corev1.Pod) corev1.Container 
 		},
 	}
 
+	// Explicit cpu/memory requests AND limits, both of them: a namespace
+	// LimitRange backfills whatever a container leaves unset (default /
+	// defaultRequest), so without these an arbitrary workload namespace
+	// (e.g. one with defaults of 2 CPU/8Gi and default requests of
+	// 1 CPU/2Gi) would stamp its defaults onto this container and inflate
+	// the pod's scheduling footprint — init containers count toward a pod
+	// request as max(sum of containers, max of init containers) — even
+	// though generate_snapshot.py needs ~100Mi, not 8Gi. The cpu limit is
+	// a whole core rather than a smaller fraction on purpose: the script's
+	// CPU/memory benchmarks are single-threaded and meant to characterize
+	// the node, and a cgroup cpu quota below 1 core would throttle them
+	// into reporting container-limited rather than node-limited numbers.
+	c.Resources = corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("250m"),
+			corev1.ResourceMemory: resource.MustParse("128Mi"),
+		},
+		Limits: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("1"),
+			corev1.ResourceMemory: resource.MustParse("512Mi"),
+		},
+	}
+
+	// The init container runs before the app containers and needs
+	// nvidia-smi to see the GPUs the pod will actually get. The nvidia-smi
+	// binary and the NVML driver library it links against are not part of
+	// any base image (the CUDA runtime images ship libcuda's compat layer,
+	// not the driver) — the NVIDIA Container Toolkit injects both from the
+	// node's driver at container start, and on standard device-plugin
+	// setups that injection is exactly what the nvidia.com/gpu claim
+	// triggers (Allocate → NVIDIA_VISIBLE_DEVICES → runtime prestart hook),
+	// so the claim has to stay; a dcgm-exporter-style privileged + host
+	// /dev container works without one only because it bundles its own
+	// libraries, sets NVIDIA_VISIBLE_DEVICES itself, and runs privileged,
+	// none of which apply to an unprivileged init container in an
+	// arbitrary base image. Mirroring costs the pod no extra GPUs: a pod's
+	// per-resource scheduling requirement is max(sum of containers, max of
+	// init containers), and init containers never run concurrently with
+	// the app containers.
 	if gpuRes := podGPUResource(pod); gpuRes != nil {
-		c.Resources = corev1.ResourceRequirements{
-			Limits: corev1.ResourceList{corev1.ResourceName("nvidia.com/gpu"): *gpuRes},
-		}
+		c.Resources.Limits[corev1.ResourceName("nvidia.com/gpu")] = *gpuRes
 	}
 
 	return c
 }
 
+// podGPUResource returns the pod's total nvidia.com/gpu allocation — the
+// sum of each container's effective claim (its limit if set, else its
+// request) — i.e. exactly what the scheduler places the pod against
+// (for extended resources, unset requests default from limits). Summing
+// rather than returning the first container's claim matters for
+// multi-container pods (e.g. 1 GPU per container): the discovery init
+// container must mirror the whole total or the device plugin hands it a
+// subset of the pod's GPUs and nvidia-smi under-reports gpu_count/
+// gpu_models.
 func podGPUResource(pod *corev1.Pod) *resource.Quantity {
 	gpuResource := corev1.ResourceName("nvidia.com/gpu")
+	total := resource.Quantity{}
+	found := false
 	for i := range pod.Spec.Containers {
-		if q, ok := pod.Spec.Containers[i].Resources.Limits[gpuResource]; ok && q.Cmp(resource.MustParse("0")) > 0 {
-			return &q
+		var q *resource.Quantity
+		if v, ok := pod.Spec.Containers[i].Resources.Limits[gpuResource]; ok && v.Cmp(resource.MustParse("0")) > 0 {
+			q = &v
+		} else if v, ok := pod.Spec.Containers[i].Resources.Requests[gpuResource]; ok && v.Cmp(resource.MustParse("0")) > 0 {
+			q = &v
 		}
-		if q, ok := pod.Spec.Containers[i].Resources.Requests[gpuResource]; ok && q.Cmp(resource.MustParse("0")) > 0 {
-			return &q
+		if q == nil {
+			continue
 		}
+		found = true
+		total.Add(*q)
 	}
-	return nil
+	if !found {
+		return nil
+	}
+	return &total
 }
 
 // containerRestartPolicyAlways is a package-level var (rather than an
@@ -437,11 +493,31 @@ func (m *Mutator) buildDatasetSidecarContainer(pod *corev1.Pod) corev1.Container
 		env = append(env, dataConfigMapEnv)
 	}
 
+	// Explicit cpu/memory requests AND limits, both of them: a namespace
+	// LimitRange backfills whatever a container leaves unset (default /
+	// defaultRequest), so without these an arbitrary workload namespace
+	// (e.g. one with defaults of 2 CPU/8Gi and default requests of
+	// 1 CPU/2Gi) would stamp its defaults onto this container. Unlike the
+	// discovery init container (which exits shortly after starting the
+	// pod), this one runs for the pod's entire lifetime, so its request
+	// rides on the pod's scheduling footprint the whole time — keep it
+	// as small as the poll/sign/publish loop actually is.
+	resources := corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("50m"),
+			corev1.ResourceMemory: resource.MustParse("64Mi"),
+		},
+		Limits: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("200m"),
+			corev1.ResourceMemory: resource.MustParse("128Mi"),
+		},
+	}
+
 	return corev1.Container{
 		Name:          "aibom-dataset-sidecar",
 		Image:         m.DatasetSidecarImage,
 		RestartPolicy: &containerRestartPolicyAlways,
-		Command: []string{"/bin/bash", "-c"},
+		Command:       []string{"/bin/bash", "-c"},
 		// A namespace whose aibom-workload-namespace chart install predates
 		// this container's addition has an empty dataset_sidecar.py key in
 		// its aibom-scripts ConfigMap (see values.yaml's scripts.datasetSidecar
@@ -460,7 +536,8 @@ func (m *Mutator) buildDatasetSidecarContainer(pod *corev1.Pod) corev1.Container
 				"exec sleep infinity; " +
 				"fi",
 		},
-		Env:           env,
+		Env:       env,
+		Resources: resources,
 		VolumeMounts: []corev1.VolumeMount{
 			// Same aibom-data emptyDir the app container writes
 			// dataset_detected.json into (mounted there at the same
