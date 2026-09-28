@@ -273,7 +273,7 @@ The webhook server accepts these flags:
 | `--tls-cert` | `/certs/tls.crt` | Path to TLS certificate |
 | `--tls-key` | `/certs/tls.key` | Path to TLS private key |
 | `--port` | `8443` | Server port |
-| `--discovery-image` | `pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime` | Image for the discovery init container — set via `image.discovery.repository`/`.tag` in `charts/aibom-webhook/values.yaml`, not passed directly when deploying through the chart. Only needs `python3`/`bash`; swap for anything already available in-cluster (e.g. an OpenShift AI runtime image) to avoid an external pull per pod |
+| `--discovery-image` | `pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime` | Image for the discovery init container — set via `image.discovery.repository`/`.tag` in `charts/aibom-webhook/values.yaml`, not passed directly when deploying through the chart. Only needs `python3`/`bash` in the image itself — `nvidia-smi` (used for the GPU fields) is not part of any base image and is injected at runtime by the NVIDIA Container Toolkit on GPU pods, see CLAUDE.md; swap for anything already available in-cluster (e.g. an OpenShift AI runtime image) to avoid an external pull per pod |
 | `--dataset-detection` | `true` | Inject dataset detection hooks into application containers |
 | `--enable-watcher` | `true` | Start the Job completion watcher |
 | `--postprocess-image` | `busybox:latest` | Image for AIBOM postprocess Jobs — this default is a placeholder only (unlike discovery, `busybox` genuinely doesn't work here, see below); the chart always overrides it via `image.postprocess.repository`/`.tag` |

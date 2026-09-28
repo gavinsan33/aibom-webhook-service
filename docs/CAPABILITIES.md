@@ -44,7 +44,7 @@ Captured once per pod by the discovery init container into `discovery-<pod>.json
 | GPU driver version | `nvidia-smi --query-gpu=driver_version` | ✅ `environment.driver_version` |
 | CUDA version | `nvidia-smi` (`CUDA Version` line) | ✅ `environment.cuda_version` |
 
-The GPU resource request itself (used to decide whether to run this detection at all) is copied from the pod's own `nvidia.com/gpu` container resource request, not detected independently.
+The discovery init container's own `nvidia.com/gpu` claim — what makes `nvidia-smi` work in it at all, since the NVIDIA Container Toolkit injects the binary and NVML driver library from the node's driver only when the claim is present (see `CLAUDE.md`) — is not detected independently but copied from the pod's **total** `nvidia.com/gpu` allocation (the sum of each container's effective claim), so `nvidia-smi` sees every GPU the pod is scheduled with, not just the first container's.
 
 **Network** — ⚠️ all fields below are captured but never surfaced into the compiled AIBOM:
 
