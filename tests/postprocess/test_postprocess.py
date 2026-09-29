@@ -1497,3 +1497,188 @@ def test_sign_aibom_matches_go_jcs_reference_output():
         b'{"dirty":false,"model":{"name":"tinyllama-1.1b-chat","quantization":null},'
         b'"tags":["sft","lora"],"training":{"epochs":3,"learning_rate":0.00002,"random_seed":42}}'
     )
+
+
+# ---------------------------------------------------------------------------
+# Persisted telemetry time series
+# ---------------------------------------------------------------------------
+
+
+def _range_response(*series):
+    """series: (labels, [(ts, value), ...]) tuples -> Prometheus matrix response."""
+    return {
+        "status": "success",
+        "data": {"result": [{"metric": labels, "values": [[ts, str(v)] for ts, v in pts]} for labels, pts in series]},
+    }
+
+
+def test_parse_range_series_keeps_series_separate_with_normalized_labels():
+    response = _range_response(
+        ({"exported_pod": "p0", "gpu": "1", "instance": "x"}, [(100, 5), (130, 6)]),
+        ({"exported_pod": "p0", "gpu": "0"}, [(100, 1), (130, 2)]),
+    )
+    series = pp.parse_range_series(response)
+    assert [s["labels"] for s in series] == [{"pod": "p0", "gpu": "0"}, {"pod": "p0", "gpu": "1"}]
+    assert series[0]["points"] == [[100, 1], [130, 2]]
+
+
+def test_parse_range_series_drops_nan_and_empty_series():
+    response = _range_response(
+        ({"pod": "a"}, [(100, "NaN"), (130, 2.5)]),
+        ({"pod": "b"}, [(100, "NaN")]),
+    )
+    series = pp.parse_range_series(response)
+    assert series == [{"labels": {"pod": "a"}, "points": [[130, 2.5]]}]
+
+
+def test_parse_range_series_failed_response_is_empty():
+    assert pp.parse_range_series(None) == []
+    assert pp.parse_range_series({"status": "error"}) == []
+
+
+def test_aggregate_points_sum_avg_max():
+    series = [
+        {"labels": {}, "points": [[0, 1], [30, 2]]},
+        {"labels": {}, "points": [[0, 3], [30, 6]]},
+    ]
+    assert pp._aggregate_points(series, "sum") == [[0, 4], [30, 8]]
+    assert pp._aggregate_points(series, "avg") == [[0, 2], [30, 4]]
+    assert pp._aggregate_points(series, "max") == [[0, 3], [30, 6]]
+
+
+def test_parse_start_utc_treats_suffixless_time_as_utc():
+    assert (
+        pp._parse_start_utc("2026-01-01T00:00:00").timestamp()
+        == pp._parse_start_utc("2026-01-01T00:00:00Z").timestamp()
+    )
+
+
+def test_pod_regex_skips_invalid_names_and_escapes_dots():
+    assert pp._pod_regex(["a-1", "b.c", 'bad"name', None]) == "a-1|b[.]c"
+
+
+def test_series_queries_exclude_dataset_sidecar_from_per_container_metrics():
+    for name in ("cpu_usage", "memory_usage", "storage_read_throughput", "storage_write_throughput"):
+        assert 'container!="aibom-dataset-sidecar"' in pp.SERIES_QUERIES[name]["query"]
+
+
+def _series_pods(*names):
+    return {"pods": [{"pod_name": n, "start_time": "2026-01-01T00:00:00Z"} for n in names]}
+
+
+def test_collect_telemetry_series_builds_schema_with_aggregates_and_detail(monkeypatch):
+    monkeypatch.setattr(pp, "JOB_NAMESPACE", "ns")
+    seen = []
+
+    def fake_query_range(promql, start_ms, end_ms, step_seconds=None):
+        seen.append((promql, step_seconds))
+        if "container_cpu_usage_seconds_total" in promql:
+            return _range_response(
+                ({"pod": "p0", "container": "trainer"}, [(1767225600, 1.0), (1767225630, 2.0)]),
+                ({"pod": "p1", "container": "trainer"}, [(1767225600, 3.0), (1767225630, 4.0)]),
+            )
+        if "DCGM_FI_DEV_GPU_UTIL" in promql:
+            value = 90 if promql.startswith("max by") else 50
+            return _range_response(
+                ({"exported_pod": "p0", "gpu": "0"}, [(1767225600, value)]),
+                ({"exported_pod": "p1", "gpu": "0"}, [(1767225600, value - 20)]),
+            )
+        return None
+
+    monkeypatch.setattr(pp, "query_prometheus_range", fake_query_range)
+    doc = json.loads(pp.collect_telemetry_series(_series_pods("p0", "p1"), None))
+
+    assert doc["schema_version"] == 1
+    assert doc["window"]["end"] > doc["window"]["start"]
+    assert doc["window"]["step_seconds"] >= 15
+    assert doc["pods"] == ["p0", "p1"]
+    # Only metrics that returned data are present.
+    assert set(doc["metrics"]) == {"cpu_usage", "gpu_utilization"}
+
+    cpu = doc["metrics"]["cpu_usage"]
+    assert cpu["unit"] == "cores" and cpu["aggregation"] == "sum"
+    assert cpu["aggregate"] == [[1767225600, 4], [1767225630, 6]]
+    assert "aggregate_max" not in cpu  # not a gauge
+    assert [s["labels"] for s in cpu["series"]] == [
+        {"pod": "p0", "container": "trainer"},
+        {"pod": "p1", "container": "trainer"},
+    ]
+
+    gpu = doc["metrics"]["gpu_utilization"]
+    assert gpu["aggregation"] == "avg"
+    assert gpu["aggregate"] == [[1767225600, 40]]  # avg of 50 and 30
+    assert gpu["aggregate_max"] == [[1767225600, 90]]  # max of 90 and 70
+    assert gpu["series"][0]["labels"] == {"pod": "p0", "gpu": "0"}
+
+    # One query per metric for all pods, scoped to the namespace.
+    cpu_queries = [q for q, _ in seen if "container_cpu_usage_seconds_total" in q]
+    assert len(cpu_queries) == 1
+    assert 'namespace="ns"' in cpu_queries[0] and 'pod=~"p0|p1"' in cpu_queries[0]
+    assert all(step == doc["window"]["step_seconds"] for _, step in seen)
+
+
+def test_collect_telemetry_series_targets_roughly_the_configured_point_count(monkeypatch):
+    monkeypatch.setattr(pp, "SERIES_TARGET_POINTS", 200)
+    calls = []
+    monkeypatch.setattr(
+        pp, "query_prometheus_range", lambda q, s, e, step_seconds=None: calls.append((s, e, step_seconds)) or None
+    )
+    pp.collect_telemetry_series(_series_pods("p0"), None)
+    start_ms, end_ms, step = calls[0]
+    assert 150 <= (end_ms - start_ms) / 1000 / step <= 200
+
+
+def test_collect_telemetry_series_none_when_prometheus_returns_nothing(monkeypatch):
+    monkeypatch.setattr(pp, "query_prometheus_range", lambda *a, **k: None)
+    assert pp.collect_telemetry_series(_series_pods("p0"), None) is None
+
+
+def test_collect_telemetry_series_none_without_pods_or_valid_start(monkeypatch):
+    monkeypatch.setattr(pp, "query_prometheus_range", lambda *a, **k: pytest.fail("should not query"))
+    assert pp.collect_telemetry_series(None, None) is None
+    assert pp.collect_telemetry_series({"pods": [{"pod_name": "p0", "start_time": "garbage"}]}, None) is None
+
+
+def test_collect_telemetry_series_includes_vllm_metrics_for_vllm_pods(monkeypatch):
+    def fake_query_range(promql, start_ms, end_ms, step_seconds=None):
+        if "vllm:generation_tokens_total" in promql:
+            return _range_response(({"pod": "v0"}, [(1767225600, 12)]))
+        return None
+
+    monkeypatch.setattr(pp, "query_prometheus_range", fake_query_range)
+    doc = json.loads(pp.collect_telemetry_series(None, _series_pods("v0")))
+    assert doc["metrics"]["generation_throughput"]["unit"] == "tokens_per_sec"
+    assert doc["metrics"]["generation_throughput"]["aggregate"] == [[1767225600, 12]]
+
+
+def test_collect_telemetry_series_omits_detail_beyond_series_cap(monkeypatch):
+    monkeypatch.setattr(pp, "SERIES_MAX_SERIES_PER_METRIC", 2)
+
+    def fake_query_range(promql, start_ms, end_ms, step_seconds=None):
+        if "container_network_receive_bytes_total" in promql:
+            return _range_response(*[({"pod": f"p{i}", "interface": "eth0"}, [(100, 1)]) for i in range(3)])
+        return None
+
+    monkeypatch.setattr(pp, "query_prometheus_range", fake_query_range)
+    entry = json.loads(pp.collect_telemetry_series(_series_pods("p0", "p1", "p2"), None))["metrics"]["network_receive"]
+    assert entry["aggregate"] == [[100, 3]]
+    assert entry["series_omitted"] is True and "series" not in entry
+
+
+def test_fit_series_doc_drops_largest_detail_first_and_keeps_aggregates():
+    def metric(n_points):
+        pts = [[i, i * 1.5] for i in range(n_points)]
+        return {"unit": "x", "aggregation": "sum", "aggregate": pts[:3], "series": [{"labels": {}, "points": pts}]}
+
+    doc = {"metrics": {"small": metric(5), "big": metric(500)}}
+    cap = len(pp._encode_series_doc(doc)) - 100
+    result = json.loads(pp._fit_series_doc(doc, cap))
+    assert result["metrics"]["big"]["series_omitted"] is True and "series" not in result["metrics"]["big"]
+    assert "series" in result["metrics"]["small"]
+    assert len(result["metrics"]["big"]["aggregate"]) == 3
+
+
+def test_fit_series_doc_none_when_aggregates_alone_exceed_cap():
+    doc = {"metrics": {"m": {"unit": "x", "aggregation": "sum", "aggregate": [[i, i] for i in range(1000)]}}}
+    assert pp._fit_series_doc(doc, 100) is None
+

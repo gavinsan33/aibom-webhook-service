@@ -15,7 +15,7 @@ import shlex
 import ssl
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 import urllib.request
 import urllib.parse
@@ -205,6 +205,150 @@ VLLM_TELEMETRY_QUERIES = {
 }
 
 SCRAPE_INTERVAL_MS = 5 * 60 * 1000
+
+# ---------------------------------------------------------------------------
+# Persisted telemetry time series (see CLAUDE.md's Telemetry Time Series)
+# ---------------------------------------------------------------------------
+#
+# Separate from TELEMETRY_QUERIES/VLLM_TELEMETRY_QUERIES on purpose: those feed
+# the summary stats and must keep their exact semantics (cold-start-trimmed
+# window, one query per pod, labels discarded). These are queried once per
+# metric for the whole run (`pod=~"a|b|c"`, scoped to the workload namespace),
+# over the full window, with series labels preserved.
+#
+# Placeholders: {namespace}, {pod_regex}, and for gauges {win} (the step, so
+# buckets tile) and {fn} (avg, or max for the peak line). Raw base units are
+# stored (bytes, bytes/s, cores...) -- the `unit` field says which -- rather
+# than the display-scaled units resource_utilization uses.
+#
+# aibom-dataset-sidecar is excluded from per-container queries so the series
+# describe the workload, not this project's own injected container.
+_SERIES_CONTAINERS = 'container!="POD", container!="", container!="aibom-dataset-sidecar"'
+SERIES_QUERIES = {
+    "gpu_utilization": {
+        "query": (
+            '{fn} by (exported_pod, gpu) ({fn}_over_time('
+            'DCGM_FI_DEV_GPU_UTIL{exported_namespace="{namespace}", exported_pod=~"{pod_regex}"}[{win}s]))'
+        ),
+        "unit": "percent", "aggregation": "avg", "gauge": True,
+    },
+    "gpu_memory_used": {
+        "query": (
+            '{fn} by (exported_pod, gpu) ({fn}_over_time('
+            'DCGM_FI_DEV_FB_USED{exported_namespace="{namespace}", exported_pod=~"{pod_regex}"}[{win}s]))'
+        ),
+        "unit": "MiB", "aggregation": "sum", "gauge": True,
+    },
+    "gpu_power": {
+        "query": (
+            '{fn} by (exported_pod, gpu) ({fn}_over_time('
+            'DCGM_FI_DEV_POWER_USAGE{exported_namespace="{namespace}", exported_pod=~"{pod_regex}"}[{win}s]))'
+        ),
+        "unit": "watts", "aggregation": "sum", "gauge": True,
+    },
+    "cpu_usage": {
+        "query": (
+            'sum by (pod, container) (rate(container_cpu_usage_seconds_total{namespace="{namespace}", '
+            'pod=~"{pod_regex}", ' + _SERIES_CONTAINERS + '}[5m]))'
+        ),
+        "unit": "cores", "aggregation": "sum",
+    },
+    "memory_usage": {
+        "query": (
+            '{fn} by (pod, container) ({fn}_over_time(container_memory_working_set_bytes{namespace="{namespace}", '
+            'pod=~"{pod_regex}", ' + _SERIES_CONTAINERS + '}[{win}s]))'
+        ),
+        "unit": "bytes", "aggregation": "sum", "gauge": True,
+    },
+    "network_receive": {
+        "query": (
+            'sum by (pod, interface) (rate(container_network_receive_bytes_total{namespace="{namespace}", '
+            'pod=~"{pod_regex}"}[5m]))'
+        ),
+        "unit": "bytes_per_sec", "aggregation": "sum",
+    },
+    "network_transmit": {
+        "query": (
+            'sum by (pod, interface) (rate(container_network_transmit_bytes_total{namespace="{namespace}", '
+            'pod=~"{pod_regex}"}[5m]))'
+        ),
+        "unit": "bytes_per_sec", "aggregation": "sum",
+    },
+    # Same per-container-or-pod-level fallback as TELEMETRY_QUERIES.
+    "storage_read_throughput": {
+        "query": (
+            'sum by (pod) (rate(container_fs_reads_bytes_total{namespace="{namespace}", pod=~"{pod_regex}", '
+            + _SERIES_CONTAINERS + '}[5m]))'
+            ' or sum by (pod) (rate(container_fs_reads_bytes_total{namespace="{namespace}", '
+            'pod=~"{pod_regex}", container=""}[5m]))'
+        ),
+        "unit": "bytes_per_sec", "aggregation": "sum",
+    },
+    "storage_write_throughput": {
+        "query": (
+            'sum by (pod) (rate(container_fs_writes_bytes_total{namespace="{namespace}", pod=~"{pod_regex}", '
+            + _SERIES_CONTAINERS + '}[5m]))'
+            ' or sum by (pod) (rate(container_fs_writes_bytes_total{namespace="{namespace}", '
+            'pod=~"{pod_regex}", container=""}[5m]))'
+        ),
+        "unit": "bytes_per_sec", "aggregation": "sum",
+    },
+}
+
+VLLM_SERIES_QUERIES = {
+    "time_to_first_token_seconds": {
+        "query": (
+            'sum by (pod) (rate(vllm:time_to_first_token_seconds_sum{namespace="{namespace}", pod=~"{pod_regex}"}[5m]))'
+            ' / sum by (pod) (rate(vllm:time_to_first_token_seconds_count{namespace="{namespace}", pod=~"{pod_regex}"}[5m]))'
+        ),
+        "unit": "seconds", "aggregation": "avg",
+    },
+    "inter_token_latency_seconds": {
+        "query": (
+            'sum by (pod) (rate(vllm:inter_token_latency_seconds_sum{namespace="{namespace}", pod=~"{pod_regex}"}[5m]))'
+            ' / sum by (pod) (rate(vllm:inter_token_latency_seconds_count{namespace="{namespace}", pod=~"{pod_regex}"}[5m]))'
+        ),
+        "unit": "seconds", "aggregation": "avg",
+    },
+    "num_requests_running": {
+        "query": (
+            '{fn} by (pod) ({fn}_over_time(vllm:num_requests_running{namespace="{namespace}", '
+            'pod=~"{pod_regex}"}[{win}s]))'
+        ),
+        "unit": "requests", "aggregation": "sum", "gauge": True,
+    },
+    "num_requests_waiting": {
+        "query": (
+            '{fn} by (pod) ({fn}_over_time(vllm:num_requests_waiting{namespace="{namespace}", '
+            'pod=~"{pod_regex}"}[{win}s]))'
+        ),
+        "unit": "requests", "aggregation": "sum", "gauge": True,
+    },
+    "kv_cache_usage": {
+        "query": (
+            '{fn} by (pod) ({fn}_over_time(vllm:kv_cache_usage_perc{namespace="{namespace}", '
+            'pod=~"{pod_regex}"}[{win}s]))'
+        ),
+        "unit": "percent", "aggregation": "avg", "gauge": True,
+    },
+    "prompt_throughput": {
+        "query": 'sum by (pod) (rate(vllm:prompt_tokens_total{namespace="{namespace}", pod=~"{pod_regex}"}[5m]))',
+        "unit": "tokens_per_sec", "aggregation": "sum",
+    },
+    "generation_throughput": {
+        "query": 'sum by (pod) (rate(vllm:generation_tokens_total{namespace="{namespace}", pod=~"{pod_regex}"}[5m]))',
+        "unit": "tokens_per_sec", "aggregation": "sum",
+    },
+}
+
+SERIES_SCHEMA_VERSION = 1
+SERIES_CONFIGMAP_KEY = "series.json"
+# Roughly the number of points kept per metric (the query step is derived from it).
+SERIES_TARGET_POINTS = int(os.environ.get("AIBOM_SERIES_TARGET_POINTS", "200"))
+# Hard ceiling on the stored document. A ConfigMap caps at 1 MiB; stay well under.
+SERIES_MAX_BYTES = int(os.environ.get("AIBOM_SERIES_MAX_BYTES", "900000"))
+# A metric with more per-pod/per-GPU series than this keeps only its aggregate line.
+SERIES_MAX_SERIES_PER_METRIC = int(os.environ.get("AIBOM_SERIES_MAX_SERIES_PER_METRIC", "64"))
 
 # ---------------------------------------------------------------------------
 # Input loading
@@ -942,14 +1086,14 @@ def _range_step_seconds(start_ms, end_ms, max_points=1000):
     return max(int(span_s / max_points), 15)
 
 
-def query_prometheus_range(promql, start_ms, end_ms):
+def query_prometheus_range(promql, start_ms, end_ms, step_seconds=None):
     return _query_prometheus(
         "/api/v1/query_range",
         {
             "query": promql,
             "start": start_ms / 1000,
             "end": end_ms / 1000,
-            "step": _range_step_seconds(start_ms, end_ms),
+            "step": step_seconds or _range_step_seconds(start_ms, end_ms),
         },
         timeout=30,
     )
@@ -1222,6 +1366,190 @@ def collect_vllm_telemetry(discoveries):
 
     print(f"  Pods processed: {len(telemetry_summary['pods'])}")
     return telemetry_summary
+
+
+_POD_NAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$")
+_SERIES_LABEL_SOURCES = (
+    ("exported_pod", "pod"),  # DCGM: `pod` there is dcgm-exporter's own pod
+    ("pod", "pod"),
+    ("container", "container"),
+    ("interface", "interface"),
+    ("gpu", "gpu"),
+)
+
+
+def _round_sig(value):
+    rounded = float(f"{value:.6g}")
+    return int(rounded) if rounded == int(rounded) else rounded
+
+
+def _series_labels(metric):
+    labels = {}
+    for source, dest in _SERIES_LABEL_SOURCES:
+        if metric.get(source) and dest not in labels:
+            labels[dest] = metric[source]
+    return labels
+
+
+def parse_range_series(response):
+    """Keeps each returned series separate (unlike parse_range_response, which
+    flattens them for the stats) as {"labels": {...}, "points": [[ts, v]]},
+    with integer unix-second timestamps -- unambiguous UTC, no timezone
+    suffix to misread. NaN/Inf samples are dropped."""
+    if not response or response.get("status") != "success":
+        return []
+    out = []
+    for result in response.get("data", {}).get("result", []):
+        points = []
+        for ts, val in result.get("values", []):
+            try:
+                fval = float(val)
+            except (TypeError, ValueError):
+                continue
+            if math.isnan(fval) or math.isinf(fval):
+                continue
+            points.append([int(ts), _round_sig(fval)])
+        if points:
+            out.append({"labels": _series_labels(result.get("metric", {})), "points": points})
+    out.sort(key=lambda s: sorted(s["labels"].items()))
+    return out
+
+
+def _aggregate_points(series_list, how):
+    by_ts = {}
+    for s in series_list:
+        for ts, value in s["points"]:
+            by_ts.setdefault(ts, []).append(value)
+    reducers = {"sum": sum, "max": max, "avg": lambda vs: sum(vs) / len(vs)}
+    return [[ts, _round_sig(reducers[how](vs))] for ts, vs in sorted(by_ts.items())]
+
+
+def _parse_start_utc(start_time):
+    """Parses a pod start_time as UTC. A suffix-less value (what the discovery
+    init container writes) is taken as UTC too, not this process's local zone."""
+    dt = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _pod_regex(pod_names):
+    # Pod names are DNS-1123, so validating them means only "." needs escaping
+    # (and a backslash would need double-escaping inside a PromQL string).
+    valid = [n for n in pod_names if n and _POD_NAME_RE.match(n)]
+    return "|".join(n.replace(".", "[.]") for n in valid)
+
+
+def _collect_series_metrics(query_defs, namespace, pod_names, start_ms, end_ms, step):
+    pod_regex = _pod_regex(pod_names)
+    if not pod_regex:
+        return {}
+
+    def run(defn, fn):
+        promql = (
+            defn["query"]
+            .replace("{namespace}", namespace)
+            .replace("{pod_regex}", pod_regex)
+            .replace("{win}", str(step))
+            .replace("{fn}", fn)
+        )
+        return parse_range_series(query_prometheus_range(promql, start_ms, end_ms, step_seconds=step))
+
+    metrics = {}
+    for name, defn in query_defs.items():
+        print(f"    Querying series {name}...")
+        series = run(defn, "avg")
+        if not series:
+            print("      no data")
+            continue
+        entry = {
+            "unit": defn["unit"],
+            "aggregation": defn["aggregation"],
+            "aggregate": _aggregate_points(series, defn["aggregation"]),
+        }
+        if defn.get("gauge"):
+            # Per-bucket peak, so a spike shorter than the step (an OOM-adjacent
+            # memory climb) survives the downsampling. For sum-aggregated
+            # metrics this is the sum of each series' own bucket peak -- a
+            # slight upper bound on the true peak of the total.
+            peak = run(defn, "max")
+            if peak:
+                entry["aggregate_max"] = _aggregate_points(
+                    peak, "sum" if defn["aggregation"] == "sum" else "max"
+                )
+        if len(series) > SERIES_MAX_SERIES_PER_METRIC:
+            entry["series_omitted"] = True
+        else:
+            entry["series"] = series
+        metrics[name] = entry
+        print(f"      {len(series)} series, {len(entry['aggregate'])} points")
+    return metrics
+
+
+def _encode_series_doc(doc):
+    return json.dumps(doc, separators=(",", ":"), sort_keys=True)
+
+
+def _fit_series_doc(doc, max_bytes):
+    """Serializes doc, dropping per-pod/per-GPU detail (largest metric first)
+    until it fits max_bytes -- the aggregate lines are kept. Returns the
+    encoded string, or None if even the aggregates alone don't fit."""
+    encoded = _encode_series_doc(doc)
+    while len(encoded.encode("utf-8")) > max_bytes:
+        sizes = [
+            (len(json.dumps(m["series"])), name) for name, m in doc["metrics"].items() if "series" in m
+        ]
+        if not sizes:
+            return None
+        _, largest = max(sizes)
+        del doc["metrics"][largest]["series"]
+        doc["metrics"][largest]["series_omitted"] = True
+        encoded = _encode_series_doc(doc)
+    return encoded
+
+
+def collect_telemetry_series(telemetry, vllm_telemetry):
+    """Builds the downsampled time-series document persisted alongside the
+    AIBOM (see CLAUDE.md's Telemetry Time Series). Returns the encoded JSON
+    string, or None if nothing came back. Never raises for missing data --
+    an AIBOM without series is still a complete AIBOM."""
+    resource_pods = (telemetry or {}).get("pods") or []
+    vllm_pods = (vllm_telemetry or {}).get("pods") or []
+    all_pods = resource_pods + vllm_pods
+    starts = []
+    for p in all_pods:
+        try:
+            starts.append(_parse_start_utc(p["start_time"]))
+        except (ValueError, AttributeError, KeyError, TypeError):
+            print(f"  WARNING: Invalid start_time for {p.get('pod_name')}, ignoring for series window", file=sys.stderr)
+    if not starts:
+        return None
+
+    start_ms = int(min(starts).timestamp() * 1000)
+    end_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    if end_ms <= start_ms:
+        return None
+    span_s = (end_ms - start_ms) / 1000
+    step = max(math.ceil(span_s / SERIES_TARGET_POINTS), 15)
+
+    metrics = {}
+    metrics.update(_collect_series_metrics(
+        SERIES_QUERIES, JOB_NAMESPACE, [p.get("pod_name") for p in resource_pods], start_ms, end_ms, step
+    ))
+    metrics.update(_collect_series_metrics(
+        VLLM_SERIES_QUERIES, JOB_NAMESPACE, [p.get("pod_name") for p in vllm_pods], start_ms, end_ms, step
+    ))
+    if not metrics:
+        return None
+
+    doc = {
+        "schema_version": SERIES_SCHEMA_VERSION,
+        "window": {"start": start_ms // 1000, "end": end_ms // 1000, "step_seconds": step},
+        "pods": sorted({p["pod_name"] for p in all_pods if p.get("pod_name")}),
+        "metrics": metrics,
+    }
+    encoded = _fit_series_doc(doc, SERIES_MAX_BYTES)
+    if encoded is None:
+        print("  WARNING: telemetry series exceed the size cap even without detail, skipping", file=sys.stderr)
+    return encoded
 
 
 # ---------------------------------------------------------------------------
