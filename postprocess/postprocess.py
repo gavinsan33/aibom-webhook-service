@@ -7,10 +7,12 @@ queries Prometheus for telemetry, and produces an AIBOM JSON document.
 """
 
 import base64
+import hashlib
 import json
 import math
 import os
 import re
+import secrets
 import shlex
 import ssl
 import sys
@@ -342,10 +344,14 @@ VLLM_SERIES_QUERIES = {
 }
 
 SERIES_SCHEMA_VERSION = 1
-SERIES_CONFIGMAP_KEY = "series.json"
+SERIES_OBJECT_KIND = "AIBOMTelemetry"
+SERIES_API_GROUP = "aibom.io"
+SERIES_API_VERSION = "v1alpha1"
+SERIES_PLURAL = "aibomtelemetries"
 # Roughly the number of points kept per metric (the query step is derived from it).
 SERIES_TARGET_POINTS = int(os.environ.get("AIBOM_SERIES_TARGET_POINTS", "200"))
-# Hard ceiling on the stored document. A ConfigMap caps at 1 MiB; stay well under.
+# Hard ceiling on the stored document. A custom resource shares etcd's ~1.5 MB
+# object limit (and the CRD's spec.seriesJson maxLength); stay well under.
 SERIES_MAX_BYTES = int(os.environ.get("AIBOM_SERIES_MAX_BYTES", "900000"))
 # A metric with more per-pod/per-GPU series than this keeps only its aggregate line.
 SERIES_MAX_SERIES_PER_METRIC = int(os.environ.get("AIBOM_SERIES_MAX_SERIES_PER_METRIC", "64"))
@@ -1552,6 +1558,42 @@ def collect_telemetry_series(telemetry, vllm_telemetry):
     return encoded
 
 
+def publish_series_object(encoded):
+    """Stores the encoded series document in an AIBOMTelemetry custom resource
+    and returns the reference to embed in the (signed) AIBOM data. The
+    payload is kept as the exact string (spec.seriesJson), not structured
+    JSON, so a reader can hash precisely what was stored; the reference
+    carries that sha256, making the series tamper-evident for any verifier
+    that checks it. Returns None on failure."""
+    name = f"{JOB_NAME}-telemetry-{secrets.token_hex(4)}"
+    raw = encoded.encode("utf-8")
+    window = json.loads(encoded)["window"]
+    body = {
+        "apiVersion": f"{SERIES_API_GROUP}/{SERIES_API_VERSION}",
+        "kind": SERIES_OBJECT_KIND,
+        "metadata": {"name": name, "namespace": JOB_NAMESPACE, "labels": {"aibom.io/job-name": JOB_NAME}},
+        "spec": {
+            "schemaVersion": SERIES_SCHEMA_VERSION,
+            "sizeBytes": len(raw),
+            "window": {"start": window["start"], "end": window["end"], "stepSeconds": window["step_seconds"]},
+            "seriesJson": encoded,
+        },
+    }
+    try:
+        k8s_api.create_custom_object(JOB_NAMESPACE, SERIES_API_GROUP, SERIES_API_VERSION, SERIES_PLURAL, body)
+    except Exception as e:
+        print(f"WARNING: could not store telemetry series object: {e}", file=sys.stderr)
+        return None
+    return {
+        "schema_version": SERIES_SCHEMA_VERSION,
+        "kind": SERIES_OBJECT_KIND,
+        "name": name,
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "size_bytes": len(raw),
+        "window": window,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Phase 2: AIBOM compilation
 # ---------------------------------------------------------------------------
@@ -2215,6 +2257,7 @@ def main():
     # Telemetry
     telemetry = None
     vllm_telemetry = None
+    series_encoded = None
     if PROMETHEUS_URL:
         print("--- Phase 1: Telemetry Collection ---")
         try:
@@ -2227,6 +2270,14 @@ def main():
                 vllm_telemetry = collect_vllm_telemetry(discoveries)
             except Exception as e:
                 print(f"WARNING: vLLM telemetry collection failed: {e}", file=sys.stderr)
+        # Runs after the stats collection above (and its retries), so the
+        # backend has had the longest chance to ingest the run's final scrapes.
+        if telemetry or vllm_telemetry:
+            print("--- Phase 1c: Telemetry Time Series ---")
+            try:
+                series_encoded = collect_telemetry_series(telemetry, vllm_telemetry)
+            except Exception as e:
+                print(f"WARNING: telemetry series collection failed: {e}", file=sys.stderr)
         print()
     else:
         print("--- Phase 1: Skipped (no PROMETHEUS_URL) ---")
@@ -2249,6 +2300,17 @@ def main():
     # Output: create the AIBOM directly as a namespaced custom resource, rather
     # than printing to stdout for the watcher to scrape from pod logs.
     print("--- Phase 3: AIBOM Custom Resource Creation ---")
+    # The reference goes into aibom["telemetry_series_ref"] before signing,
+    # so the series' sha256 is covered by the signature (spec is immutable, so
+    # it can't be added afterwards). The AIBOMTelemetry object is created first
+    # for that reason; it gets its ownerReference once the AIBOM's uid exists.
+    series_object_name = None
+    if series_encoded:
+        series_ref = publish_series_object(series_encoded)
+        if series_ref:
+            aibom["telemetry_series_ref"] = series_ref
+            series_object_name = series_ref["name"]
+            print(f"  Stored telemetry series in {SERIES_OBJECT_KIND}/{series_object_name} ({series_ref['size_bytes']} bytes)")
     aibom_cr = {
         "apiVersion": "aibom.io/v1alpha1",
         "kind": "AIBOM",
@@ -2296,8 +2358,44 @@ def main():
         created = k8s_api.create_custom_object(JOB_NAMESPACE, "aibom.io", "v1alpha1", "aiboms", aibom_cr)
     except Exception as e:
         print(f"ERROR: could not create AIBOM custom resource: {e}", file=sys.stderr)
+        if series_object_name:
+            try:
+                k8s_api.delete_custom_object(
+                    JOB_NAMESPACE, SERIES_API_GROUP, SERIES_API_VERSION, SERIES_PLURAL, series_object_name
+                )
+            except Exception as cleanup_err:
+                print(
+                    f"WARNING: could not clean up {SERIES_OBJECT_KIND}/{series_object_name}: {cleanup_err}",
+                    file=sys.stderr,
+                )
         sys.exit(1)
-    print(f"  Created AIBOM/{JOB_NAMESPACE}/{created.get('metadata', {}).get('name', '?')}")
+    created_meta = created.get("metadata", {})
+    print(f"  Created AIBOM/{JOB_NAMESPACE}/{created_meta.get('name', '?')}")
+    if series_object_name:
+        # blockOwnerDeletion needs update on aiboms/finalizers under OpenShift's
+        # owner-reference permission enforcement -- granted to this Job's Role
+        # in rbac.yaml for exactly this.
+        try:
+            k8s_api.set_custom_object_owner(
+                JOB_NAMESPACE,
+                SERIES_API_GROUP,
+                SERIES_API_VERSION,
+                SERIES_PLURAL,
+                series_object_name,
+                {
+                    "apiVersion": "aibom.io/v1alpha1",
+                    "kind": "AIBOM",
+                    "name": created_meta["name"],
+                    "uid": created_meta["uid"],
+                    "blockOwnerDeletion": True,
+                },
+            )
+        except Exception as e:
+            print(
+                f"WARNING: could not set ownerReference on {SERIES_OBJECT_KIND}/{series_object_name} "
+                f"(it will not be garbage-collected with the AIBOM): {e}",
+                file=sys.stderr,
+            )
     print()
 
     # Summary

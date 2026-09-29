@@ -1682,3 +1682,156 @@ def test_fit_series_doc_none_when_aggregates_alone_exceed_cap():
     doc = {"metrics": {"m": {"unit": "x", "aggregation": "sum", "aggregate": [[i, i] for i in range(1000)]}}}
     assert pp._fit_series_doc(doc, 100) is None
 
+
+def test_publish_series_object_creates_aibomtelemetry_and_returns_ref(monkeypatch):
+    import hashlib
+
+    monkeypatch.setattr(pp, "JOB_NAME", "train-job")
+    monkeypatch.setattr(pp, "JOB_NAMESPACE", "ns")
+    created = {}
+    monkeypatch.setattr(
+        pp.k8s_api, "create_custom_object",
+        lambda ns, group, version, plural, body: created.update(
+            ns=ns, group=group, version=version, plural=plural, body=body
+        ),
+    )
+    encoded = json.dumps({"window": {"start": 1, "end": 2, "step_seconds": 15}, "metrics": {}})
+    ref = pp.publish_series_object(encoded)
+
+    assert (created["ns"], created["group"], created["version"], created["plural"]) == (
+        "ns", "aibom.io", "v1alpha1", "aibomtelemetries",
+    )
+    body = created["body"]
+    assert body["apiVersion"] == "aibom.io/v1alpha1" and body["kind"] == "AIBOMTelemetry"
+    assert body["metadata"]["name"].startswith("train-job-telemetry-")
+    assert body["metadata"]["namespace"] == "ns"
+    assert body["metadata"]["labels"] == {"aibom.io/job-name": "train-job"}
+    assert "ownerReferences" not in body["metadata"]  # set after the AIBOM exists
+    assert "status" not in body
+    # The payload is stored as the exact string, so a reader can hash it.
+    assert body["spec"]["seriesJson"] == encoded
+    assert body["spec"]["schemaVersion"] == 1
+    assert body["spec"]["sizeBytes"] == len(encoded.encode())
+    assert body["spec"]["window"] == {"start": 1, "end": 2, "stepSeconds": 15}
+
+    assert ref == {
+        "schema_version": 1,
+        "kind": "AIBOMTelemetry",
+        "name": body["metadata"]["name"],
+        "sha256": hashlib.sha256(encoded.encode()).hexdigest(),
+        "size_bytes": len(encoded.encode()),
+        "window": {"start": 1, "end": 2, "step_seconds": 15},
+    }
+
+
+def test_publish_series_object_none_when_create_fails(monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("forbidden")
+
+    monkeypatch.setattr(pp.k8s_api, "create_custom_object", boom)
+    encoded = json.dumps({"window": {"start": 1, "end": 2, "step_seconds": 15}, "metrics": {}})
+    assert pp.publish_series_object(encoded) is None
+
+
+# main(): ordering, ownerReference and cleanup around the AIBOM create.
+
+
+@pytest.fixture
+def main_env(monkeypatch):
+    """Runs main() with everything but the Kubernetes calls stubbed, recording
+    the calls made against k8s_api in order."""
+    calls = []
+    monkeypatch.setattr(pp, "JOB_NAME", "train-job")
+    monkeypatch.setattr(pp, "JOB_NAMESPACE", "ns")
+    monkeypatch.setattr(pp, "PROMETHEUS_URL", "http://prometheus")
+    monkeypatch.setattr(pp, "load_discovery", lambda: [])
+    monkeypatch.setattr(pp, "load_datasets", lambda: ([], {}))
+    monkeypatch.setattr(pp, "load_annotations", lambda: {})
+    monkeypatch.setattr(pp, "load_containers", lambda: [])
+    monkeypatch.setattr(pp, "load_storage", lambda: {})
+    monkeypatch.setattr(pp, "collect_telemetry", lambda discoveries: {"pods": []})
+    encoded = json.dumps({"window": {"start": 1, "end": 2, "step_seconds": 15}, "metrics": {}})
+    monkeypatch.setattr(pp, "collect_telemetry_series", lambda t, v: encoded)
+    monkeypatch.setattr(pp, "sign_aibom", lambda aibom: (None, None))
+
+    def fake_create(ns, group, version, plural, body):
+        calls.append(("create", plural, body))
+        if plural == "aiboms":
+            if fake_create.aibom_error:
+                raise RuntimeError("admission denied")
+            return {"metadata": {"name": "train-job-abc12", "uid": "aibom-uid"}}
+        return {}
+
+    fake_create.aibom_error = False
+    monkeypatch.setattr(pp.k8s_api, "create_custom_object", fake_create)
+    monkeypatch.setattr(
+        pp.k8s_api, "set_custom_object_owner",
+        lambda ns, group, version, plural, name, owner: calls.append(("owner", plural, name, owner)),
+    )
+    monkeypatch.setattr(
+        pp.k8s_api, "delete_custom_object",
+        lambda ns, group, version, plural, name: calls.append(("delete", plural, name)),
+    )
+    return calls, fake_create, encoded
+
+
+def test_main_stores_series_object_signs_its_digest_and_owns_it_to_the_aibom(main_env):
+    import hashlib
+
+    calls, _, encoded = main_env
+    pp.main()
+
+    kinds = [c[:2] for c in calls]
+    # Telemetry object first (its digest must be inside the AIBOM's signed data),
+    # then the AIBOM, then the ownerReference.
+    assert kinds == [("create", "aibomtelemetries"), ("create", "aiboms"), ("owner", "aibomtelemetries")]
+
+    telemetry_name = calls[0][2]["metadata"]["name"]
+    aibom_data = calls[1][2]["spec"]["data"]
+    ref = aibom_data["telemetry_series_ref"]
+    assert ref["kind"] == "AIBOMTelemetry" and ref["name"] == telemetry_name
+    assert calls[0][2]["spec"]["seriesJson"] == encoded
+    assert ref["sha256"] == hashlib.sha256(encoded.encode()).hexdigest()
+
+    _, _, owned_name, owner = calls[2]
+    assert owned_name == telemetry_name
+    assert owner == {
+        "apiVersion": "aibom.io/v1alpha1", "kind": "AIBOM", "name": "train-job-abc12",
+        "uid": "aibom-uid", "blockOwnerDeletion": True,
+    }
+
+
+def test_main_deletes_series_object_when_aibom_create_fails(main_env):
+    calls, fake_create, _ = main_env
+    fake_create.aibom_error = True
+    with pytest.raises(SystemExit) as exc:
+        pp.main()
+
+    assert exc.value.code == 1
+    telemetry_name = calls[0][2]["metadata"]["name"]
+    assert calls[-1] == ("delete", "aibomtelemetries", telemetry_name)
+    assert not any(c[0] == "owner" for c in calls)
+
+
+def test_main_creates_aibom_without_reference_when_series_object_create_fails(main_env, monkeypatch):
+    calls, fake_create, _ = main_env
+    real_create = pp.k8s_api.create_custom_object
+
+    def create(ns, group, version, plural, body):
+        if plural == "aibomtelemetries":
+            raise RuntimeError("quota exceeded")
+        return real_create(ns, group, version, plural, body)
+
+    monkeypatch.setattr(pp.k8s_api, "create_custom_object", create)
+    pp.main()
+
+    aibom_call = [c for c in calls if c[:2] == ("create", "aiboms")][0]
+    assert "telemetry_series_ref" not in aibom_call[2]["spec"]["data"]
+    assert not any(c[0] in ("owner", "delete") for c in calls)
+
+
+def test_main_skips_series_object_when_no_series(main_env, monkeypatch):
+    calls, _, _ = main_env
+    monkeypatch.setattr(pp, "collect_telemetry_series", lambda t, v: None)
+    pp.main()
+    assert [c[:2] for c in calls] == [("create", "aiboms")]
