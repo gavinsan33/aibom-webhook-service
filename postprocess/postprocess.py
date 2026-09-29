@@ -355,6 +355,10 @@ SERIES_TARGET_POINTS = int(os.environ.get("AIBOM_SERIES_TARGET_POINTS", "200"))
 SERIES_MAX_BYTES = int(os.environ.get("AIBOM_SERIES_MAX_BYTES", "900000"))
 # A metric with more per-pod/per-GPU series than this keeps only its aggregate line.
 SERIES_MAX_SERIES_PER_METRIC = int(os.environ.get("AIBOM_SERIES_MAX_SERIES_PER_METRIC", "64"))
+# When the document is over SERIES_MAX_BYTES, resolution is reduced first (see
+# _fit_series_doc) but never below this many points per line; only then is
+# per-pod/per-GPU detail dropped.
+SERIES_MIN_POINTS = int(os.environ.get("AIBOM_SERIES_MIN_POINTS", "100"))
 
 # ---------------------------------------------------------------------------
 # Input loading
@@ -1494,11 +1498,68 @@ def _encode_series_doc(doc):
     return json.dumps(doc, separators=(",", ":"), sort_keys=True)
 
 
+def _rebucket_points(points, anchor, bucket_s, how):
+    """Merges points onto a coarser grid of bucket_s-second buckets starting at
+    anchor, reducing each bucket by "avg" or "max". A bucket is labeled with
+    its start time, which stays on the original grid (the source points sit at
+    anchor + i * step)."""
+    buckets = {}
+    for ts, value in points:
+        buckets.setdefault((ts - anchor) // bucket_s, []).append(value)
+    reducer = max if how == "max" else (lambda vs: sum(vs) / len(vs))
+    return [[anchor + k * bucket_s, _round_sig(reducer(vs))] for k, vs in sorted(buckets.items())]
+
+
+def _rebucket_series_doc(doc, factor):
+    """Returns a copy of doc at `factor` times coarser resolution. Lines and
+    per-series points are averaged per bucket; aggregate_max (already a
+    per-bucket peak) takes the max, so a spike survives as the peak of its
+    merged bucket instead of being averaged away."""
+    window = doc["window"]
+    anchor, bucket_s = window["start"], window["step_seconds"] * factor
+    out = {**doc, "window": {**window, "step_seconds": bucket_s}, "metrics": {}}
+    for name, metric in doc["metrics"].items():
+        merged = {k: v for k, v in metric.items() if k not in ("aggregate", "aggregate_max", "series")}
+        merged["aggregate"] = _rebucket_points(metric["aggregate"], anchor, bucket_s, "avg")
+        if "aggregate_max" in metric:
+            merged["aggregate_max"] = _rebucket_points(metric["aggregate_max"], anchor, bucket_s, "max")
+        if "series" in metric:
+            merged["series"] = [
+                {"labels": s["labels"], "points": _rebucket_points(s["points"], anchor, bucket_s, "avg")}
+                for s in metric["series"]
+            ]
+        out["metrics"][name] = merged
+    return out
+
+
 def _fit_series_doc(doc, max_bytes):
-    """Serializes doc, dropping per-pod/per-GPU detail (largest metric first)
-    until it fits max_bytes -- the aggregate lines are kept. Returns the
-    encoded string, or None if even the aggregates alone don't fit."""
+    """Serializes doc, shrinking it until it fits max_bytes, in this order:
+
+    1. Reduce resolution (2x, 3x, ... coarser), as long as every line keeps at
+       least SERIES_MIN_POINTS points. Per-GPU/per-pod detail is the one thing
+       only this feature can show, so it's worth more than full resolution.
+    2. Drop per-pod/per-GPU detail, largest metric first.
+
+    The aggregate lines are never dropped. Returns the encoded string, or None
+    if even the aggregates alone don't fit."""
     encoded = _encode_series_doc(doc)
+    if len(encoded.encode("utf-8")) <= max_bytes:
+        return encoded
+
+    original = doc
+    points = max((len(m["aggregate"]) for m in original["metrics"].values()), default=0)
+    factor = 2
+    while -(-points // factor) >= SERIES_MIN_POINTS:  # ceil(points / factor)
+        # Always re-bucketed from the original, never from the previous
+        # candidate, so factors don't compound.
+        doc = _rebucket_series_doc(original, factor)
+        encoded = _encode_series_doc(doc)
+        if len(encoded.encode("utf-8")) <= max_bytes:
+            print(f"  Reduced telemetry series resolution {factor}x (to {doc['window']['step_seconds']}s steps) to fit the size cap")
+            return encoded
+        factor += 1
+    # `doc` is now the coarsest allowed resolution (or the original, if none was possible).
+
     while len(encoded.encode("utf-8")) > max_bytes:
         sizes = [
             (len(json.dumps(m["series"])), name) for name, m in doc["metrics"].items() if "series" in m

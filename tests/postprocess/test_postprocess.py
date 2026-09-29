@@ -1679,8 +1679,136 @@ def test_fit_series_doc_drops_largest_detail_first_and_keeps_aggregates():
 
 
 def test_fit_series_doc_none_when_aggregates_alone_exceed_cap():
-    doc = {"metrics": {"m": {"unit": "x", "aggregation": "sum", "aggregate": [[i, i] for i in range(1000)]}}}
+    doc = {
+        "window": {"start": 0, "end": 999, "step_seconds": 1},
+        "metrics": {"m": {"unit": "x", "aggregation": "sum", "aggregate": [[i, i] for i in range(1000)]}},
+    }
     assert pp._fit_series_doc(doc, 100) is None
+
+
+def _gridded_doc(n_points, n_series, step=30, start=1000):
+    """A doc with one gauge metric: an aggregate line, a peak line and n_series
+    per-GPU series, all on the same n_points-long grid."""
+    ts = [start + i * step for i in range(n_points)]
+    return {
+        "schema_version": 1,
+        "window": {"start": start, "end": ts[-1], "step_seconds": step},
+        "metrics": {
+            "gpu_utilization": {
+                "unit": "percent",
+                "aggregation": "avg",
+                "aggregate": [[t, 50.0] for t in ts],
+                "aggregate_max": [[t, 60.0 + i] for i, t in enumerate(ts)],
+                "series": [
+                    {"labels": {"pod": "p0", "gpu": str(g)}, "points": [[t, float(g)] for t in ts]}
+                    for g in range(n_series)
+                ],
+            }
+        },
+    }
+
+
+def test_rebucket_points_averages_and_labels_buckets_on_the_original_grid():
+    points = [[1000, 10], [1030, 20], [1060, 30], [1090, 50], [1120, 100]]
+    assert pp._rebucket_points(points, 1000, 60, "avg") == [[1000, 15], [1060, 40], [1120, 100]]
+    assert pp._rebucket_points(points, 1000, 60, "max") == [[1000, 20], [1060, 50], [1120, 100]]
+
+
+def test_rebucket_series_doc_doubles_step_and_keeps_peaks_as_maxes():
+    doc = _gridded_doc(200, 2)
+    coarse = pp._rebucket_series_doc(doc, 2)
+    metric = coarse["metrics"]["gpu_utilization"]
+
+    assert coarse["window"]["step_seconds"] == 60
+    assert coarse["window"]["start"] == doc["window"]["start"]
+    assert len(metric["aggregate"]) == 100
+    assert metric["aggregate"][0] == [1000, 50]
+    # aggregate_max is 60, 61, 62, ... -- each merged bucket keeps the larger of its two.
+    assert metric["aggregate_max"][0] == [1000, 61]
+    assert metric["aggregate_max"][1] == [1060, 63]
+    assert [s["labels"] for s in metric["series"]] == [{"pod": "p0", "gpu": "0"}, {"pod": "p0", "gpu": "1"}]
+    assert len(metric["series"][0]["points"]) == 100
+    # The input is untouched.
+    assert len(doc["metrics"]["gpu_utilization"]["aggregate"]) == 200
+
+
+def test_fit_series_doc_reduces_resolution_before_dropping_detail(monkeypatch):
+    monkeypatch.setattr(pp, "SERIES_MIN_POINTS", 100)
+    doc = _gridded_doc(200, 20)
+    full = len(pp._encode_series_doc(doc).encode())
+    half = len(pp._encode_series_doc(pp._rebucket_series_doc(doc, 2)).encode())
+    assert half < full
+    encoded = pp._fit_series_doc(doc, (full + half) // 2)  # too big at 200 points, fits at 100
+    result = json.loads(encoded)
+    metric = result["metrics"]["gpu_utilization"]
+
+    assert result["window"]["step_seconds"] == 60
+    assert len(metric["aggregate"]) == 100
+    # Per-GPU detail survived: resolution was given up instead.
+    assert "series_omitted" not in metric and len(metric["series"]) == 20
+    assert len(metric["aggregate_max"]) == 100
+
+
+def test_fit_series_doc_leaves_full_resolution_when_it_already_fits():
+    doc = _gridded_doc(200, 2)
+    result = json.loads(pp._fit_series_doc(doc, 10_000_000))
+    assert result["window"]["step_seconds"] == 30
+    assert len(result["metrics"]["gpu_utilization"]["aggregate"]) == 200
+
+
+def test_fit_series_doc_never_goes_below_the_minimum_points(monkeypatch):
+    monkeypatch.setattr(pp, "SERIES_MIN_POINTS", 100)
+    # 150 points can't be halved (75 < 100), so detail is dropped at full resolution.
+    doc = _gridded_doc(150, 20)
+    aggregates_only = len(pp._encode_series_doc(_without_series(doc)).encode())
+    result = json.loads(pp._fit_series_doc(doc, aggregates_only + 50))
+    metric = result["metrics"]["gpu_utilization"]
+    assert result["window"]["step_seconds"] == 30
+    assert len(metric["aggregate"]) == 150
+    assert metric["series_omitted"] is True and "series" not in metric
+
+
+def _without_series(doc):
+    return {**doc, "metrics": {n: {k: v for k, v in m.items() if k != "series"} for n, m in doc["metrics"].items()}}
+
+
+def test_fit_series_doc_reduces_resolution_then_drops_detail_when_still_too_big(monkeypatch):
+    monkeypatch.setattr(pp, "SERIES_MIN_POINTS", 100)
+    doc = _gridded_doc(200, 40)
+    coarse_aggregates_only = len(
+        pp._encode_series_doc(_without_series(pp._rebucket_series_doc(doc, 2))).encode()
+    )
+    result = json.loads(pp._fit_series_doc(doc, coarse_aggregates_only + 50))
+    metric = result["metrics"]["gpu_utilization"]
+    # Both steps were needed: coarsest allowed resolution, and no detail.
+    assert result["window"]["step_seconds"] == 60 and len(metric["aggregate"]) == 100
+    assert metric["series_omitted"] is True and "series" not in metric
+    assert len(metric["aggregate_max"]) == 100
+
+
+def test_collect_telemetry_series_halves_resolution_to_keep_gpu_detail(monkeypatch):
+    pods = [f"p{i}" for i in range(4)]
+
+    def fake_query_range(promql, start_ms, end_ms, step_seconds=None):
+        if "DCGM_FI_DEV_GPU_UTIL" not in promql:
+            return None
+        ts = list(range(int(start_ms / 1000), int(end_ms / 1000) + 1, step_seconds))
+        return _range_response(
+            *[({"exported_pod": p, "gpu": str(g)}, [(t, 50 + g) for t in ts]) for p in pods for g in range(8)]
+        )
+
+    monkeypatch.setattr(pp, "query_prometheus_range", fake_query_range)
+    monkeypatch.setattr(pp, "SERIES_TARGET_POINTS", 200)
+    telemetry = {"pods": [{"pod_name": p, "start_time": "2026-01-01T00:00:00Z"} for p in pods]}
+
+    full_size = len(pp.collect_telemetry_series(telemetry, None).encode())
+    monkeypatch.setattr(pp, "SERIES_MAX_BYTES", int(full_size * 0.7))
+    doc = json.loads(pp.collect_telemetry_series(telemetry, None))
+    metric = doc["metrics"]["gpu_utilization"]
+
+    assert len(metric["aggregate"]) <= 101
+    assert len(metric["series"]) == 32  # every GPU of every pod is still there
+    assert "series_omitted" not in metric
 
 
 def test_publish_series_object_creates_aibomtelemetry_and_returns_ref(monkeypatch):
