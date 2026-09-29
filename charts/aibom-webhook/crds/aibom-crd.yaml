@@ -73,3 +73,93 @@ spec:
         - name: Age
           type: date
           jsonPath: .metadata.creationTimestamp
+---
+# Downsampled telemetry time series for one AIBOM (see CLAUDE.md's Telemetry
+# Time Series). Kept as its own kind, in the same file as the AIBOM CRD so the
+# justfile's existing `oc apply -f .../aibom-crd.yaml` (and the --skip-crds
+# instructions) cover both, rather than
+#   - inline in AIBOM spec.data, which every AIBOM list/watch would then carry
+#     (~100 KB each) although a list view never uses it, or
+#   - a ConfigMap, which clutters the namespace's ConfigMap list and is
+#     writable by every workload ServiceAccount through rbac.yaml's broad
+#     aibom-workload-data Role. Nothing but aibom-postprocess is granted this
+#     kind, so no workload pod can forge or overwrite one.
+# One object per AIBOM, in its namespace, owned by it (garbage-collected with
+# it). Object size shares etcd's ~1.5 MB limit with everything else.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: aibomtelemetries.aibom.io
+spec:
+  group: aibom.io
+  scope: Namespaced
+  names:
+    plural: aibomtelemetries
+    singular: aibomtelemetry
+    kind: AIBOMTelemetry
+    shortNames:
+      - aibomtel
+    categories:
+      - aibom
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              x-kubernetes-validations:
+                - rule: "self == oldSelf"
+                  message: "spec is immutable once created"
+              required:
+                - schemaVersion
+                - window
+                - seriesJson
+              properties:
+                schemaVersion:
+                  type: integer
+                  description: >-
+                    Schema version of the JSON document in seriesJson
+                    (matches its own schema_version field).
+                sizeBytes:
+                  type: integer
+                  description: UTF-8 byte length of seriesJson.
+                window:
+                  type: object
+                  description: >-
+                    The time window the series cover, repeated from
+                    seriesJson for kubectl readability. Unix seconds (UTC).
+                  required: [start, end, stepSeconds]
+                  properties:
+                    start:
+                      type: integer
+                    end:
+                      type: integer
+                    stepSeconds:
+                      type: integer
+                seriesJson:
+                  type: string
+                  maxLength: 900000
+                  description: >-
+                    The series document as an exact JSON string (not
+                    structured YAML), so a reader can hash precisely what was
+                    stored and compare it to the sha256 in the owning AIBOM's
+                    signed spec.data.telemetry_series_ref -- re-serialized
+                    structured JSON can't be hashed reliably without a
+                    canonicalizer.
+      additionalPrinterColumns:
+        - name: AIBOM
+          type: string
+          jsonPath: .metadata.ownerReferences[0].name
+        - name: Size
+          type: integer
+          jsonPath: .spec.sizeBytes
+        - name: Window End
+          type: integer
+          jsonPath: .spec.window.end
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
