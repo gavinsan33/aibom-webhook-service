@@ -1768,10 +1768,6 @@ def main_env(monkeypatch):
         pp.k8s_api, "set_custom_object_owner",
         lambda ns, group, version, plural, name, owner: calls.append(("owner", plural, name, owner)),
     )
-    monkeypatch.setattr(
-        pp.k8s_api, "delete_custom_object",
-        lambda ns, group, version, plural, name: calls.append(("delete", plural, name)),
-    )
     return calls, fake_create, encoded
 
 
@@ -1801,7 +1797,7 @@ def test_main_stores_series_object_signs_its_digest_and_owns_it_to_the_aibom(mai
     }
 
 
-def test_main_deletes_series_object_when_aibom_create_fails(main_env):
+def test_main_warns_about_orphaned_series_object_when_aibom_create_fails(main_env, capsys):
     calls, fake_create, _ = main_env
     fake_create.aibom_error = True
     with pytest.raises(SystemExit) as exc:
@@ -1809,8 +1805,12 @@ def test_main_deletes_series_object_when_aibom_create_fails(main_env):
 
     assert exc.value.code == 1
     telemetry_name = calls[0][2]["metadata"]["name"]
-    assert calls[-1] == ("delete", "aibomtelemetries", telemetry_name)
-    assert not any(c[0] == "owner" for c in calls)
+    # No delete is attempted (the Role withholds it) and no owner is set; the
+    # orphan is reported with the command to remove it instead.
+    assert [c[:2] for c in calls] == [("create", "aibomtelemetries"), ("create", "aiboms")]
+    err = capsys.readouterr().err
+    assert f"AIBOMTelemetry/{telemetry_name} is now orphaned" in err
+    assert f"oc delete aibomtel {telemetry_name} -n ns" in err
 
 
 def test_main_creates_aibom_without_reference_when_series_object_create_fails(main_env, monkeypatch):
@@ -1827,7 +1827,7 @@ def test_main_creates_aibom_without_reference_when_series_object_create_fails(ma
 
     aibom_call = [c for c in calls if c[:2] == ("create", "aiboms")][0]
     assert "telemetry_series_ref" not in aibom_call[2]["spec"]["data"]
-    assert not any(c[0] in ("owner", "delete") for c in calls)
+    assert not any(c[0] == "owner" for c in calls)
 
 
 def test_main_skips_series_object_when_no_series(main_env, monkeypatch):

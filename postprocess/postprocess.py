@@ -2359,15 +2359,13 @@ def main():
     except Exception as e:
         print(f"ERROR: could not create AIBOM custom resource: {e}", file=sys.stderr)
         if series_object_name:
-            try:
-                k8s_api.delete_custom_object(
-                    JOB_NAMESPACE, SERIES_API_GROUP, SERIES_API_VERSION, SERIES_PLURAL, series_object_name
-                )
-            except Exception as cleanup_err:
-                print(
-                    f"WARNING: could not clean up {SERIES_OBJECT_KIND}/{series_object_name}: {cleanup_err}",
-                    file=sys.stderr,
-                )
+            # This identity has no delete on aibomtelemetries (rbac.yaml), so the
+            # object can't be cleaned up here; the Job's retry stores a fresh one.
+            print(
+                f"WARNING: {SERIES_OBJECT_KIND}/{series_object_name} is now orphaned (no AIBOM owns it); "
+                f"remove it with: oc delete aibomtel {series_object_name} -n {JOB_NAMESPACE}",
+                file=sys.stderr,
+            )
         sys.exit(1)
     created_meta = created.get("metadata", {})
     print(f"  Created AIBOM/{JOB_NAMESPACE}/{created_meta.get('name', '?')}")

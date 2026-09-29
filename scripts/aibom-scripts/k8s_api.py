@@ -119,17 +119,6 @@ def set_custom_object_owner(namespace, group, version, plural, name, owner):
     )
 
 
-def delete_custom_object(namespace, group, version, plural, name):
-    """DELETE a namespaced custom resource; a missing one is not an error."""
-    path = f"/apis/{group}/{version}/namespaces/{namespace}/{plural}/{name}"
-    try:
-        return _request("DELETE", path)
-    except urllib.error.HTTPError as e:
-        if e.code != 404:
-            raise
-        return None
-
-
 def get_custom_object(namespace, group, version, plural, name):
     """GET a namespaced custom resource, e.g. a KServe InferenceService
     (serving.kserve.io/v1beta1). Returns None if it doesn't exist (or has

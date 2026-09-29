@@ -10,14 +10,19 @@ rules:
   # The persisted telemetry time series (postprocess.py's
   # publish_series_object): an AIBOMTelemetry created before the AIBOM (its
   # sha256 is part of the signed spec), given an ownerReference to the AIBOM
-  # afterwards (patch), and deleted if the AIBOM create then fails. Names are
-  # random per run, so this can't be narrowed with resourceNames. Deliberately
-  # a custom kind, not a ConfigMap: no other ServiceAccount in the namespace
-  # is granted it (unlike aibom-workload-data below), so a workload pod can't
-  # forge or overwrite a run's series.
+  # afterwards (patch). Names are random per run, so this can't be narrowed
+  # with resourceNames -- which is exactly why `delete` is withheld: with it,
+  # a compromised postprocess could erase any other run's series in this
+  # namespace, and unlike aiboms (create/get only) that would widen what this
+  # identity can destroy. The cost is that an object created just before a
+  # failed AIBOM create is orphaned rather than cleaned up (see CLAUDE.md's
+  # Telemetry Time Series). Deliberately a custom kind, not a ConfigMap: no
+  # other ServiceAccount in the namespace is granted it (unlike
+  # aibom-workload-data below), so a workload pod can't forge or overwrite a
+  # run's series.
   - apiGroups: ["aibom.io"]
     resources: ["aibomtelemetries"]
-    verbs: ["create", "patch", "delete"]
+    verbs: ["create", "patch"]
   # The ownerReference is set with blockOwnerDeletion: true, which OpenShift's
   # OwnerReferencesPermissionEnforcement admission plugin only allows for a
   # requester that can update the owner's finalizers subresource.
