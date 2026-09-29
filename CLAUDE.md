@@ -62,7 +62,7 @@ JCS's number canonicalization (RFC 8785 §3.2.2.3, an ECMA-262-derived algorithm
 
 1. **Data ConfigMap read/merge**: The Job's pods (and sibling pods in a JobSet) have already written their own discovery/storage data (via the `aibom-discovery` init container) and dataset data (via the `aibom-dataset-sidecar` container, see Dataset Data Signing above) into the per-workload data ConfigMap (`{job-name}-aibom-postprocess-data`) via the Kubernetes API. The watcher reads that ConfigMap (creating it if the pods never got to write anything) and merges in `annotations.json`/`containers.json`/aggregated `discovery.json`/`dataset.json` keys that `postprocess.py` expects.
 2. **Finalizer removal**: If the Job has the `aibom.io/log-extraction` finalizer, it is removed after this step, allowing Kubernetes to complete the deletion. (The finalizer's name predates the current data path but is kept as-is to avoid breaking finalizers already held on live objects.)
-3. **Postprocess Job**: Runs `postprocess.py` under a dedicated `aibom-postprocess` ServiceAccount (RBAC scoped to `aiboms.aibom.io` create/get in this namespace only). It loads discovery/dataset data from the ConfigMap mount, optionally queries Prometheus for telemetry, compiles everything into an AIBOM JSON document, and creates the `AIBOM` custom resource directly via the Kubernetes API (no watcher involvement) — a failed create exits the process non-zero, so Kubernetes' own Job retry/failure handling (`backoffLimit`) becomes the visible signal instead of a silently-dropped log line.
+3. **Postprocess Job**: Runs `postprocess.py` under a dedicated `aibom-postprocess` ServiceAccount (RBAC scoped to `aiboms.aibom.io` create/get, plus `aibomtelemetries` create/patch/delete and `aiboms/finalizers` update for the telemetry time-series object — see Telemetry Time Series — in this namespace only). It loads discovery/dataset data from the ConfigMap mount, optionally queries Prometheus for telemetry, compiles everything into an AIBOM JSON document, and creates the `AIBOM` custom resource directly via the Kubernetes API (no watcher involvement) — a failed create exits the process non-zero, so Kubernetes' own Job retry/failure handling (`backoffLimit`) becomes the visible signal instead of a silently-dropped log line.
 4. **Cleanup**: Once the postprocess Job finishes (success or failure — `isJobFinished` treats both as terminal), the watcher deletes the postprocess Job and its data ConfigMap so a same-named rerun of the workload doesn't collide with leftovers. `--debug-keep-postprocess-jobs` (`debug.keepPostprocessJobs` chart value) skips this — the Job is still annotated `aibom.io/aibom-collected` so a resync doesn't try to collect it again, but it and its data ConfigMap are left in place for inspecting postprocess pod logs/exit state or the ConfigMap's merged discovery/dataset data. Leaks one of each per completed workload indefinitely; not for routine production use.
 
 ### Workload Selection and Grouping
@@ -217,6 +217,62 @@ This is deliberately paired with [Pod Termination Status](#pod-termination-statu
 Full-resolution time-series data is deliberately not stored anywhere in the AIBOM — the Grafana Explore link remains the escape hatch for that level of detail.
 
 A pod with no detected GPU (`gpu_count` 0 or missing in its discovery data, e.g. `nvidia-smi` found no hardware) is skipped for telemetry entirely — there's no GPU utilization to query, so it's omitted rather than querying anyway. On a mock cluster (e.g. kind) with no real GPU hardware, `nvidia-smi` always reports zero GPUs, so every pod gets skipped and telemetry collection never runs at all. `--debug-telemetry-all-pods` (`debug.telemetryAllPods` chart value, plumbed to the postprocess Job as `AIBOM_DEBUG_TELEMETRY_ALL_PODS`) bypasses this check so telemetry is queried for every pod regardless of detected GPU count — for local testing only, not routine production use.
+
+## Telemetry Time Series
+
+The summary stats above deliberately keep no series (`spec` is immutable and sized for a small object), and cluster Prometheus retention (~15 days) means a UI that charts live from Prometheus (the `aibom-console-plugin`) shows nothing for older AIBOMs. So `postprocess.py` also persists a **downsampled** copy of each metric's series at collection time, while Prometheus still has it. It is entirely additive: no summary-stat field or behavior changed, and an AIBOM without it is fully valid (readers fall back to live Prometheus).
+
+**Storage: a dedicated `AIBOMTelemetry` custom resource, referenced from the signed AIBOM.** Inline in `spec.data` would make every AIBOM list/watch carry ~100 KB+ per row (the console plugin's list page watches every AIBOM but never uses the series), and per-pod/per-GPU detail can approach the ~1.5 MB etcd object cap. A ConfigMap avoids that but clutters the namespace's ConfigMap list, and is writable by every workload ServiceAccount through `aibom-workload-data`'s broad Role (see `ValidateSigningPublicKeyConfigMap`'s doc comment for the same problem) — it would have needed its own admission guard. `aibomtelemetries.aibom.io` (kind `AIBOMTelemetry`, `v1alpha1`, namespaced, short name `aibomtel`, category `aibom`; defined next to the AIBOM CRD in `charts/aibom-webhook/crds/aibom-crd.yaml`, so the existing `oc apply -f` steps cover both) has neither problem: it stays out of the ConfigMap list, the AIBOM watch never sees it, and only `aibom-postprocess` is granted the kind at all, so no workload pod can forge or overwrite one. Its `spec` is CEL-immutable like the AIBOM's, and it has no `status`.
+
+`publish_series_object` creates one per AIBOM, named `<job-name>-telemetry-<random>` (the AIBOM itself uses `generateName`, so its name isn't known up front; readers must use the name in the reference, never a naming convention), in the AIBOM's namespace, labeled `aibom.io/job-name`. Spec fields: `seriesJson` (string), `schemaVersion`, `sizeBytes`, `window{start,end,stepSeconds}` — the last three only for `kubectl` readability (`oc get aibomtel` shows owning AIBOM, size, window end).
+
+- **`seriesJson` is a string, not structured YAML**, so a reader can hash precisely what was stored and compare it to the signed digest. Re-serialized structured JSON can't be hashed reliably without an RFC 8785 canonicalizer, which the console plugin doesn't have. Capped by the CRD at `maxLength: 900000`.
+- **Order matters.** The reference must be inside the *signed* `spec.data` (spec is CEL-immutable, so it can't be added later), and the digest has to exist before that. So the `AIBOMTelemetry` is created first, then the AIBOM (signed over `data` including the reference), then the `AIBOMTelemetry` is PATCHed with an `ownerReference` (`blockOwnerDeletion: true`) to the AIBOM. Garbage collection then deletes it with the AIBOM.
+- **Integrity.** The object's content isn't itself signed; `spec.data.telemetry_series_ref.sha256` (hash of the exact `spec.seriesJson` string, UTF-8) is, so a verifier checks the object against the signed digest. `oc-aibom` doesn't do this check yet.
+- **Failure modes.** Prometheus down/empty, size cap exceeded, or the object create denied (e.g. an old namespace without the new CRD/Role, or a `count/aibomtelemetries.aibom.io` ResourceQuota) → the AIBOM is created without `telemetry_series_ref` (a warning is logged; the Job doesn't fail). If AIBOM creation fails after the object exists, it's deleted best-effort. If the owner PATCH fails, the object is orphaned (still labeled `aibom.io/job-name`) — logged. A Job attempt that dies between the object create and the AIBOM create can also leave an orphan; the random name means a retry never collides with it.
+- **RBAC.**
+  - `aibom-postprocess` Role (`charts/aibom-workload-namespace/templates/rbac.yaml`): `aibomtelemetries` create/patch/delete, plus `aiboms/finalizers` update — OpenShift's owner-reference permission enforcement requires it to set `blockOwnerDeletion: true` on an owner. Names are random per run, so this can't be `resourceNames`-scoped. No ConfigMap grant was added for this.
+  - Viewers: the `aibom-view` ClusterRole (`charts/aibom-webhook/templates/aibom-view-clusterrole.yaml`, aggregated into `view`/`edit`/`admin`) now lists `aibomtelemetries` next to `aiboms` (get/list/watch). The standard `view` role doesn't cover custom kinds, so this is what lets a viewer's own token read them; nothing cluster-wide beyond that.
+- **Upgrading existing namespaces.** They need the new CRD (`just deploy` re-applies `aibom-crd.yaml` every run, or `oc apply -f` it after `--skip-crds`), the webhook chart upgrade for the `aibom-view` change, and an `aibom-workload-namespace` chart upgrade for the postprocess Role. Until all are in place, runs still produce AIBOMs, just without series.
+
+**Reference, at `spec.data.telemetry_series_ref`:**
+
+```json
+{"schema_version": 1, "kind": "AIBOMTelemetry", "name": "<object name>",
+ "sha256": "<hex of spec.seriesJson>", "size_bytes": 12345,
+ "window": {"start": 1767225600, "end": 1767229200, "step_seconds": 30}}
+```
+
+(The first version of this feature stored the series in a ConfigMap instead, with `configmap` and `key` in place of `kind` and `name`; those AIBOMs aren't migrated, and readers should accept both shapes.)
+
+**Document, at `AIBOMTelemetry.spec.seriesJson`** (compact JSON string, `sort_keys`):
+
+```json
+{"schema_version": 1,
+ "window": {"start": <unix s>, "end": <unix s>, "step_seconds": <int>},
+ "pods": ["..."],
+ "metrics": {
+   "<metric key>": {
+     "unit": "cores", "aggregation": "sum|avg",
+     "aggregate": [[<unix s>, <value>], ...],
+     "aggregate_max": [[<unix s>, <value>], ...],
+     "series": [{"labels": {"pod": "...", "container": "...", "interface": "...", "gpu": "..."},
+                 "points": [[<unix s>, <value>], ...]}],
+     "series_omitted": true
+   }}}
+```
+
+- **Timestamps are integer unix seconds (UTC)** — no timezone suffix to misread, unlike the pod `start_time` strings.
+- **Metric keys** are the same as `resource_utilization.metrics` (`gpu_utilization`, `gpu_memory_used`, `gpu_power`, `cpu_usage`, `memory_usage`, `network_receive`, `network_transmit`, `storage_read_throughput`, `storage_write_throughput`) and `inference.performance.metrics` (`time_to_first_token_seconds`, `inter_token_latency_seconds`, `num_requests_running`, `num_requests_waiting`, `kv_cache_usage`, `prompt_throughput`, `generation_throughput`; vLLM pods only). Only metrics that returned data are present.
+- **Units are raw base units** (`bytes`, `bytes_per_sec`, `cores`, `MiB`, `watts`, `percent`, `seconds`, `requests`, `tokens_per_sec`), *not* the display-scaled units (GB/Mbps/MBps) `resource_utilization` reports — the reader scales.
+- **`aggregate` is the per-run line** (the default chart): `sum` across all series for memory/CPU/network/storage/GPU memory/GPU power/queue depth/throughput, `avg` for utilization, KV-cache and latency (an unweighted mean across pods — not request-weighted). `aggregate_max` exists only for gauge metrics and is the per-bucket peak (max across series for `avg` metrics; sum of each series' own bucket peak for `sum` metrics, a slight upper bound) so a spike shorter than the step survives downsampling.
+- **`series` is the optional per-pod expansion**: labels are `pod` (+ `container` for CPU/memory, `interface` for network, `gpu` for GPU metrics; GPU series carry the workload's `exported_pod`, normalized to `pod`). It's dropped (`series_omitted: true`) for a metric with more than 64 series (`AIBOM_SERIES_MAX_SERIES_PER_METRIC`) or, largest metric first, when the whole document would exceed 900 000 bytes (`AIBOM_SERIES_MAX_BYTES`, matching the CRD's `seriesJson` `maxLength` and well under etcd's ~1.5 MB object limit). `aggregate` is never dropped.
+
+**Collection.** `collect_telemetry_series` runs after the stats collection and its retries (no retries of its own). Unlike the stats path it uses one range query per metric for *all* pods (`pod=~"a|b|c"`, filtered by `namespace`), over the **full window** (earliest pod start → collection time, no cold-start trim), with the step chosen to land near 200 points (`AIBOM_SERIES_TARGET_POINTS`, minimum 15 s). Gauges use `avg_over_time`/`max_over_time` over the step so buckets tile rather than sampling single instants. Per-container CPU/memory/storage queries exclude the `aibom-dataset-sidecar` container (`container!="aibom-dataset-sidecar"`) — **the stats queries still include it**, so the two can disagree slightly; this is a known inconsistency left alone to avoid changing existing summary values.
+
+**GPU series.** The postprocess ServiceAccount already reads cluster-wide metrics via `cluster-monitoring-view`, and the DCGM series are filtered on `exported_namespace`/`exported_pod` (the workload's identity — DCGM's own `namespace` label is `nvidia-gpu-operator`), so per-GPU (`gpu` label) series are recorded. This is the only place per-GPU history is kept, since a viewer without cluster-wide metrics access can't query DCGM live. It needs dcgm-exporter's pod mapping enabled (otherwise `exported_pod` doesn't exist and the metric is simply absent).
+
+**Window start time.** `_parse_start_utc` treats a suffix-less `start_time` as UTC. The discovery init container writes `datetime.now().isoformat()` (local time, no suffix); the stats path parses it as the postprocess container's *local* time, so the two only agree if both images run in UTC.
 
 ## Inference Performance Telemetry
 
