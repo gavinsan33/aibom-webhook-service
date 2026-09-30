@@ -65,6 +65,27 @@ def test_get_cluster_object_reraises_other_http_errors(monkeypatch):
         k8s_api.get_cluster_object("image.openshift.io", "v1", "images", "sha256:x")
 
 
+def test_set_custom_object_owner_merge_patches_owner_references(monkeypatch):
+    calls = {}
+
+    def fake_request(method, path, body=None, content_type="application/json"):
+        calls.update(method=method, path=path, body=body, content_type=content_type)
+
+    monkeypatch.setattr(k8s_api, "_request", fake_request)
+    owner = {"apiVersion": "aibom.io/v1alpha1", "kind": "AIBOM", "name": "x", "uid": "u"}
+    k8s_api.set_custom_object_owner("ns", "aibom.io", "v1alpha1", "aibomtelemetries", "tel", owner)
+    assert calls["method"] == "PATCH"
+    assert calls["path"] == "/apis/aibom.io/v1alpha1/namespaces/ns/aibomtelemetries/tel"
+    assert calls["body"] == {"metadata": {"ownerReferences": [owner]}}
+    assert calls["content_type"] == "application/merge-patch+json"
+
+
+def test_k8s_api_exposes_no_delete_helper():
+    # aibom-postprocess is deliberately not granted delete on anything it
+    # creates (rbac.yaml); a helper for it would only ever 403.
+    assert not hasattr(k8s_api, "delete_custom_object")
+
+
 def test_resolve_data_configmap_name_truncates_long_pod_names(monkeypatch):
     # Mirrors aibomdata.ConfigMapName's truncation in aibomdata.go: budgeted
     # against WorkloadIdentitySuffix's length (the narrowest of the three

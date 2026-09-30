@@ -7,15 +7,17 @@ queries Prometheus for telemetry, and produces an AIBOM JSON document.
 """
 
 import base64
+import hashlib
 import json
 import math
 import os
 import re
+import secrets
 import shlex
 import ssl
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 import urllib.request
 import urllib.parse
@@ -205,6 +207,162 @@ VLLM_TELEMETRY_QUERIES = {
 }
 
 SCRAPE_INTERVAL_MS = 5 * 60 * 1000
+
+# ---------------------------------------------------------------------------
+# Persisted telemetry time series (see CLAUDE.md's Telemetry Time Series)
+# ---------------------------------------------------------------------------
+#
+# Separate from TELEMETRY_QUERIES/VLLM_TELEMETRY_QUERIES on purpose: those feed
+# the summary stats and must keep their exact semantics (cold-start-trimmed
+# window, one query per pod, labels discarded). These are queried once per
+# metric for the whole run (`pod=~"a|b|c"`, scoped to the workload namespace),
+# over the full window, with series labels preserved.
+#
+# Placeholders: {namespace}, {pod_regex}, and for gauges {win} (the step, so
+# buckets tile) and {fn} (avg, or max for the peak line). Raw base units are
+# stored (bytes, bytes/s, cores...) -- the `unit` field says which -- rather
+# than the display-scaled units resource_utilization uses.
+#
+# aibom-dataset-sidecar is excluded from per-container queries so the series
+# describe the workload, not this project's own injected container.
+_SERIES_CONTAINERS = 'container!="POD", container!="", container!="aibom-dataset-sidecar"'
+SERIES_QUERIES = {
+    "gpu_utilization": {
+        "query": (
+            '{fn} by (exported_pod, gpu) ({fn}_over_time('
+            'DCGM_FI_DEV_GPU_UTIL{exported_namespace="{namespace}", exported_pod=~"{pod_regex}"}[{win}s]))'
+        ),
+        "unit": "percent", "aggregation": "avg", "gauge": True,
+    },
+    "gpu_memory_used": {
+        "query": (
+            '{fn} by (exported_pod, gpu) ({fn}_over_time('
+            'DCGM_FI_DEV_FB_USED{exported_namespace="{namespace}", exported_pod=~"{pod_regex}"}[{win}s]))'
+        ),
+        "unit": "MiB", "aggregation": "sum", "gauge": True,
+    },
+    "gpu_power": {
+        "query": (
+            '{fn} by (exported_pod, gpu) ({fn}_over_time('
+            'DCGM_FI_DEV_POWER_USAGE{exported_namespace="{namespace}", exported_pod=~"{pod_regex}"}[{win}s]))'
+        ),
+        "unit": "watts", "aggregation": "sum", "gauge": True,
+    },
+    "cpu_usage": {
+        "query": (
+            'sum by (pod, container) (rate(container_cpu_usage_seconds_total{namespace="{namespace}", '
+            'pod=~"{pod_regex}", ' + _SERIES_CONTAINERS + '}[5m]))'
+        ),
+        "unit": "cores", "aggregation": "sum",
+    },
+    "memory_usage": {
+        "query": (
+            '{fn} by (pod, container) ({fn}_over_time(container_memory_working_set_bytes{namespace="{namespace}", '
+            'pod=~"{pod_regex}", ' + _SERIES_CONTAINERS + '}[{win}s]))'
+        ),
+        "unit": "bytes", "aggregation": "sum", "gauge": True,
+    },
+    "network_receive": {
+        "query": (
+            'sum by (pod, interface) (rate(container_network_receive_bytes_total{namespace="{namespace}", '
+            'pod=~"{pod_regex}"}[5m]))'
+        ),
+        "unit": "bytes_per_sec", "aggregation": "sum",
+    },
+    "network_transmit": {
+        "query": (
+            'sum by (pod, interface) (rate(container_network_transmit_bytes_total{namespace="{namespace}", '
+            'pod=~"{pod_regex}"}[5m]))'
+        ),
+        "unit": "bytes_per_sec", "aggregation": "sum",
+    },
+    # Same per-container-or-pod-level fallback as TELEMETRY_QUERIES.
+    "storage_read_throughput": {
+        "query": (
+            'sum by (pod) (rate(container_fs_reads_bytes_total{namespace="{namespace}", pod=~"{pod_regex}", '
+            + _SERIES_CONTAINERS + '}[5m]))'
+            ' or sum by (pod) (rate(container_fs_reads_bytes_total{namespace="{namespace}", '
+            'pod=~"{pod_regex}", container=""}[5m]))'
+        ),
+        "unit": "bytes_per_sec", "aggregation": "sum",
+    },
+    "storage_write_throughput": {
+        "query": (
+            'sum by (pod) (rate(container_fs_writes_bytes_total{namespace="{namespace}", pod=~"{pod_regex}", '
+            + _SERIES_CONTAINERS + '}[5m]))'
+            ' or sum by (pod) (rate(container_fs_writes_bytes_total{namespace="{namespace}", '
+            'pod=~"{pod_regex}", container=""}[5m]))'
+        ),
+        "unit": "bytes_per_sec", "aggregation": "sum",
+    },
+}
+
+VLLM_SERIES_QUERIES = {
+    "time_to_first_token_seconds": {
+        "query": (
+            'sum by (pod) (rate(vllm:time_to_first_token_seconds_sum{namespace="{namespace}", pod=~"{pod_regex}"}[5m]))'
+            ' / sum by (pod) (rate(vllm:time_to_first_token_seconds_count{namespace="{namespace}", pod=~"{pod_regex}"}[5m]))'
+        ),
+        "unit": "seconds", "aggregation": "avg",
+    },
+    "inter_token_latency_seconds": {
+        "query": (
+            'sum by (pod) (rate(vllm:inter_token_latency_seconds_sum{namespace="{namespace}", pod=~"{pod_regex}"}[5m]))'
+            ' / sum by (pod) (rate(vllm:inter_token_latency_seconds_count{namespace="{namespace}", pod=~"{pod_regex}"}[5m]))'
+        ),
+        "unit": "seconds", "aggregation": "avg",
+    },
+    "num_requests_running": {
+        "query": (
+            '{fn} by (pod) ({fn}_over_time(vllm:num_requests_running{namespace="{namespace}", '
+            'pod=~"{pod_regex}"}[{win}s]))'
+        ),
+        "unit": "requests", "aggregation": "sum", "gauge": True,
+    },
+    "num_requests_waiting": {
+        "query": (
+            '{fn} by (pod) ({fn}_over_time(vllm:num_requests_waiting{namespace="{namespace}", '
+            'pod=~"{pod_regex}"}[{win}s]))'
+        ),
+        "unit": "requests", "aggregation": "sum", "gauge": True,
+    },
+    "kv_cache_usage": {
+        "query": (
+            '{fn} by (pod) ({fn}_over_time(vllm:kv_cache_usage_perc{namespace="{namespace}", '
+            'pod=~"{pod_regex}"}[{win}s]))'
+        ),
+        "unit": "percent", "aggregation": "avg", "gauge": True,
+    },
+    "prompt_throughput": {
+        "query": 'sum by (pod) (rate(vllm:prompt_tokens_total{namespace="{namespace}", pod=~"{pod_regex}"}[5m]))',
+        "unit": "tokens_per_sec", "aggregation": "sum",
+    },
+    "generation_throughput": {
+        "query": 'sum by (pod) (rate(vllm:generation_tokens_total{namespace="{namespace}", pod=~"{pod_regex}"}[5m]))',
+        "unit": "tokens_per_sec", "aggregation": "sum",
+    },
+}
+
+SERIES_SCHEMA_VERSION = 1
+SERIES_OBJECT_KIND = "AIBOMTelemetry"
+SERIES_API_GROUP = "aibom.io"
+SERIES_API_VERSION = "v1alpha1"
+SERIES_PLURAL = "aibomtelemetries"
+# Roughly the number of points kept per metric (the query step is derived from it).
+SERIES_TARGET_POINTS = int(os.environ.get("AIBOM_SERIES_TARGET_POINTS", "200"))
+# The step (and so the _over_time window of gauge queries, which equals it) is
+# floored at the Prometheus scrape interval: a bucket narrower than that can
+# contain no sample at all and come back empty. 30s is OpenShift's default.
+SERIES_SCRAPE_INTERVAL_S = int(os.environ.get("AIBOM_SERIES_SCRAPE_INTERVAL_S", "30"))
+# Hard ceiling on the stored document. A custom resource shares etcd's ~1.5 MB
+# object limit (and the CRD's spec.seriesJson maxLength); stay well under.
+SERIES_MAX_BYTES = int(os.environ.get("AIBOM_SERIES_MAX_BYTES", "900000"))
+# A metric with more per-pod/per-GPU series than this keeps only its aggregate line.
+SERIES_MAX_SERIES_PER_METRIC = int(os.environ.get("AIBOM_SERIES_MAX_SERIES_PER_METRIC", "64"))
+# When the document is over SERIES_MAX_BYTES, resolution is reduced first (see
+# _fit_series_doc) but never below this many points per line; only then is
+# per-pod/per-GPU detail dropped.
+SERIES_MIN_POINTS = int(os.environ.get("AIBOM_SERIES_MIN_POINTS", "100"))
 
 # ---------------------------------------------------------------------------
 # Input loading
@@ -942,14 +1100,14 @@ def _range_step_seconds(start_ms, end_ms, max_points=1000):
     return max(int(span_s / max_points), 15)
 
 
-def query_prometheus_range(promql, start_ms, end_ms):
+def query_prometheus_range(promql, start_ms, end_ms, step_seconds=None):
     return _query_prometheus(
         "/api/v1/query_range",
         {
             "query": promql,
             "start": start_ms / 1000,
             "end": end_ms / 1000,
-            "step": _range_step_seconds(start_ms, end_ms),
+            "step": step_seconds or _range_step_seconds(start_ms, end_ms),
         },
         timeout=30,
     )
@@ -1222,6 +1380,283 @@ def collect_vllm_telemetry(discoveries):
 
     print(f"  Pods processed: {len(telemetry_summary['pods'])}")
     return telemetry_summary
+
+
+_POD_NAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$")
+_SERIES_LABEL_SOURCES = (
+    ("exported_pod", "pod"),  # DCGM: `pod` there is dcgm-exporter's own pod
+    ("pod", "pod"),
+    ("container", "container"),
+    ("interface", "interface"),
+    ("gpu", "gpu"),
+)
+
+
+def _round_sig(value):
+    rounded = float(f"{value:.6g}")
+    return int(rounded) if rounded == int(rounded) else rounded
+
+
+def _series_labels(metric):
+    labels = {}
+    for source, dest in _SERIES_LABEL_SOURCES:
+        if metric.get(source) and dest not in labels:
+            labels[dest] = metric[source]
+    return labels
+
+
+def parse_range_series(response):
+    """Keeps each returned series separate (unlike parse_range_response, which
+    flattens them for the stats) as {"labels": {...}, "points": [[ts, v]]},
+    with integer unix-second timestamps -- unambiguous UTC, no timezone
+    suffix to misread. NaN/Inf samples are dropped."""
+    if not response or response.get("status") != "success":
+        return []
+    out = []
+    for result in response.get("data", {}).get("result", []):
+        points = []
+        for ts, val in result.get("values", []):
+            try:
+                fval = float(val)
+            except (TypeError, ValueError):
+                continue
+            if math.isnan(fval) or math.isinf(fval):
+                continue
+            points.append([int(ts), _round_sig(fval)])
+        if points:
+            out.append({"labels": _series_labels(result.get("metric", {})), "points": points})
+    out.sort(key=lambda s: sorted(s["labels"].items()))
+    return out
+
+
+def _aggregate_points(series_list, how):
+    by_ts = {}
+    for s in series_list:
+        for ts, value in s["points"]:
+            by_ts.setdefault(ts, []).append(value)
+    reducers = {"sum": sum, "max": max, "avg": lambda vs: sum(vs) / len(vs)}
+    return [[ts, _round_sig(reducers[how](vs))] for ts, vs in sorted(by_ts.items())]
+
+
+def _parse_start_utc(start_time):
+    """Parses a pod start_time as UTC. A suffix-less value (what the discovery
+    init container writes) is taken as UTC too, not this process's local zone."""
+    dt = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _pod_regex(pod_names):
+    # Pod names are DNS-1123, so validating them means only "." needs escaping
+    # (and a backslash would need double-escaping inside a PromQL string).
+    valid = [n for n in pod_names if n and _POD_NAME_RE.match(n)]
+    return "|".join(n.replace(".", "[.]") for n in valid)
+
+
+def _collect_series_metrics(query_defs, namespace, pod_names, start_ms, end_ms, step):
+    pod_regex = _pod_regex(pod_names)
+    if not pod_regex:
+        return {}
+
+    def run(defn, fn):
+        promql = (
+            defn["query"]
+            .replace("{namespace}", namespace)
+            .replace("{pod_regex}", pod_regex)
+            .replace("{win}", str(step))
+            .replace("{fn}", fn)
+        )
+        return parse_range_series(query_prometheus_range(promql, start_ms, end_ms, step_seconds=step))
+
+    metrics = {}
+    for name, defn in query_defs.items():
+        print(f"    Querying series {name}...")
+        series = run(defn, "avg")
+        if not series:
+            print("      no data")
+            continue
+        entry = {
+            "unit": defn["unit"],
+            "aggregation": defn["aggregation"],
+            "aggregate": _aggregate_points(series, defn["aggregation"]),
+        }
+        if defn.get("gauge"):
+            # Per-bucket peak, so a spike shorter than the step (an OOM-adjacent
+            # memory climb) survives the downsampling. For sum-aggregated
+            # metrics this is the sum of each series' own bucket peak -- a
+            # slight upper bound on the true peak of the total.
+            peak = run(defn, "max")
+            if peak:
+                entry["aggregate_max"] = _aggregate_points(
+                    peak, "sum" if defn["aggregation"] == "sum" else "max"
+                )
+        if len(series) > SERIES_MAX_SERIES_PER_METRIC:
+            entry["series_omitted"] = True
+        else:
+            entry["series"] = series
+        metrics[name] = entry
+        print(f"      {len(series)} series, {len(entry['aggregate'])} points")
+    return metrics
+
+
+def _encode_series_doc(doc):
+    return json.dumps(doc, separators=(",", ":"), sort_keys=True)
+
+
+def _rebucket_points(points, anchor, bucket_s, how):
+    """Merges points onto a coarser grid of bucket_s-second buckets starting at
+    anchor, reducing each bucket by "avg" or "max". A bucket is labeled with
+    its start time, which stays on the original grid (the source points sit at
+    anchor + i * step)."""
+    buckets = {}
+    for ts, value in points:
+        buckets.setdefault((ts - anchor) // bucket_s, []).append(value)
+    reducer = max if how == "max" else (lambda vs: sum(vs) / len(vs))
+    return [[anchor + k * bucket_s, _round_sig(reducer(vs))] for k, vs in sorted(buckets.items())]
+
+
+def _rebucket_series_doc(doc, factor):
+    """Returns a copy of doc at `factor` times coarser resolution. Lines and
+    per-series points are averaged per bucket; aggregate_max (already a
+    per-bucket peak) takes the max, so a spike survives as the peak of its
+    merged bucket instead of being averaged away."""
+    window = doc["window"]
+    anchor, bucket_s = window["start"], window["step_seconds"] * factor
+    out = {**doc, "window": {**window, "step_seconds": bucket_s}, "metrics": {}}
+    for name, metric in doc["metrics"].items():
+        merged = {k: v for k, v in metric.items() if k not in ("aggregate", "aggregate_max", "series")}
+        merged["aggregate"] = _rebucket_points(metric["aggregate"], anchor, bucket_s, "avg")
+        if "aggregate_max" in metric:
+            merged["aggregate_max"] = _rebucket_points(metric["aggregate_max"], anchor, bucket_s, "max")
+        if "series" in metric:
+            merged["series"] = [
+                {"labels": s["labels"], "points": _rebucket_points(s["points"], anchor, bucket_s, "avg")}
+                for s in metric["series"]
+            ]
+        out["metrics"][name] = merged
+    return out
+
+
+def _fit_series_doc(doc, max_bytes):
+    """Serializes doc, shrinking it until it fits max_bytes, in this order:
+
+    1. Reduce resolution (2x, 3x, ... coarser), as long as every line keeps at
+       least SERIES_MIN_POINTS points. Per-GPU/per-pod detail is the one thing
+       only this feature can show, so it's worth more than full resolution.
+    2. Drop per-pod/per-GPU detail, largest metric first.
+
+    The aggregate lines are never dropped. Returns the encoded string, or None
+    if even the aggregates alone don't fit."""
+    encoded = _encode_series_doc(doc)
+    if len(encoded.encode("utf-8")) <= max_bytes:
+        return encoded
+
+    original = doc
+    points = max((len(m["aggregate"]) for m in original["metrics"].values()), default=0)
+    factor = 2
+    while -(-points // factor) >= SERIES_MIN_POINTS:  # ceil(points / factor)
+        # Always re-bucketed from the original, never from the previous
+        # candidate, so factors don't compound.
+        doc = _rebucket_series_doc(original, factor)
+        encoded = _encode_series_doc(doc)
+        if len(encoded.encode("utf-8")) <= max_bytes:
+            print(f"  Reduced telemetry series resolution {factor}x (to {doc['window']['step_seconds']}s steps) to fit the size cap")
+            return encoded
+        factor += 1
+    # `doc` is now the coarsest allowed resolution (or the original, if none was possible).
+
+    while len(encoded.encode("utf-8")) > max_bytes:
+        sizes = [
+            (len(json.dumps(m["series"])), name) for name, m in doc["metrics"].items() if "series" in m
+        ]
+        if not sizes:
+            return None
+        _, largest = max(sizes)
+        del doc["metrics"][largest]["series"]
+        doc["metrics"][largest]["series_omitted"] = True
+        encoded = _encode_series_doc(doc)
+    return encoded
+
+
+def collect_telemetry_series(telemetry, vllm_telemetry):
+    """Builds the downsampled time-series document persisted alongside the
+    AIBOM (see CLAUDE.md's Telemetry Time Series). Returns the encoded JSON
+    string, or None if nothing came back. Never raises for missing data --
+    an AIBOM without series is still a complete AIBOM."""
+    resource_pods = (telemetry or {}).get("pods") or []
+    vllm_pods = (vllm_telemetry or {}).get("pods") or []
+    all_pods = resource_pods + vllm_pods
+    starts = []
+    for p in all_pods:
+        try:
+            starts.append(_parse_start_utc(p["start_time"]))
+        except (ValueError, AttributeError, KeyError, TypeError):
+            print(f"  WARNING: Invalid start_time for {p.get('pod_name')}, ignoring for series window", file=sys.stderr)
+    if not starts:
+        return None
+
+    start_ms = int(min(starts).timestamp() * 1000)
+    end_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    if end_ms <= start_ms:
+        return None
+    span_s = (end_ms - start_ms) / 1000
+    step = max(math.ceil(span_s / SERIES_TARGET_POINTS), SERIES_SCRAPE_INTERVAL_S)
+
+    metrics = {}
+    metrics.update(_collect_series_metrics(
+        SERIES_QUERIES, JOB_NAMESPACE, [p.get("pod_name") for p in resource_pods], start_ms, end_ms, step
+    ))
+    metrics.update(_collect_series_metrics(
+        VLLM_SERIES_QUERIES, JOB_NAMESPACE, [p.get("pod_name") for p in vllm_pods], start_ms, end_ms, step
+    ))
+    if not metrics:
+        return None
+
+    doc = {
+        "schema_version": SERIES_SCHEMA_VERSION,
+        "window": {"start": start_ms // 1000, "end": end_ms // 1000, "step_seconds": step},
+        "pods": sorted({p["pod_name"] for p in all_pods if p.get("pod_name")}),
+        "metrics": metrics,
+    }
+    encoded = _fit_series_doc(doc, SERIES_MAX_BYTES)
+    if encoded is None:
+        print("  WARNING: telemetry series exceed the size cap even without detail, skipping", file=sys.stderr)
+    return encoded
+
+
+def publish_series_object(encoded):
+    """Stores the encoded series document in an AIBOMTelemetry custom resource
+    and returns the reference to embed in the (signed) AIBOM data. The
+    payload is kept as the exact string (spec.seriesJson), not structured
+    JSON, so a reader can hash precisely what was stored; the reference
+    carries that sha256, making the series tamper-evident for any verifier
+    that checks it. Returns None on failure."""
+    name = f"{JOB_NAME}-telemetry-{secrets.token_hex(4)}"
+    raw = encoded.encode("utf-8")
+    window = json.loads(encoded)["window"]
+    body = {
+        "apiVersion": f"{SERIES_API_GROUP}/{SERIES_API_VERSION}",
+        "kind": SERIES_OBJECT_KIND,
+        "metadata": {"name": name, "namespace": JOB_NAMESPACE, "labels": {"aibom.io/job-name": JOB_NAME}},
+        "spec": {
+            "schemaVersion": SERIES_SCHEMA_VERSION,
+            "sizeBytes": len(raw),
+            "window": {"start": window["start"], "end": window["end"], "stepSeconds": window["step_seconds"]},
+            "seriesJson": encoded,
+        },
+    }
+    try:
+        k8s_api.create_custom_object(JOB_NAMESPACE, SERIES_API_GROUP, SERIES_API_VERSION, SERIES_PLURAL, body)
+    except Exception as e:
+        print(f"WARNING: could not store telemetry series object: {e}", file=sys.stderr)
+        return None
+    return {
+        "schema_version": SERIES_SCHEMA_VERSION,
+        "kind": SERIES_OBJECT_KIND,
+        "name": name,
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "size_bytes": len(raw),
+        "window": window,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1887,6 +2322,7 @@ def main():
     # Telemetry
     telemetry = None
     vllm_telemetry = None
+    series_encoded = None
     if PROMETHEUS_URL:
         print("--- Phase 1: Telemetry Collection ---")
         try:
@@ -1899,6 +2335,14 @@ def main():
                 vllm_telemetry = collect_vllm_telemetry(discoveries)
             except Exception as e:
                 print(f"WARNING: vLLM telemetry collection failed: {e}", file=sys.stderr)
+        # Runs after the stats collection above (and its retries), so the
+        # backend has had the longest chance to ingest the run's final scrapes.
+        if telemetry or vllm_telemetry:
+            print("--- Phase 1c: Telemetry Time Series ---")
+            try:
+                series_encoded = collect_telemetry_series(telemetry, vllm_telemetry)
+            except Exception as e:
+                print(f"WARNING: telemetry series collection failed: {e}", file=sys.stderr)
         print()
     else:
         print("--- Phase 1: Skipped (no PROMETHEUS_URL) ---")
@@ -1921,6 +2365,17 @@ def main():
     # Output: create the AIBOM directly as a namespaced custom resource, rather
     # than printing to stdout for the watcher to scrape from pod logs.
     print("--- Phase 3: AIBOM Custom Resource Creation ---")
+    # The reference goes into aibom["telemetry_series_ref"] before signing,
+    # so the series' sha256 is covered by the signature (spec is immutable, so
+    # it can't be added afterwards). The AIBOMTelemetry object is created first
+    # for that reason; it gets its ownerReference once the AIBOM's uid exists.
+    series_object_name = None
+    if series_encoded:
+        series_ref = publish_series_object(series_encoded)
+        if series_ref:
+            aibom["telemetry_series_ref"] = series_ref
+            series_object_name = series_ref["name"]
+            print(f"  Stored telemetry series in {SERIES_OBJECT_KIND}/{series_object_name} ({series_ref['size_bytes']} bytes)")
     aibom_cr = {
         "apiVersion": "aibom.io/v1alpha1",
         "kind": "AIBOM",
@@ -1968,8 +2423,42 @@ def main():
         created = k8s_api.create_custom_object(JOB_NAMESPACE, "aibom.io", "v1alpha1", "aiboms", aibom_cr)
     except Exception as e:
         print(f"ERROR: could not create AIBOM custom resource: {e}", file=sys.stderr)
+        if series_object_name:
+            # This identity has no delete on aibomtelemetries (rbac.yaml), so the
+            # object can't be cleaned up here; the Job's retry stores a fresh one.
+            print(
+                f"WARNING: {SERIES_OBJECT_KIND}/{series_object_name} is now orphaned (no AIBOM owns it); "
+                f"remove it with: oc delete aibomtel {series_object_name} -n {JOB_NAMESPACE}",
+                file=sys.stderr,
+            )
         sys.exit(1)
-    print(f"  Created AIBOM/{JOB_NAMESPACE}/{created.get('metadata', {}).get('name', '?')}")
+    created_meta = created.get("metadata", {})
+    print(f"  Created AIBOM/{JOB_NAMESPACE}/{created_meta.get('name', '?')}")
+    if series_object_name:
+        # blockOwnerDeletion needs update on aiboms/finalizers under OpenShift's
+        # owner-reference permission enforcement -- granted to this Job's Role
+        # in rbac.yaml for exactly this.
+        try:
+            k8s_api.set_custom_object_owner(
+                JOB_NAMESPACE,
+                SERIES_API_GROUP,
+                SERIES_API_VERSION,
+                SERIES_PLURAL,
+                series_object_name,
+                {
+                    "apiVersion": "aibom.io/v1alpha1",
+                    "kind": "AIBOM",
+                    "name": created_meta["name"],
+                    "uid": created_meta["uid"],
+                    "blockOwnerDeletion": True,
+                },
+            )
+        except Exception as e:
+            print(
+                f"WARNING: could not set ownerReference on {SERIES_OBJECT_KIND}/{series_object_name} "
+                f"(it will not be garbage-collected with the AIBOM): {e}",
+                file=sys.stderr,
+            )
     print()
 
     # Summary

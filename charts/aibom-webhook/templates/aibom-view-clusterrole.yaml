@@ -10,6 +10,10 @@ metadata:
   labels:
     rbac.authorization.k8s.io/aggregate-to-view: "true"
 rules:
+  # aibomtelemetries are an AIBOM's downsampled time series (see CLAUDE.md's
+  # Telemetry Time Series) -- read alongside the AIBOM they belong to, so
+  # whoever can see one can see the other. The standard view ClusterRole
+  # doesn't cover custom kinds, hence the explicit grant here.
   - apiGroups: ["aibom.io"]
-    resources: ["aiboms"]
+    resources: ["aiboms", "aibomtelemetries"]
     verbs: ["get", "list", "watch"]

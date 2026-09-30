@@ -1497,3 +1497,491 @@ def test_sign_aibom_matches_go_jcs_reference_output():
         b'{"dirty":false,"model":{"name":"tinyllama-1.1b-chat","quantization":null},'
         b'"tags":["sft","lora"],"training":{"epochs":3,"learning_rate":0.00002,"random_seed":42}}'
     )
+
+
+# ---------------------------------------------------------------------------
+# Persisted telemetry time series
+# ---------------------------------------------------------------------------
+
+
+def _range_response(*series):
+    """series: (labels, [(ts, value), ...]) tuples -> Prometheus matrix response."""
+    return {
+        "status": "success",
+        "data": {"result": [{"metric": labels, "values": [[ts, str(v)] for ts, v in pts]} for labels, pts in series]},
+    }
+
+
+def test_parse_range_series_keeps_series_separate_with_normalized_labels():
+    response = _range_response(
+        ({"exported_pod": "p0", "gpu": "1", "instance": "x"}, [(100, 5), (130, 6)]),
+        ({"exported_pod": "p0", "gpu": "0"}, [(100, 1), (130, 2)]),
+    )
+    series = pp.parse_range_series(response)
+    assert [s["labels"] for s in series] == [{"pod": "p0", "gpu": "0"}, {"pod": "p0", "gpu": "1"}]
+    assert series[0]["points"] == [[100, 1], [130, 2]]
+
+
+def test_parse_range_series_drops_nan_and_empty_series():
+    response = _range_response(
+        ({"pod": "a"}, [(100, "NaN"), (130, 2.5)]),
+        ({"pod": "b"}, [(100, "NaN")]),
+    )
+    series = pp.parse_range_series(response)
+    assert series == [{"labels": {"pod": "a"}, "points": [[130, 2.5]]}]
+
+
+def test_parse_range_series_failed_response_is_empty():
+    assert pp.parse_range_series(None) == []
+    assert pp.parse_range_series({"status": "error"}) == []
+
+
+def test_aggregate_points_sum_avg_max():
+    series = [
+        {"labels": {}, "points": [[0, 1], [30, 2]]},
+        {"labels": {}, "points": [[0, 3], [30, 6]]},
+    ]
+    assert pp._aggregate_points(series, "sum") == [[0, 4], [30, 8]]
+    assert pp._aggregate_points(series, "avg") == [[0, 2], [30, 4]]
+    assert pp._aggregate_points(series, "max") == [[0, 3], [30, 6]]
+
+
+def test_parse_start_utc_treats_suffixless_time_as_utc():
+    assert (
+        pp._parse_start_utc("2026-01-01T00:00:00").timestamp()
+        == pp._parse_start_utc("2026-01-01T00:00:00Z").timestamp()
+    )
+
+
+def test_pod_regex_skips_invalid_names_and_escapes_dots():
+    assert pp._pod_regex(["a-1", "b.c", 'bad"name', None]) == "a-1|b[.]c"
+
+
+def test_series_queries_exclude_dataset_sidecar_from_per_container_metrics():
+    for name in ("cpu_usage", "memory_usage", "storage_read_throughput", "storage_write_throughput"):
+        assert 'container!="aibom-dataset-sidecar"' in pp.SERIES_QUERIES[name]["query"]
+
+
+def _series_pods(*names):
+    return {"pods": [{"pod_name": n, "start_time": "2026-01-01T00:00:00Z"} for n in names]}
+
+
+def test_collect_telemetry_series_builds_schema_with_aggregates_and_detail(monkeypatch):
+    monkeypatch.setattr(pp, "JOB_NAMESPACE", "ns")
+    seen = []
+
+    def fake_query_range(promql, start_ms, end_ms, step_seconds=None):
+        seen.append((promql, step_seconds))
+        if "container_cpu_usage_seconds_total" in promql:
+            return _range_response(
+                ({"pod": "p0", "container": "trainer"}, [(1767225600, 1.0), (1767225630, 2.0)]),
+                ({"pod": "p1", "container": "trainer"}, [(1767225600, 3.0), (1767225630, 4.0)]),
+            )
+        if "DCGM_FI_DEV_GPU_UTIL" in promql:
+            value = 90 if promql.startswith("max by") else 50
+            return _range_response(
+                ({"exported_pod": "p0", "gpu": "0"}, [(1767225600, value)]),
+                ({"exported_pod": "p1", "gpu": "0"}, [(1767225600, value - 20)]),
+            )
+        return None
+
+    monkeypatch.setattr(pp, "query_prometheus_range", fake_query_range)
+    doc = json.loads(pp.collect_telemetry_series(_series_pods("p0", "p1"), None))
+
+    assert doc["schema_version"] == 1
+    assert doc["window"]["end"] > doc["window"]["start"]
+    assert doc["window"]["step_seconds"] >= 15
+    assert doc["pods"] == ["p0", "p1"]
+    # Only metrics that returned data are present.
+    assert set(doc["metrics"]) == {"cpu_usage", "gpu_utilization"}
+
+    cpu = doc["metrics"]["cpu_usage"]
+    assert cpu["unit"] == "cores" and cpu["aggregation"] == "sum"
+    assert cpu["aggregate"] == [[1767225600, 4], [1767225630, 6]]
+    assert "aggregate_max" not in cpu  # not a gauge
+    assert [s["labels"] for s in cpu["series"]] == [
+        {"pod": "p0", "container": "trainer"},
+        {"pod": "p1", "container": "trainer"},
+    ]
+
+    gpu = doc["metrics"]["gpu_utilization"]
+    assert gpu["aggregation"] == "avg"
+    assert gpu["aggregate"] == [[1767225600, 40]]  # avg of 50 and 30
+    assert gpu["aggregate_max"] == [[1767225600, 90]]  # max of 90 and 70
+    assert gpu["series"][0]["labels"] == {"pod": "p0", "gpu": "0"}
+
+    # One query per metric for all pods, scoped to the namespace.
+    cpu_queries = [q for q, _ in seen if "container_cpu_usage_seconds_total" in q]
+    assert len(cpu_queries) == 1
+    assert 'namespace="ns"' in cpu_queries[0] and 'pod=~"p0|p1"' in cpu_queries[0]
+    assert all(step == doc["window"]["step_seconds"] for _, step in seen)
+
+
+def test_collect_telemetry_series_step_and_gauge_window_floored_at_scrape_interval(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    monkeypatch.setattr(pp, "JOB_NAMESPACE", "ns")
+    start = (datetime.now(timezone.utc) - timedelta(minutes=20)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    seen = []
+
+    def fake_query_range(promql, start_ms, end_ms, step_seconds=None):
+        seen.append((promql, step_seconds))
+        if "DCGM_FI_DEV_GPU_UTIL" in promql:
+            return _range_response(({"exported_pod": "p0", "gpu": "0"}, [(1767225600, 50)]))
+        return None
+
+    monkeypatch.setattr(pp, "query_prometheus_range", fake_query_range)
+    doc = json.loads(pp.collect_telemetry_series({"pods": [{"pod_name": "p0", "start_time": start}]}, None))
+
+    # 20 min / 200 points = 6s, which would be narrower than a 30s scrape interval.
+    assert doc["window"]["step_seconds"] == pp.SERIES_SCRAPE_INTERVAL_S == 30
+    gauge_queries = [q for q, _ in seen if "DCGM_FI_DEV_GPU_UTIL" in q]
+    assert gauge_queries and all("[30s]" in q for q in gauge_queries)
+
+
+def test_collect_telemetry_series_targets_roughly_the_configured_point_count(monkeypatch):
+    monkeypatch.setattr(pp, "SERIES_TARGET_POINTS", 200)
+    calls = []
+    monkeypatch.setattr(
+        pp, "query_prometheus_range", lambda q, s, e, step_seconds=None: calls.append((s, e, step_seconds)) or None
+    )
+    pp.collect_telemetry_series(_series_pods("p0"), None)
+    start_ms, end_ms, step = calls[0]
+    assert 150 <= (end_ms - start_ms) / 1000 / step <= 200
+
+
+def test_collect_telemetry_series_none_when_prometheus_returns_nothing(monkeypatch):
+    monkeypatch.setattr(pp, "query_prometheus_range", lambda *a, **k: None)
+    assert pp.collect_telemetry_series(_series_pods("p0"), None) is None
+
+
+def test_collect_telemetry_series_none_without_pods_or_valid_start(monkeypatch):
+    monkeypatch.setattr(pp, "query_prometheus_range", lambda *a, **k: pytest.fail("should not query"))
+    assert pp.collect_telemetry_series(None, None) is None
+    assert pp.collect_telemetry_series({"pods": [{"pod_name": "p0", "start_time": "garbage"}]}, None) is None
+
+
+def test_collect_telemetry_series_includes_vllm_metrics_for_vllm_pods(monkeypatch):
+    def fake_query_range(promql, start_ms, end_ms, step_seconds=None):
+        if "vllm:generation_tokens_total" in promql:
+            return _range_response(({"pod": "v0"}, [(1767225600, 12)]))
+        return None
+
+    monkeypatch.setattr(pp, "query_prometheus_range", fake_query_range)
+    doc = json.loads(pp.collect_telemetry_series(None, _series_pods("v0")))
+    assert doc["metrics"]["generation_throughput"]["unit"] == "tokens_per_sec"
+    assert doc["metrics"]["generation_throughput"]["aggregate"] == [[1767225600, 12]]
+
+
+def test_collect_telemetry_series_omits_detail_beyond_series_cap(monkeypatch):
+    monkeypatch.setattr(pp, "SERIES_MAX_SERIES_PER_METRIC", 2)
+
+    def fake_query_range(promql, start_ms, end_ms, step_seconds=None):
+        if "container_network_receive_bytes_total" in promql:
+            return _range_response(*[({"pod": f"p{i}", "interface": "eth0"}, [(100, 1)]) for i in range(3)])
+        return None
+
+    monkeypatch.setattr(pp, "query_prometheus_range", fake_query_range)
+    entry = json.loads(pp.collect_telemetry_series(_series_pods("p0", "p1", "p2"), None))["metrics"]["network_receive"]
+    assert entry["aggregate"] == [[100, 3]]
+    assert entry["series_omitted"] is True and "series" not in entry
+
+
+def test_fit_series_doc_drops_largest_detail_first_and_keeps_aggregates():
+    def metric(n_points):
+        pts = [[i, i * 1.5] for i in range(n_points)]
+        return {"unit": "x", "aggregation": "sum", "aggregate": pts[:3], "series": [{"labels": {}, "points": pts}]}
+
+    doc = {"metrics": {"small": metric(5), "big": metric(500)}}
+    cap = len(pp._encode_series_doc(doc)) - 100
+    result = json.loads(pp._fit_series_doc(doc, cap))
+    assert result["metrics"]["big"]["series_omitted"] is True and "series" not in result["metrics"]["big"]
+    assert "series" in result["metrics"]["small"]
+    assert len(result["metrics"]["big"]["aggregate"]) == 3
+
+
+def test_fit_series_doc_none_when_aggregates_alone_exceed_cap():
+    doc = {
+        "window": {"start": 0, "end": 999, "step_seconds": 1},
+        "metrics": {"m": {"unit": "x", "aggregation": "sum", "aggregate": [[i, i] for i in range(1000)]}},
+    }
+    assert pp._fit_series_doc(doc, 100) is None
+
+
+def _gridded_doc(n_points, n_series, step=30, start=1000):
+    """A doc with one gauge metric: an aggregate line, a peak line and n_series
+    per-GPU series, all on the same n_points-long grid."""
+    ts = [start + i * step for i in range(n_points)]
+    return {
+        "schema_version": 1,
+        "window": {"start": start, "end": ts[-1], "step_seconds": step},
+        "metrics": {
+            "gpu_utilization": {
+                "unit": "percent",
+                "aggregation": "avg",
+                "aggregate": [[t, 50.0] for t in ts],
+                "aggregate_max": [[t, 60.0 + i] for i, t in enumerate(ts)],
+                "series": [
+                    {"labels": {"pod": "p0", "gpu": str(g)}, "points": [[t, float(g)] for t in ts]}
+                    for g in range(n_series)
+                ],
+            }
+        },
+    }
+
+
+def test_rebucket_points_averages_and_labels_buckets_on_the_original_grid():
+    points = [[1000, 10], [1030, 20], [1060, 30], [1090, 50], [1120, 100]]
+    assert pp._rebucket_points(points, 1000, 60, "avg") == [[1000, 15], [1060, 40], [1120, 100]]
+    assert pp._rebucket_points(points, 1000, 60, "max") == [[1000, 20], [1060, 50], [1120, 100]]
+
+
+def test_rebucket_series_doc_doubles_step_and_keeps_peaks_as_maxes():
+    doc = _gridded_doc(200, 2)
+    coarse = pp._rebucket_series_doc(doc, 2)
+    metric = coarse["metrics"]["gpu_utilization"]
+
+    assert coarse["window"]["step_seconds"] == 60
+    assert coarse["window"]["start"] == doc["window"]["start"]
+    assert len(metric["aggregate"]) == 100
+    assert metric["aggregate"][0] == [1000, 50]
+    # aggregate_max is 60, 61, 62, ... -- each merged bucket keeps the larger of its two.
+    assert metric["aggregate_max"][0] == [1000, 61]
+    assert metric["aggregate_max"][1] == [1060, 63]
+    assert [s["labels"] for s in metric["series"]] == [{"pod": "p0", "gpu": "0"}, {"pod": "p0", "gpu": "1"}]
+    assert len(metric["series"][0]["points"]) == 100
+    # The input is untouched.
+    assert len(doc["metrics"]["gpu_utilization"]["aggregate"]) == 200
+
+
+def test_fit_series_doc_reduces_resolution_before_dropping_detail(monkeypatch):
+    monkeypatch.setattr(pp, "SERIES_MIN_POINTS", 100)
+    doc = _gridded_doc(200, 20)
+    full = len(pp._encode_series_doc(doc).encode())
+    half = len(pp._encode_series_doc(pp._rebucket_series_doc(doc, 2)).encode())
+    assert half < full
+    encoded = pp._fit_series_doc(doc, (full + half) // 2)  # too big at 200 points, fits at 100
+    result = json.loads(encoded)
+    metric = result["metrics"]["gpu_utilization"]
+
+    assert result["window"]["step_seconds"] == 60
+    assert len(metric["aggregate"]) == 100
+    # Per-GPU detail survived: resolution was given up instead.
+    assert "series_omitted" not in metric and len(metric["series"]) == 20
+    assert len(metric["aggregate_max"]) == 100
+
+
+def test_fit_series_doc_leaves_full_resolution_when_it_already_fits():
+    doc = _gridded_doc(200, 2)
+    result = json.loads(pp._fit_series_doc(doc, 10_000_000))
+    assert result["window"]["step_seconds"] == 30
+    assert len(result["metrics"]["gpu_utilization"]["aggregate"]) == 200
+
+
+def test_fit_series_doc_never_goes_below_the_minimum_points(monkeypatch):
+    monkeypatch.setattr(pp, "SERIES_MIN_POINTS", 100)
+    # 150 points can't be halved (75 < 100), so detail is dropped at full resolution.
+    doc = _gridded_doc(150, 20)
+    aggregates_only = len(pp._encode_series_doc(_without_series(doc)).encode())
+    result = json.loads(pp._fit_series_doc(doc, aggregates_only + 50))
+    metric = result["metrics"]["gpu_utilization"]
+    assert result["window"]["step_seconds"] == 30
+    assert len(metric["aggregate"]) == 150
+    assert metric["series_omitted"] is True and "series" not in metric
+
+
+def _without_series(doc):
+    return {**doc, "metrics": {n: {k: v for k, v in m.items() if k != "series"} for n, m in doc["metrics"].items()}}
+
+
+def test_fit_series_doc_reduces_resolution_then_drops_detail_when_still_too_big(monkeypatch):
+    monkeypatch.setattr(pp, "SERIES_MIN_POINTS", 100)
+    doc = _gridded_doc(200, 40)
+    coarse_aggregates_only = len(
+        pp._encode_series_doc(_without_series(pp._rebucket_series_doc(doc, 2))).encode()
+    )
+    result = json.loads(pp._fit_series_doc(doc, coarse_aggregates_only + 50))
+    metric = result["metrics"]["gpu_utilization"]
+    # Both steps were needed: coarsest allowed resolution, and no detail.
+    assert result["window"]["step_seconds"] == 60 and len(metric["aggregate"]) == 100
+    assert metric["series_omitted"] is True and "series" not in metric
+    assert len(metric["aggregate_max"]) == 100
+
+
+def test_collect_telemetry_series_halves_resolution_to_keep_gpu_detail(monkeypatch):
+    pods = [f"p{i}" for i in range(4)]
+
+    def fake_query_range(promql, start_ms, end_ms, step_seconds=None):
+        if "DCGM_FI_DEV_GPU_UTIL" not in promql:
+            return None
+        ts = list(range(int(start_ms / 1000), int(end_ms / 1000) + 1, step_seconds))
+        return _range_response(
+            *[({"exported_pod": p, "gpu": str(g)}, [(t, 50 + g) for t in ts]) for p in pods for g in range(8)]
+        )
+
+    monkeypatch.setattr(pp, "query_prometheus_range", fake_query_range)
+    monkeypatch.setattr(pp, "SERIES_TARGET_POINTS", 200)
+    telemetry = {"pods": [{"pod_name": p, "start_time": "2026-01-01T00:00:00Z"} for p in pods]}
+
+    full_size = len(pp.collect_telemetry_series(telemetry, None).encode())
+    monkeypatch.setattr(pp, "SERIES_MAX_BYTES", int(full_size * 0.7))
+    doc = json.loads(pp.collect_telemetry_series(telemetry, None))
+    metric = doc["metrics"]["gpu_utilization"]
+
+    assert len(metric["aggregate"]) <= 101
+    assert len(metric["series"]) == 32  # every GPU of every pod is still there
+    assert "series_omitted" not in metric
+
+
+def test_publish_series_object_creates_aibomtelemetry_and_returns_ref(monkeypatch):
+    import hashlib
+
+    monkeypatch.setattr(pp, "JOB_NAME", "train-job")
+    monkeypatch.setattr(pp, "JOB_NAMESPACE", "ns")
+    created = {}
+    monkeypatch.setattr(
+        pp.k8s_api, "create_custom_object",
+        lambda ns, group, version, plural, body: created.update(
+            ns=ns, group=group, version=version, plural=plural, body=body
+        ),
+    )
+    encoded = json.dumps({"window": {"start": 1, "end": 2, "step_seconds": 15}, "metrics": {}})
+    ref = pp.publish_series_object(encoded)
+
+    assert (created["ns"], created["group"], created["version"], created["plural"]) == (
+        "ns", "aibom.io", "v1alpha1", "aibomtelemetries",
+    )
+    body = created["body"]
+    assert body["apiVersion"] == "aibom.io/v1alpha1" and body["kind"] == "AIBOMTelemetry"
+    assert body["metadata"]["name"].startswith("train-job-telemetry-")
+    assert body["metadata"]["namespace"] == "ns"
+    assert body["metadata"]["labels"] == {"aibom.io/job-name": "train-job"}
+    assert "ownerReferences" not in body["metadata"]  # set after the AIBOM exists
+    assert "status" not in body
+    # The payload is stored as the exact string, so a reader can hash it.
+    assert body["spec"]["seriesJson"] == encoded
+    assert body["spec"]["schemaVersion"] == 1
+    assert body["spec"]["sizeBytes"] == len(encoded.encode())
+    assert body["spec"]["window"] == {"start": 1, "end": 2, "stepSeconds": 15}
+
+    assert ref == {
+        "schema_version": 1,
+        "kind": "AIBOMTelemetry",
+        "name": body["metadata"]["name"],
+        "sha256": hashlib.sha256(encoded.encode()).hexdigest(),
+        "size_bytes": len(encoded.encode()),
+        "window": {"start": 1, "end": 2, "step_seconds": 15},
+    }
+
+
+def test_publish_series_object_none_when_create_fails(monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("forbidden")
+
+    monkeypatch.setattr(pp.k8s_api, "create_custom_object", boom)
+    encoded = json.dumps({"window": {"start": 1, "end": 2, "step_seconds": 15}, "metrics": {}})
+    assert pp.publish_series_object(encoded) is None
+
+
+# main(): ordering, ownerReference and cleanup around the AIBOM create.
+
+
+@pytest.fixture
+def main_env(monkeypatch):
+    """Runs main() with everything but the Kubernetes calls stubbed, recording
+    the calls made against k8s_api in order."""
+    calls = []
+    monkeypatch.setattr(pp, "JOB_NAME", "train-job")
+    monkeypatch.setattr(pp, "JOB_NAMESPACE", "ns")
+    monkeypatch.setattr(pp, "PROMETHEUS_URL", "http://prometheus")
+    monkeypatch.setattr(pp, "load_discovery", lambda: [])
+    monkeypatch.setattr(pp, "load_datasets", lambda: ([], {}))
+    monkeypatch.setattr(pp, "load_annotations", lambda: {})
+    monkeypatch.setattr(pp, "load_containers", lambda: [])
+    monkeypatch.setattr(pp, "load_storage", lambda: {})
+    monkeypatch.setattr(pp, "collect_telemetry", lambda discoveries: {"pods": []})
+    encoded = json.dumps({"window": {"start": 1, "end": 2, "step_seconds": 15}, "metrics": {}})
+    monkeypatch.setattr(pp, "collect_telemetry_series", lambda t, v: encoded)
+    monkeypatch.setattr(pp, "sign_aibom", lambda aibom: (None, None))
+
+    def fake_create(ns, group, version, plural, body):
+        calls.append(("create", plural, body))
+        if plural == "aiboms":
+            if fake_create.aibom_error:
+                raise RuntimeError("admission denied")
+            return {"metadata": {"name": "train-job-abc12", "uid": "aibom-uid"}}
+        return {}
+
+    fake_create.aibom_error = False
+    monkeypatch.setattr(pp.k8s_api, "create_custom_object", fake_create)
+    monkeypatch.setattr(
+        pp.k8s_api, "set_custom_object_owner",
+        lambda ns, group, version, plural, name, owner: calls.append(("owner", plural, name, owner)),
+    )
+    return calls, fake_create, encoded
+
+
+def test_main_stores_series_object_signs_its_digest_and_owns_it_to_the_aibom(main_env):
+    import hashlib
+
+    calls, _, encoded = main_env
+    pp.main()
+
+    kinds = [c[:2] for c in calls]
+    # Telemetry object first (its digest must be inside the AIBOM's signed data),
+    # then the AIBOM, then the ownerReference.
+    assert kinds == [("create", "aibomtelemetries"), ("create", "aiboms"), ("owner", "aibomtelemetries")]
+
+    telemetry_name = calls[0][2]["metadata"]["name"]
+    aibom_data = calls[1][2]["spec"]["data"]
+    ref = aibom_data["telemetry_series_ref"]
+    assert ref["kind"] == "AIBOMTelemetry" and ref["name"] == telemetry_name
+    assert calls[0][2]["spec"]["seriesJson"] == encoded
+    assert ref["sha256"] == hashlib.sha256(encoded.encode()).hexdigest()
+
+    _, _, owned_name, owner = calls[2]
+    assert owned_name == telemetry_name
+    assert owner == {
+        "apiVersion": "aibom.io/v1alpha1", "kind": "AIBOM", "name": "train-job-abc12",
+        "uid": "aibom-uid", "blockOwnerDeletion": True,
+    }
+
+
+def test_main_warns_about_orphaned_series_object_when_aibom_create_fails(main_env, capsys):
+    calls, fake_create, _ = main_env
+    fake_create.aibom_error = True
+    with pytest.raises(SystemExit) as exc:
+        pp.main()
+
+    assert exc.value.code == 1
+    telemetry_name = calls[0][2]["metadata"]["name"]
+    # No delete is attempted (the Role withholds it) and no owner is set; the
+    # orphan is reported with the command to remove it instead.
+    assert [c[:2] for c in calls] == [("create", "aibomtelemetries"), ("create", "aiboms")]
+    err = capsys.readouterr().err
+    assert f"AIBOMTelemetry/{telemetry_name} is now orphaned" in err
+    assert f"oc delete aibomtel {telemetry_name} -n ns" in err
+
+
+def test_main_creates_aibom_without_reference_when_series_object_create_fails(main_env, monkeypatch):
+    calls, fake_create, _ = main_env
+    real_create = pp.k8s_api.create_custom_object
+
+    def create(ns, group, version, plural, body):
+        if plural == "aibomtelemetries":
+            raise RuntimeError("quota exceeded")
+        return real_create(ns, group, version, plural, body)
+
+    monkeypatch.setattr(pp.k8s_api, "create_custom_object", create)
+    pp.main()
+
+    aibom_call = [c for c in calls if c[:2] == ("create", "aiboms")][0]
+    assert "telemetry_series_ref" not in aibom_call[2]["spec"]["data"]
+    assert not any(c[0] == "owner" for c in calls)
+
+
+def test_main_skips_series_object_when_no_series(main_env, monkeypatch):
+    calls, _, _ = main_env
+    monkeypatch.setattr(pp, "collect_telemetry_series", lambda t, v: None)
+    pp.main()
+    assert [c[:2] for c in calls] == [("create", "aiboms")]

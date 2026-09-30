@@ -105,6 +105,20 @@ def create_custom_object(namespace, group, version, plural, body):
     return _request("POST", path, body=body)
 
 
+def set_custom_object_owner(namespace, group, version, plural, name, owner):
+    """Sets `owner` (an ownerReferences entry) on an existing namespaced custom
+    resource so the garbage collector deletes it along with the owner.
+    Replaces any existing ownerReferences list (merge-patch semantics for
+    lists)."""
+    path = f"/apis/{group}/{version}/namespaces/{namespace}/{plural}/{name}"
+    return _request(
+        "PATCH",
+        path,
+        body={"metadata": {"ownerReferences": [owner]}},
+        content_type="application/merge-patch+json",
+    )
+
+
 def get_custom_object(namespace, group, version, plural, name):
     """GET a namespaced custom resource, e.g. a KServe InferenceService
     (serving.kserve.io/v1beta1). Returns None if it doesn't exist (or has
