@@ -60,53 +60,89 @@ clean:
 docker-build *args:
     #!/usr/bin/env bash
     set -euo pipefail
+    repo="{{ default_repo }}"
+    no_latest=false
     img="aibom-webhook-service:latest"
     for arg in {{ args }}; do
         case "$arg" in
             --img=*) img="${arg#--img=}" ;;
-            *) echo "error: unknown argument '$arg' (expected --img=<image>)" >&2; exit 1 ;;
+            --repo=*) repo="${arg#--repo=}" ;;
+            --no-latest) no_latest=true ;;
+            *) echo "error: unknown argument '$arg' (expected --img=<image>, --repo=<repo>, or --no-latest)" >&2; exit 1 ;;
         esac
     done
-    docker build -t "$img" .
+    if [[ "$no_latest" = true ]]; then
+        sha="$(git rev-parse --short HEAD)"
+        git diff --quiet HEAD || sha="${sha}-dirty"
+        img="aibom-webhook-service:${sha}"
+    fi
+    docker build -t "$repo/$img" .
 
 [group('images')]
 docker-push *args:
     #!/usr/bin/env bash
     set -euo pipefail
+    repo="{{ default_repo }}"
+    no_latest=false
     img="aibom-webhook-service:latest"
     for arg in {{ args }}; do
         case "$arg" in
             --img=*) img="${arg#--img=}" ;;
-            *) echo "error: unknown argument '$arg' (expected --img=<image>)" >&2; exit 1 ;;
+            --repo=*) repo="${arg#--repo=}" ;;
+            --no-latest) no_latest=true ;;
+            *) echo "error: unknown argument '$arg' (expected --img=<image>, --repo=<repo>, or --no-latest)" >&2; exit 1 ;;
         esac
     done
-    docker push "$img"
+    if [[ "$no_latest" = true ]]; then
+        sha="$(git rev-parse --short HEAD)"
+        git diff --quiet HEAD || sha="${sha}-dirty"
+        img="aibom-webhook-service:${sha}"
+    fi
+    docker push "$repo/$img"
 
 [group('images')]
 docker-build-postprocess *args:
     #!/usr/bin/env bash
     set -euo pipefail
+    repo="{{ default_repo }}"
+    no_latest=false
     img="aibom-postprocess:latest"
     for arg in {{ args }}; do
         case "$arg" in
             --img=*) img="${arg#--img=}" ;;
-            *) echo "error: unknown argument '$arg' (expected --img=<image>)" >&2; exit 1 ;;
+            --repo=*) repo="${arg#--repo=}" ;;
+            --no-latest) no_latest=true ;;
+            *) echo "error: unknown argument '$arg' (expected --img=<image>, --repo=<repo>, or --no-latest)" >&2; exit 1 ;;
         esac
     done
-    docker build -t "$img" -f postprocess/Dockerfile .
+    if [[ "$no_latest" = true ]]; then
+        sha="$(git rev-parse --short HEAD)"
+        git diff --quiet HEAD || sha="${sha}-dirty"
+        img="aibom-postprocess:${sha}"
+    fi
+    docker build -t "$repo/$img" -f postprocess/Dockerfile .
 
 [group('images')]
 docker-push-postprocess *args:
     #!/usr/bin/env bash
     set -euo pipefail
+    repo="{{ default_repo }}"
+    no_latest=false
     img="aibom-postprocess:latest"
     for arg in {{ args }}; do
         case "$arg" in
             --img=*) img="${arg#--img=}" ;;
-            *) echo "error: unknown argument '$arg' (expected --img=<image>)" >&2; exit 1 ;;
+            --repo=*) repo="${arg#--repo=}" ;;
+            --no-latest) no_latest=true ;;
+            *) echo "error: unknown argument '$arg' (expected --img=<image>, --repo=<repo>, or --no-latest)" >&2; exit 1 ;;
         esac
     done
-    docker push "$img"
+    if [[ "$no_latest" = true ]]; then
+        sha="$(git rev-parse --short HEAD)"
+        git diff --quiet HEAD || sha="${sha}-dirty"
+        img="aibom-postprocess:${sha}"
+    fi
+    docker push "$repo/$img"
 
 # --- Cluster deployment --------------------------------------------------------
 
