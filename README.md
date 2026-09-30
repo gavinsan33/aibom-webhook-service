@@ -16,7 +16,7 @@ For filtering, inspecting, and comparing the resulting `AIBOM` custom resources,
 
 Pods are matched if they are owned by a Job, JobSet, PyTorchJob, or RayJob, **or** if any container requests `nvidia.com/gpu` resources. The webhook always fails open (`failurePolicy: Ignore`) — if the service is down, pods are created normally.
 
-That includes the service being *unreachable*: the API server, not a pod, calls the webhook, so a NetworkPolicy in the install namespace that only admits same-namespace ingress makes every admission call time out, silently — workloads run uninstrumented and no AIBOM is produced, with nothing logged. The chart therefore ships `aibom-webhook-admission` (`templates/networkpolicy.yaml`, on by default; `networkPolicy.enabled=false` to opt out), which allows ingress to the webhook pod's port 8443. If pods in an `aibom.io/enabled` namespace come up without an `aibom-discovery` init container, check this first: a server-side dry run of a bare GPU pod (`oc create --dry-run=server -o yaml`) should come back with the `aibom.io/instrumented` label, and a `mutating pod ...` line should appear in the webhook's log.
+That includes the service being *unreachable*: the API server, not a pod, calls the webhook, so a NetworkPolicy in the install namespace that only admits same-namespace ingress makes every admission call time out, silently — workloads run uninstrumented and no AIBOM is produced, with nothing logged. The chart therefore ships `aibom-webhook-admission` (`templates/networkpolicy.yaml`, on by default; `networkPolicy.enabled=false` to opt out), which allows ingress to the webhook pod's admission port 9443 (8443 stays the kubelet probe port and is not opened). If pods in an `aibom.io/enabled` namespace come up without an `aibom-discovery` init container, check this first: a server-side dry run of a bare GPU pod (`oc create --dry-run=server -o yaml`) should come back with the `aibom.io/instrumented` label, and a `mutating pod ...` line should appear in the webhook's log.
 
 For the full rules on which Jobs/pods get postprocessed, how JobSet siblings are merged, and how model/dataset config is auto-detected, see `CLAUDE.md`.
 
@@ -181,7 +181,7 @@ Re-run `just chart-push` any time `charts/aibom-webhook`, `charts/aibom-workload
 just run
 
 # In another terminal, send a test admission review
-curl -sk -X POST https://localhost:8443/mutate \
+curl -sk -X POST https://localhost:9443/mutate \
   -H "Content-Type: application/json" \
   -d '{
     "apiVersion": "admission.k8s.io/v1",
@@ -274,7 +274,8 @@ The webhook server accepts these flags:
 |------|---------|-------------|
 | `--tls-cert` | `/certs/tls.crt` | Path to TLS certificate |
 | `--tls-key` | `/certs/tls.key` | Path to TLS private key |
-| `--port` | `8443` | Server port |
+| `--port` | `8443` | TLS port serving `/healthz` (kubelet probes) |
+| `--admission-port` | `9443` | TLS port serving `/mutate` (API server) |
 | `--discovery-image` | `pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime` | Image for the discovery init container — set via `image.discovery.repository`/`.tag` in `charts/aibom-webhook/values.yaml`, not passed directly when deploying through the chart. Only needs `python3`/`bash` in the image itself — `nvidia-smi` (used for the GPU fields) is not part of any base image and is injected at runtime by the NVIDIA Container Toolkit on GPU pods, see CLAUDE.md; swap for anything already available in-cluster (e.g. an OpenShift AI runtime image) to avoid an external pull per pod |
 | `--dataset-detection` | `true` | Inject dataset detection hooks into application containers |
 | `--enable-watcher` | `true` | Start the Job completion watcher |

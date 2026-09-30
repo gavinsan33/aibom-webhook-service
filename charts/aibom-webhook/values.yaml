@@ -50,6 +50,10 @@ certManager:
 webhook:
   failurePolicy: Ignore
   reinvocationPolicy: Never
+  # Container port the API server's admission calls (/mutate) land on, via
+  # the Service. Kept separate from the kubelet probe port (8443) so the
+  # admission NetworkPolicy only opens this one.
+  admissionPort: 9443
   # Namespaces must carry this label to opt in to pod mutation.
   namespaceSelectorLabel:
     key: aibom.io/enabled
