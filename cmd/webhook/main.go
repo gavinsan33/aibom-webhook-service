@@ -25,8 +25,7 @@ func main() {
 
 	flag.StringVar(&cfg.TLSCertPath, "tls-cert", "/certs/tls.crt", "path to TLS certificate")
 	flag.StringVar(&cfg.TLSKeyPath, "tls-key", "/certs/tls.key", "path to TLS private key")
-	flag.IntVar(&cfg.Port, "port", 8443, "TLS port serving /healthz for kubelet probes")
-	flag.IntVar(&cfg.AdmissionPort, "admission-port", 9443, "TLS port serving /mutate for the API server, kept separate from the probe port so the admission NetworkPolicy only opens this one")
+	flag.IntVar(&cfg.Port, "port", 8443, "webhook server port")
 	flag.StringVar(&cfg.DiscoveryImage, "discovery-image", "pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime", "image for the discovery init container")
 	flag.BoolVar(&cfg.DatasetDetection, "dataset-detection", true, "inject dataset detection hooks into application containers")
 	flag.BoolVar(&cfg.EnableWatcher, "enable-watcher", true, "start the Job completion watcher")
@@ -66,16 +65,8 @@ func main() {
 
 	handler := webhook.NewHandler(mutator, cfg.TrustedWatcherIdentity)
 
-	admissionMux := http.NewServeMux()
-	admissionMux.Handle("/mutate", handler)
-	admissionServer := &http.Server{
-		Addr:         fmt.Sprintf(":%d", cfg.AdmissionPort),
-		Handler:      admissionMux,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
-	}
-
 	mux := http.NewServeMux()
+	mux.Handle("/mutate", handler)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok"))
@@ -90,13 +81,6 @@ func main() {
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
-
-	go func() {
-		log.Printf("starting admission server on :%d", cfg.AdmissionPort)
-		if err := admissionServer.ListenAndServeTLS(cfg.TLSCertPath, cfg.TLSKeyPath); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("admission server error: %v", err)
-		}
-	}()
 
 	go func() {
 		log.Printf("starting webhook server on :%d (discovery-image=%s, dataset-detection=%v)", cfg.Port, cfg.DiscoveryImage, cfg.DatasetDetection)
@@ -128,7 +112,6 @@ func main() {
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
-	admissionServer.Shutdown(shutdownCtx)
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Fatalf("shutdown error: %v", err)
 	}

@@ -4,7 +4,6 @@ type Config struct {
 	TLSCertPath          string
 	TLSKeyPath           string
 	Port                 int
-	AdmissionPort        int
 	DiscoveryImage       string
 	DatasetDetection     bool
 	EnableWatcher        bool

@@ -14,8 +14,7 @@
 # No `from` on purpose: the API server's source address depends on the cluster
 # (host network, a konnectivity tunnel on hosted control planes, ...), and the
 # endpoint only serves TLS AdmissionReview requests. The rule is scoped to the
-# webhook pod and its admission port only (the container port, not the
-# Service's 443); the kubelet's probe port (8443) is deliberately not opened.
+# webhook pod and its one port (the container port, not the Service's 443).
 # Additive -- it only ever allows more ingress, never restricts any.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -33,5 +32,5 @@ spec:
   ingress:
     - ports:
         - protocol: TCP
-          port: admission
+          port: 8443
 {{- end }}
