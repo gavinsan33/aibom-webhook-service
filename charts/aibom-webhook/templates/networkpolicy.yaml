@@ -1,0 +1,36 @@
+{{- if .Values.networkPolicy.enabled }}
+# Lets the Kubernetes API server reach the webhook's admission endpoint in
+# namespaces that isolate ingress.
+#
+# The API server -- not a pod in this namespace -- is what calls /mutate for
+# every pod/Job/ConfigMap create in an opted-in namespace. Where the install
+# namespace already carries an ingress-isolating NetworkPolicy (e.g. a
+# platform-provisioned "allow only from this namespace" default), those
+# requests are dropped and time out. The webhook is failurePolicy: Ignore, so
+# that doesn't surface as an error: workloads are silently created without
+# instrumentation and no AIBOM is ever produced, with nothing logged on either
+# side.
+#
+# No `from` on purpose: the API server's source address depends on the cluster
+# (host network, a konnectivity tunnel on hosted control planes, ...), and the
+# endpoint only serves TLS AdmissionReview requests. The rule is scoped to the
+# webhook pod and its one port (the container port, not the Service's 443).
+# Additive -- it only ever allows more ingress, never restricts any.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: aibom-webhook-admission
+  namespace: {{ include "aibom-webhook.namespace" . }}
+  labels:
+    {{- include "aibom-webhook.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: aibom-webhook
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 8443
+{{- end }}
