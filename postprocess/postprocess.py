@@ -350,6 +350,10 @@ SERIES_API_VERSION = "v1alpha1"
 SERIES_PLURAL = "aibomtelemetries"
 # Roughly the number of points kept per metric (the query step is derived from it).
 SERIES_TARGET_POINTS = int(os.environ.get("AIBOM_SERIES_TARGET_POINTS", "200"))
+# The step (and so the _over_time window of gauge queries, which equals it) is
+# floored at the Prometheus scrape interval: a bucket narrower than that can
+# contain no sample at all and come back empty. 30s is OpenShift's default.
+SERIES_SCRAPE_INTERVAL_S = int(os.environ.get("AIBOM_SERIES_SCRAPE_INTERVAL_S", "30"))
 # Hard ceiling on the stored document. A custom resource shares etcd's ~1.5 MB
 # object limit (and the CRD's spec.seriesJson maxLength); stay well under.
 SERIES_MAX_BYTES = int(os.environ.get("AIBOM_SERIES_MAX_BYTES", "900000"))
@@ -1595,7 +1599,7 @@ def collect_telemetry_series(telemetry, vllm_telemetry):
     if end_ms <= start_ms:
         return None
     span_s = (end_ms - start_ms) / 1000
-    step = max(math.ceil(span_s / SERIES_TARGET_POINTS), 15)
+    step = max(math.ceil(span_s / SERIES_TARGET_POINTS), SERIES_SCRAPE_INTERVAL_S)
 
     metrics = {}
     metrics.update(_collect_series_metrics(

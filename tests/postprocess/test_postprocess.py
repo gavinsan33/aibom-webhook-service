@@ -1617,6 +1617,28 @@ def test_collect_telemetry_series_builds_schema_with_aggregates_and_detail(monke
     assert all(step == doc["window"]["step_seconds"] for _, step in seen)
 
 
+def test_collect_telemetry_series_step_and_gauge_window_floored_at_scrape_interval(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    monkeypatch.setattr(pp, "JOB_NAMESPACE", "ns")
+    start = (datetime.now(timezone.utc) - timedelta(minutes=20)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    seen = []
+
+    def fake_query_range(promql, start_ms, end_ms, step_seconds=None):
+        seen.append((promql, step_seconds))
+        if "DCGM_FI_DEV_GPU_UTIL" in promql:
+            return _range_response(({"exported_pod": "p0", "gpu": "0"}, [(1767225600, 50)]))
+        return None
+
+    monkeypatch.setattr(pp, "query_prometheus_range", fake_query_range)
+    doc = json.loads(pp.collect_telemetry_series({"pods": [{"pod_name": "p0", "start_time": start}]}, None))
+
+    # 20 min / 200 points = 6s, which would be narrower than a 30s scrape interval.
+    assert doc["window"]["step_seconds"] == pp.SERIES_SCRAPE_INTERVAL_S == 30
+    gauge_queries = [q for q, _ in seen if "DCGM_FI_DEV_GPU_UTIL" in q]
+    assert gauge_queries and all("[30s]" in q for q in gauge_queries)
+
+
 def test_collect_telemetry_series_targets_roughly_the_configured_point_count(monkeypatch):
     monkeypatch.setattr(pp, "SERIES_TARGET_POINTS", 200)
     calls = []
