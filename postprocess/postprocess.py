@@ -818,18 +818,38 @@ def detect_model_from_storage(storage):
     if not storage:
         return None
 
+    # model_files comes from the discovery init container reading the
+    # pre-pulled model directory itself (pvc:// storageUri) -- see
+    # generate_snapshot.py's read_model_source_files. Its repo_id, when
+    # present, is a better name than a folder someone chose.
+    files = storage.get("model_files") or {}
     location = storage.get("storage_path") or storage.get("storage_uri")
-    if not location:
-        return None
 
-    model_name = location.rstrip("/").split("/")[-1]
+    model_name = None
+    name_source = None
+    if files.get("repo_id"):
+        model_name, name_source = files["repo_id"], "model_files_readme"
+    elif location:
+        model_name = location.rstrip("/").split("/")[-1]
+        name_source = "storage_path"
     if not model_name:
         return None
 
-    result = {"model_name": model_name}
+    result = {"model_name": model_name, "model_name_declared_via": name_source}
     quant = detect_quantization_from_name(model_name)
     if quant:
         result.update(quant)
+
+    if files.get("dtype"):
+        result["dtype"] = files["dtype"]
+    if files.get("architectures"):
+        result["architecture"] = files["architectures"][0]
+    if files.get("revision"):
+        result["model_revision"] = files["revision"]
+    if files.get("base_model"):
+        result["base_model"] = files["base_model"]
+    if files.get("total_size_bytes"):
+        result["model_size_bytes"] = files["total_size_bytes"]
     return result
 
 
@@ -1922,7 +1942,11 @@ def compile_aibom(
     aibom["model"] = {
         "name": model_name,
         "version": annotations.get("model-version"),
-        "architecture": annotations.get("model-architecture") or runtime_info.get("model_architecture"),
+        "architecture": (
+            annotations.get("model-architecture")
+            or runtime_info.get("model_architecture")
+            or dm.get("architecture")
+        ),
         "framework": (
             annotations.get("model-framework")
             or dm.get("serving_engine")
@@ -1935,6 +1959,20 @@ def compile_aibom(
     }
     if dm.get("speculative_config"):
         aibom["model"]["speculative_decoding"] = dm["speculative_config"]
+    # Identity details read from the model's own files on a PVC (see
+    # detect_model_from_storage). Only emitted when present, and the name's
+    # source is recorded unless an annotation overrode it.
+    if dm.get("model_name_declared_via"):
+        aibom["model"]["name_declared_via"] = (
+            "annotation" if annotations.get("model-name") else dm["model_name_declared_via"]
+        )
+    for src, dst in (
+        ("model_revision", "revision"),
+        ("base_model", "base_model"),
+        ("model_size_bytes", "size_bytes"),
+    ):
+        if dm.get(src):
+            aibom["model"][dst] = dm[src]
 
     # Dataset section
     cli_ds = cli_dataset or {}
@@ -2280,7 +2318,14 @@ def main():
     detected_model = detect_model_from_containers(containers)
     storage_model = detect_model_from_storage(storage)
     if storage_model:
-        detected_model = {**(detected_model or {}), **storage_model}
+        # Storage wins for model_name (the CLI only sees /mnt/models), but
+        # dtype/architecture come from the model's own config.json -- an
+        # explicit --dtype on the command line must not be overridden by it.
+        merged = {**(detected_model or {}), **storage_model}
+        for key in ("dtype", "architecture"):
+            if (detected_model or {}).get(key):
+                merged[key] = detected_model[key]
+        detected_model = merged
     cli_dataset = detect_dataset_from_containers(containers)
     # Precedence among auto-detected sources (annotations always override,
     # handled separately in compile_aibom): the runtime .git-directory read
