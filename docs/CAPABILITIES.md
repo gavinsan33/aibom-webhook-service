@@ -165,7 +165,16 @@ Every `dataset.auto_detected[]` entry gets `matches_declared` — whether its na
 
 **Quantization from model name** (regex, applied as a fallback wherever no explicit flag/config gave a method) — recognizes `AWQ`, `GPTQ` (+ int4/int8 variants), `INT4`/`INT8`, `FP4`/`FP8` (incl. `NVFP4`/`MXFP4`), `bitsandbytes`/`NF4`, `Marlin`, `GGUF`/`GGML`, `AQLM`, `EXL2`, `SqueezeLLM`, `HQQ`, `QuIP`, `EETQ`, `AutoRound` — extracting both method and bit width where the name encodes one.
 
-**KServe InferenceService storage-path model detection** — for predictors with no CLI model flag, derives `model.name` as the last path segment of the `InferenceService`'s declared S3/MinIO storage location (e.g. `models/tinyllama-1.1b-chat` → `tinyllama-1.1b-chat`), then runs it through the same quantization-from-name regex. Identification only — a renamed/generic bucket path is misreported, and bucket contents are never read.
+**KServe InferenceService storage model detection** — for predictors with no CLI model flag, `model.name` comes from the `InferenceService`'s declared storage, by scheme (then run through the same quantization-from-name regex). Recorded in `model.name_declared_via`:
+
+| Declared storage | `model.name` | `model.revision` | `name_declared_via` |
+|---|---|---|---|
+| `pvc://` (pre-pulled model) | `repo_id` from the model dir's README, else the folder name | commit from `.cache/huggingface/download/*.metadata` | `model_files_readme` / `storage_path` |
+| `hf://org/model[:rev]` | `org/model` | `rev`, if pinned | `hf_uri` |
+| `oci://registry/repo[:tag]` (ModelCar) | `registry/repo` (tag dropped) | pulled image digest from `containers.json`, if the model container is in the pod spec | `oci_uri` |
+| S3/MinIO `storage.path`, `s3://`, `gs://`, `https://`, `azure://` | last path segment (e.g. `models/tinyllama-1.1b-chat` → `tinyllama-1.1b-chat`) | — | `storage_path` |
+
+Identification only — nothing verifies the weights. A renamed/generic path is misreported, an unpinned `hf://` is whatever `main` was at pull time, and bucket contents are never read.
 
 **Parallelization strategy** (`training.parallelization_strategy`), independent of training tool:
 
