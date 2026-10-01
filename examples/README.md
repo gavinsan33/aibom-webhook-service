@@ -32,6 +32,16 @@ KServe predictor pods are owned by a ReplicaSet, not a Job/JobSet/PyTorchJob/Ray
 oc apply -f examples/vllm-inference-rhoai.yaml
 ```
 
+## Example: vLLM from a Pre-Pulled Model on a PVC
+
+The `examples/vllm-inference-rhoai-pvc.yaml` file serves a model already sitting on a PersistentVolumeClaim (`storageUri: pvc://llm-serving-storage/qwen-32b`) through a KServe `InferenceService`, the "existing PVC" route in RHOAI. KServe mounts the claim at `/mnt/models`, so the serving command is just `--model=/mnt/models` and gives no hint which model it is. The webhook mounts the same claim read-only into the `aibom-discovery` init container (found via KServe's `internal.serving.kserve.io/storage-initializer-sourceuri` pod annotation) and reads the model's own README, `config.json`, and Hugging Face download metadata, so the AIBOM reports `Qwen/Qwen2.5-32B-Instruct` (`model.name_declared_via: model_files_readme`) plus dtype, architecture, pinned commit, and size, rather than the folder name `qwen-32b`. See Model Auto-Detection in `CLAUDE.md`.
+
+It needs a PVC with a Hugging Face snapshot, and it creates its own `ServingRuntime`. The predictor Service is headless, so the client dials the container port (8080) directly, and guidellm is given the tokenizer explicitly because the served model name is the `InferenceService` name. Loading ~65 GB off NFS takes several minutes.
+
+```bash
+oc apply -f examples/vllm-inference-rhoai-pvc.yaml
+```
+
 ## Example: LoRA Fine-Tuning
 
 The `examples/granite-lora-finetune.yaml` file fine-tunes a small Granite base model with a LoRA adapter over the `tatsu-lab/alpaca` dataset, using HuggingFace's `trl sft` CLI — no custom training script needed, same spirit as the vLLM examples invoking a CLI directly. LoRA freezes the base model and only trains a small adapter, so it fits comfortably on a single GPU. The run is capped with `--max_steps 50` to stay a short, testable example rather than a full training pass.

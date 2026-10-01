@@ -101,18 +101,51 @@ def test_detect_vllm_returns_none_for_empty_command():
 
 def test_detect_model_from_storage_uses_last_path_segment():
     result = pp.detect_model_from_storage({"storage_path": "models/tinyllama-1.1b-chat"})
-    assert result == {"model_name": "tinyllama-1.1b-chat"}
+    assert result == {"model_name": "tinyllama-1.1b-chat", "model_name_declared_via": "storage_path"}
 
 
 def test_detect_model_from_storage_falls_back_to_storage_uri():
     result = pp.detect_model_from_storage({"storage_uri": "s3://bucket/models/granite-3.0-8b-instruct/"})
-    assert result == {"model_name": "granite-3.0-8b-instruct"}
+    assert result == {"model_name": "granite-3.0-8b-instruct", "model_name_declared_via": "storage_path"}
 
 
 def test_detect_model_from_storage_infers_quantization_from_name():
     result = pp.detect_model_from_storage({"storage_path": "models/some-model-AWQ"})
     assert result["model_name"] == "some-model-AWQ"
     assert result["quantization_method"] == "awq"
+
+
+def test_detect_model_from_storage_prefers_model_files_repo_id():
+    result = pp.detect_model_from_storage({
+        "storage_uri": "pvc://llm-serving-storage/qwen-32b",
+        "model_files": {
+            "repo_id": "Qwen/Qwen2.5-32B-Instruct",
+            "base_model": "Qwen/Qwen2.5-32B",
+            "revision": "5ede1c97bbab6ce5cda5812749b4c0bdf79b18dd",
+            "architectures": ["Qwen2ForCausalLM"],
+            "dtype": "bfloat16",
+            "total_size_bytes": 65527752704,
+        },
+    })
+    assert result == {
+        "model_name": "Qwen/Qwen2.5-32B-Instruct",
+        "model_name_declared_via": "model_files_readme",
+        "dtype": "bfloat16",
+        "architecture": "Qwen2ForCausalLM",
+        "model_revision": "5ede1c97bbab6ce5cda5812749b4c0bdf79b18dd",
+        "base_model": "Qwen/Qwen2.5-32B",
+        "model_size_bytes": 65527752704,
+    }
+
+
+def test_detect_model_from_storage_model_files_without_repo_id_keeps_folder_name():
+    result = pp.detect_model_from_storage({
+        "storage_uri": "pvc://llm-serving-storage/qwen-32b",
+        "model_files": {"dtype": "bfloat16"},
+    })
+    assert result["model_name"] == "qwen-32b"
+    assert result["model_name_declared_via"] == "storage_path"
+    assert result["dtype"] == "bfloat16"
 
 
 def test_detect_model_from_storage_returns_none_when_empty():

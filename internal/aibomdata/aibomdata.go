@@ -26,6 +26,14 @@ const (
 	// (S3/MinIO data-connection) deployments, which carry no CLI args to parse.
 	LabelKServeInferenceService = "serving.kserve.io/inferenceservice"
 
+	// AnnotationKServeStorageSourceURI is set by KServe on a predictor pod's
+	// template to the InferenceService's storageUri. The webhook reads it to
+	// find a pvc:// model source at admission time without depending on
+	// ordering relative to KServe's own pod mutator (this webhook's
+	// configuration name sorts before KServe's, so the pod has no model
+	// volume mount yet when it's admitted here).
+	AnnotationKServeStorageSourceURI = "internal.serving.kserve.io/storage-initializer-sourceuri"
+
 	// DiscoverySigningKeySecretName is created per workload namespace by the
 	// aibom-workload-namespace chart (templates/signing.yaml). The webhook
 	// mounts it only into the discovery init container (never an app

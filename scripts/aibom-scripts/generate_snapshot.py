@@ -6,6 +6,7 @@ import subprocess
 import json
 import time
 import os
+import re
 from datetime import datetime
 
 try:
@@ -257,6 +258,96 @@ def resolve_inference_service_storage(namespace):
     return result
 
 
+_MODEL_FILE_MAX_BYTES = 5 * 1024 * 1024
+_HEX40 = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _read_small_file(path, limit=_MODEL_FILE_MAX_BYTES):
+    try:
+        with open(path, "rb") as f:
+            return f.read(limit).decode("utf-8", errors="replace")
+    except OSError:
+        return None
+
+
+def read_model_source_files(model_dir):
+    """Read identity/config metadata out of a pre-pulled model directory
+    (a KServe pvc:// storageUri mounted read-only at model_dir -- see
+    mutator.go's modelSourcePVC). Only small metadata files are read, never
+    weights. Everything here is best-effort identification from files anyone
+    with write access to the PVC could have edited, not verification.
+
+    Returns a dict with whichever of these could be resolved, or None:
+      repo_id        Hugging Face "org/name", only when the README's
+                     license_link repo name agrees with its H1 title (a
+                     fine-tune's license_link often points at its base model)
+      base_model     README front matter base_model, if a plain string
+      revision       commit the snapshot was downloaded at, from
+                     huggingface_hub's .cache/huggingface/download metadata
+      architectures, model_type, dtype, max_position_embeddings
+                     from config.json
+      total_size_bytes  from model.safetensors.index.json
+    """
+    if not model_dir or not os.path.isdir(model_dir):
+        return None
+    out = {}
+
+    readme = _read_small_file(os.path.join(model_dir, "README.md"), 64 * 1024)
+    if readme:
+        front = re.match(r"^---\s*\n(.*?)\n---\s*(?:\n|$)", readme, re.S)
+        front_text = front.group(1) if front else ""
+        body = readme[front.end():] if front else readme
+        base = re.search(r"^base_model:[ \t]*([^\s\[#][^\n#]*?)[ \t]*$", front_text, re.M)
+        if base:
+            out["base_model"] = base.group(1).strip("'\"")
+        link = re.search(r"^license_link:\s*\S*huggingface\.co/([\w.-]+)/([\w.-]+)/", front_text, re.M)
+        title = re.search(r"^#\s+(.+?)\s*$", body, re.M)
+        if link and title and link.group(2).lower() == title.group(1).strip().lower():
+            out["repo_id"] = f"{link.group(1)}/{link.group(2)}"
+
+    meta_dir = os.path.join(model_dir, ".cache", "huggingface", "download")
+    try:
+        for fname in sorted(os.listdir(meta_dir)):
+            if not fname.endswith(".metadata"):
+                continue
+            text = _read_small_file(os.path.join(meta_dir, fname), 1024)
+            first = (text or "").split("\n", 1)[0].strip()
+            if _HEX40.match(first):
+                out["revision"] = first
+                break
+    except OSError:
+        pass
+
+    config_text = _read_small_file(os.path.join(model_dir, "config.json"))
+    if config_text:
+        try:
+            config = json.loads(config_text)
+        except ValueError:
+            config = None
+        if isinstance(config, dict):
+            for src, dst in (
+                ("architectures", "architectures"),
+                ("model_type", "model_type"),
+                ("max_position_embeddings", "max_position_embeddings"),
+            ):
+                if config.get(src) is not None:
+                    out[dst] = config[src]
+            dtype = config.get("torch_dtype") or config.get("dtype")
+            if isinstance(dtype, str):
+                out["dtype"] = dtype
+
+    index_text = _read_small_file(os.path.join(model_dir, "model.safetensors.index.json"))
+    if index_text:
+        try:
+            total = (json.loads(index_text).get("metadata") or {}).get("total_size")
+        except (ValueError, AttributeError):
+            total = None
+        if isinstance(total, int):
+            out["total_size_bytes"] = total
+
+    return out or None
+
+
 _SIGNING_KEY_PATH = "/var/run/secrets/aibom/discovery-signing/hmac-key"
 
 
@@ -305,6 +396,10 @@ if signature:
     data_updates[f"discovery-{pod_name}.sig"] = signature
 
 storage_info = resolve_inference_service_storage(pod_namespace)
+model_files = read_model_source_files(os.environ.get("AIBOM_MODEL_DIR", ""))
+if model_files:
+    storage_info = dict(storage_info or {})
+    storage_info["model_files"] = model_files
 if storage_info:
     # Same canonical serialization requirement as discovery_payload above:
     # signed and later re-hashed byte-for-byte by the watcher.
