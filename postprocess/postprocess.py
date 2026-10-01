@@ -799,7 +799,34 @@ def _parallelization_strategy_from_device_map(device_map):
     return "model_parallel"
 
 
-def detect_model_from_storage(storage):
+def _parse_storage_uri(uri):
+    """Split a scheme-aware storageUri into (name, revision, declared_via),
+    or None for schemes that only get the generic last-segment treatment.
+
+    hf://org/model[:revision] -> repo id + optional pinned revision.
+    oci://registry/repo[:tag|@digest] -> image reference without tag/digest;
+    the tag is not a revision (it moves), the digest is resolved separately
+    from the pod's imageID in detect_model_from_storage.
+    """
+    if not uri:
+        return None
+    if uri.startswith("hf://"):
+        ref = uri[len("hf://"):].strip("/")
+        name, _, revision = ref.partition(":")
+        if name:
+            return name, revision or None, "hf_uri"
+    elif uri.startswith("oci://"):
+        ref = uri[len("oci://"):]
+        ref = ref.split("@", 1)[0]
+        last = ref.rsplit("/", 1)[-1]
+        if ":" in last:
+            ref = ref[: len(ref) - len(last)] + last.split(":", 1)[0]
+        if ref:
+            return ref, None, "oci_uri"
+    return None
+
+
+def detect_model_from_storage(storage, containers=None):
     """Detect model identity from a KServe InferenceService's declared
     storage.path/storageUri (see watcher.go's resolveInferenceServiceStorage
     and storage.json). Predictor pods backed by an S3/MinIO data-connection
@@ -827,8 +854,21 @@ def detect_model_from_storage(storage):
 
     model_name = None
     name_source = None
+    uri_revision = None
+    parsed = None if storage.get("storage_path") else _parse_storage_uri(storage.get("storage_uri"))
     if files.get("repo_id"):
         model_name, name_source = files["repo_id"], "model_files_readme"
+    elif parsed:
+        model_name, uri_revision, name_source = parsed
+        if name_source == "oci_uri":
+            # KServe's ModelCar container runs the model image itself, so its
+            # spec image equals the URI sans scheme; the resolved digest is
+            # what was actually pulled (the tag can move).
+            image = storage["storage_uri"][len("oci://"):]
+            for c in containers or []:
+                if c.get("image") == image and _image_digest(c.get("image_id")):
+                    uri_revision = _image_digest(c["image_id"])
+                    break
     elif location:
         model_name = location.rstrip("/").split("/")[-1]
         name_source = "storage_path"
@@ -844,8 +884,8 @@ def detect_model_from_storage(storage):
         result["dtype"] = files["dtype"]
     if files.get("architectures"):
         result["architecture"] = files["architectures"][0]
-    if files.get("revision"):
-        result["model_revision"] = files["revision"]
+    if files.get("revision") or uri_revision:
+        result["model_revision"] = files.get("revision") or uri_revision
     if files.get("base_model"):
         result["base_model"] = files["base_model"]
     if files.get("total_size_bytes"):
@@ -2316,7 +2356,7 @@ def main():
     # model_name since S3/MinIO-backed predictors have no CLI arg to parse it
     # from (see detect_model_from_storage).
     detected_model = detect_model_from_containers(containers)
-    storage_model = detect_model_from_storage(storage)
+    storage_model = detect_model_from_storage(storage, containers)
     if storage_model:
         # Storage wins for model_name (the CLI only sees /mnt/models), but
         # dtype/architecture come from the model's own config.json -- an

@@ -115,6 +115,33 @@ def test_detect_model_from_storage_infers_quantization_from_name():
     assert result["quantization_method"] == "awq"
 
 
+def test_detect_model_from_storage_hf_uri_keeps_org():
+    result = pp.detect_model_from_storage({"storage_uri": "hf://ibm-granite/granite-3.3-2b-instruct"})
+    assert result == {"model_name": "ibm-granite/granite-3.3-2b-instruct", "model_name_declared_via": "hf_uri"}
+
+
+def test_detect_model_from_storage_hf_uri_splits_revision():
+    result = pp.detect_model_from_storage({"storage_uri": "hf://TheBloke/Llama-2-7B-AWQ:abc123def"})
+    assert result["model_name"] == "TheBloke/Llama-2-7B-AWQ"
+    assert result["model_revision"] == "abc123def"
+    assert result["quantization_method"] == "awq"
+
+
+def test_detect_model_from_storage_oci_uri_uses_pulled_digest():
+    containers = [{"image": "quay.io/acme/modelcar-granite:1.0", "image_id": "quay.io/acme/modelcar-granite@sha256:" + "a" * 64}]
+    result = pp.detect_model_from_storage({"storage_uri": "oci://quay.io/acme/modelcar-granite:1.0"}, containers)
+    assert result == {
+        "model_name": "quay.io/acme/modelcar-granite",
+        "model_name_declared_via": "oci_uri",
+        "model_revision": "sha256:" + "a" * 64,
+    }
+
+
+def test_detect_model_from_storage_oci_uri_without_matching_container():
+    result = pp.detect_model_from_storage({"storage_uri": "oci://localhost:5000/acme/m:1.0"}, [])
+    assert result == {"model_name": "localhost:5000/acme/m", "model_name_declared_via": "oci_uri"}
+
+
 def test_detect_model_from_storage_prefers_model_files_repo_id():
     result = pp.detect_model_from_storage({
         "storage_uri": "pvc://llm-serving-storage/qwen-32b",
