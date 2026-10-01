@@ -16,6 +16,8 @@ For filtering, inspecting, and comparing the resulting `AIBOM` custom resources,
 
 Pods are matched if they are owned by a Job, JobSet, PyTorchJob, or RayJob, **or** if any container requests `nvidia.com/gpu` resources. The webhook always fails open (`failurePolicy: Ignore`) — if the service is down, pods are created normally.
 
+That includes the service being *unreachable*: the API server, not a pod, calls the webhook, so a NetworkPolicy in the install namespace that only admits same-namespace ingress makes every admission call time out, silently — workloads run uninstrumented and no AIBOM is produced, with nothing logged. The chart therefore ships `aibom-webhook-admission` (`templates/networkpolicy.yaml`, on by default; `networkPolicy.enabled=false` to opt out), which allows ingress to the webhook pod's port 8443. If pods in an `aibom.io/enabled` namespace come up without an `aibom-discovery` init container, check this first: a server-side dry run of a bare GPU pod (`oc create --dry-run=server -o yaml`) should come back with the `aibom.io/instrumented` label, and a `mutating pod ...` line should appear in the webhook's log.
+
 For the full rules on which Jobs/pods get postprocessed, how JobSet siblings are merged, and how model/dataset config is auto-detected, see `CLAUDE.md`.
 
 ## Prerequisites

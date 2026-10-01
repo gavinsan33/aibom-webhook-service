@@ -63,6 +63,14 @@ webhook:
   # see CLAUDE.md's postprocess-for trust boundary section.
   trustedJobControllerIdentity: ""
 
+# NetworkPolicy allowing the API server to reach the webhook's admission port
+# (see templates/networkpolicy.yaml for why). Harmless where nothing isolates
+# ingress; needed where the install namespace does, since an unreachable
+# webhook fails open silently (webhook.failurePolicy: Ignore). Set false if
+# your cluster manages this itself.
+networkPolicy:
+  enabled: true
+
 # OpenShift BuildConfig/ImageStream resources that build the webhook and
 # postprocess images from source in-cluster. Opt-in (via `just deploy`) for
 # clusters that specifically want in-cluster builds instead of pulling
