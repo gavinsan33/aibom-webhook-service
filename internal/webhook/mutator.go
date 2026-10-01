@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/gavinsan33/aibom-webhook-service/internal/aibomdata"
@@ -120,8 +121,22 @@ func (m *Mutator) Mutate(pod *corev1.Pod, requesterUsername string) ([]PatchOper
 	// container, so the workload's own code never has access to it.
 	patches = appendVolume(patches, pod, buildDiscoverySigningKeyVolume())
 
+	// A KServe predictor whose model is pre-pulled onto a PVC (pvc://) gets
+	// that PVC mounted read-only into the discovery init container too, so
+	// generate_snapshot.py can read the model's own metadata files (see
+	// modelSourcePVC).
+	modelClaim, modelSubPath, hasModelSource := modelSourcePVC(pod)
+	if hasModelSource {
+		patches = appendVolume(patches, pod, buildModelSourceVolume(modelClaim))
+	}
+
 	// Add discovery init container
-	patches = appendInitContainer(patches, pod, m.buildDiscoveryInitContainer(pod))
+	discovery := m.buildDiscoveryInitContainer(pod)
+	if hasModelSource {
+		discovery.VolumeMounts = append(discovery.VolumeMounts, modelSourceVolumeMount(modelSubPath))
+		discovery.Env = append(discovery.Env, corev1.EnvVar{Name: "AIBOM_MODEL_DIR", Value: modelSourceMountPath})
+	}
+	patches = appendInitContainer(patches, pod, discovery)
 
 	// Inject dataset detector into application containers, and the sidecar
 	// that signs and publishes what it detects (see #47) -- gated on the
@@ -825,6 +840,60 @@ func datasetSigningKeyVolumeMount() corev1.VolumeMount {
 	return corev1.VolumeMount{
 		Name:      "aibom-dataset-signing-key",
 		MountPath: "/var/run/secrets/aibom/dataset-signing",
+		ReadOnly:  true,
+	}
+}
+
+const (
+	modelSourceVolumeName = "aibom-model-source"
+	modelSourceMountPath  = "/mnt/aibom-model"
+)
+
+// modelSourcePVC returns the claim name and in-claim subpath of a KServe
+// predictor's pvc://<claim>/<path> storageUri. It reads KServe's own source
+// annotation rather than the pod's volumes: this webhook runs before KServe's
+// pod mutator, which is what adds the /mnt/models mount. Only pods KServe has
+// labeled as a predictor qualify, and the mount is read-only in the pod's own
+// namespace, so this grants nothing the requester couldn't already mount.
+func modelSourcePVC(pod *corev1.Pod) (claim, subPath string, ok bool) {
+	if pod.Labels[aibomdata.LabelKServeInferenceService] == "" {
+		return "", "", false
+	}
+	uri := pod.Annotations[aibomdata.AnnotationKServeStorageSourceURI]
+	rest, found := strings.CutPrefix(uri, "pvc://")
+	if !found {
+		return "", "", false
+	}
+	claim, subPath, _ = strings.Cut(rest, "/")
+	subPath = strings.Trim(subPath, "/")
+	if claim == "" {
+		return "", "", false
+	}
+	for _, seg := range strings.Split(subPath, "/") {
+		if seg == ".." {
+			return "", "", false
+		}
+	}
+	return claim, subPath, true
+}
+
+func buildModelSourceVolume(claim string) corev1.Volume {
+	return corev1.Volume{
+		Name: modelSourceVolumeName,
+		VolumeSource: corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+				ClaimName: claim,
+				ReadOnly:  true,
+			},
+		},
+	}
+}
+
+func modelSourceVolumeMount(subPath string) corev1.VolumeMount {
+	return corev1.VolumeMount{
+		Name:      modelSourceVolumeName,
+		MountPath: modelSourceMountPath,
+		SubPath:   subPath,
 		ReadOnly:  true,
 	}
 }
