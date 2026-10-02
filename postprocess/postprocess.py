@@ -75,27 +75,53 @@ TELEMETRY_RETRY_DELAY_S = int(os.environ.get("AIBOM_TELEMETRY_RETRY_DELAY_S", "4
 # query telemetry for every pod regardless of detected GPU count.
 DEBUG_TELEMETRY_ALL_PODS = os.environ.get("AIBOM_DEBUG_TELEMETRY_ALL_PODS", "").lower() == "true"
 
+# Prometheus' scrape interval (OpenShift's default is 30s). The summary stats
+# trim this much off the start of each pod's window as cold start, and the
+# time-series step is floored at it (see SERIES_SCRAPE_INTERVAL_S below).
+SCRAPE_INTERVAL_S = int(os.environ.get("AIBOM_SERIES_SCRAPE_INTERVAL_S", "30"))
+SCRAPE_INTERVAL_MS = SCRAPE_INTERVAL_S * 1000
+
+# The [5m] window every rate()/avg_over_time() query below uses. A point at
+# time t summarizes (t-5m, t], so a pod's samples keep showing up in query
+# results for up to this long after it stops -- which is why each pod's stats
+# window ends at its own finish time, not at collection time.
+RATE_WINDOW_MS = 5 * 60 * 1000
+
+# Per-container cAdvisor series to count as the workload: not the pause
+# container ("POD"), not the pod-level cgroup (""), and not this project's
+# own injected aibom-dataset-sidecar. Shared by the stats and series queries.
+_WORKLOAD_CONTAINERS = 'container!="POD", container!="", container!="aibom-dataset-sidecar"'
+
 # Each query's raw range data points are kept (not just reduced to a single
 # average) so stats -- min/max/p95 and a first/middle/last-third breakdown --
 # can be derived from the same series a run's shape actually traced out,
 # instead of needing a second `avg_over_time` query per metric. See
 # compute_metric_stats() and CLAUDE.md's Telemetry Retries section.
+#
+# Every query aggregates to exactly one series per pod (sum, or avg for
+# utilization), so compute_metric_stats sees one value per timestamp. Without
+# that, a pod's per-container/per-GPU/per-interface series would be pooled and
+# averaged together -- an 8 GiB app container next to a 50 MiB sidecar would
+# report ~4 GiB of memory. The sums match SERIES_QUERIES' per-run `aggregate`
+# lines. Placeholders: {namespace}, {pod_name}.
 TELEMETRY_QUERIES = {
     # Computed directly from dcgm-exporter's own raw metrics (present on any
     # standard DCGM install) rather than a "nerc:"-prefixed recording rule --
     # that rule is a PrometheusRule dependency specific to certain clusters
     # (e.g. NERC) and isn't present by default elsewhere, which silently
     # dropped GPU telemetry on any cluster that hadn't separately installed it.
+    # DCGM's own `namespace`/`pod` labels are dcgm-exporter's; the workload's
+    # are `exported_namespace`/`exported_pod`.
     "gpu_utilization": {
-        "query": 'avg_over_time(DCGM_FI_DEV_GPU_UTIL{exported_pod="{pod_name}"}[5m])',
+        "query": 'avg(avg_over_time(DCGM_FI_DEV_GPU_UTIL{exported_namespace="{namespace}", exported_pod="{pod_name}"}[5m]))',
         "unit": "percent",
     },
     "gpu_memory_used": {
-        "query": 'avg_over_time(DCGM_FI_DEV_FB_USED{exported_pod="{pod_name}"}[5m])',
+        "query": 'sum(avg_over_time(DCGM_FI_DEV_FB_USED{exported_namespace="{namespace}", exported_pod="{pod_name}"}[5m]))',
         "unit": "MiB",
     },
     "gpu_power": {
-        "query": 'avg_over_time(DCGM_FI_DEV_POWER_USAGE{exported_pod="{pod_name}"}[5m])',
+        "query": 'sum(avg_over_time(DCGM_FI_DEV_POWER_USAGE{exported_namespace="{namespace}", exported_pod="{pod_name}"}[5m]))',
         "unit": "watts",
     },
     # rate()'s [5m] window matches what the pre-segmented-stats avg_* fields
@@ -103,19 +129,27 @@ TELEMETRY_QUERIES = {
     # keep it tight rather than widening it, since a wider window smooths out
     # exactly the mid-run detail compute_metric_stats' segments exist to show.
     "cpu_usage": {
-        "query": 'rate(container_cpu_usage_seconds_total{pod="{pod_name}", container!="POD", container!=""}[5m])',
+        "query": (
+            'sum(rate(container_cpu_usage_seconds_total{namespace="{namespace}", pod="{pod_name}", '
+            + _WORKLOAD_CONTAINERS + '}[5m]))'
+        ),
         "unit": "cores",
     },
     "memory_usage": {
-        "query": 'container_memory_working_set_bytes{pod="{pod_name}", container!="POD", container!=""}',
+        "query": (
+            'sum(container_memory_working_set_bytes{namespace="{namespace}", pod="{pod_name}", '
+            + _WORKLOAD_CONTAINERS + '})'
+        ),
         "unit": "bytes",
     },
+    # Network is only exposed at the pod level (one series per interface), so
+    # there's no container filter here; sum across interfaces.
     "network_receive": {
-        "query": 'rate(container_network_receive_bytes_total{pod="{pod_name}"}[5m])',
+        "query": 'sum(rate(container_network_receive_bytes_total{namespace="{namespace}", pod="{pod_name}"}[5m]))',
         "unit": "bytes_per_sec",
     },
     "network_transmit": {
-        "query": 'rate(container_network_transmit_bytes_total{pod="{pod_name}"}[5m])',
+        "query": 'sum(rate(container_network_transmit_bytes_total{namespace="{namespace}", pod="{pod_name}"}[5m]))',
         "unit": "bytes_per_sec",
     },
     # container_fs_* is labeled per-device, unlike network -- sum across
@@ -128,15 +162,17 @@ TELEMETRY_QUERIES = {
     # double-count.
     "storage_read_throughput": {
         "query": (
-            'sum by (pod) (rate(container_fs_reads_bytes_total{pod="{pod_name}", container!="POD", container!=""}[5m]))'
-            ' or sum by (pod) (rate(container_fs_reads_bytes_total{pod="{pod_name}", container=""}[5m]))'
+            'sum by (pod) (rate(container_fs_reads_bytes_total{namespace="{namespace}", pod="{pod_name}", '
+            + _WORKLOAD_CONTAINERS + '}[5m]))'
+            ' or sum by (pod) (rate(container_fs_reads_bytes_total{namespace="{namespace}", pod="{pod_name}", container=""}[5m]))'
         ),
         "unit": "bytes_per_sec",
     },
     "storage_write_throughput": {
         "query": (
-            'sum by (pod) (rate(container_fs_writes_bytes_total{pod="{pod_name}", container!="POD", container!=""}[5m]))'
-            ' or sum by (pod) (rate(container_fs_writes_bytes_total{pod="{pod_name}", container=""}[5m]))'
+            'sum by (pod) (rate(container_fs_writes_bytes_total{namespace="{namespace}", pod="{pod_name}", '
+            + _WORKLOAD_CONTAINERS + '}[5m]))'
+            ' or sum by (pod) (rate(container_fs_writes_bytes_total{namespace="{namespace}", pod="{pod_name}", container=""}[5m]))'
         ),
         "unit": "bytes_per_sec",
     },
@@ -153,11 +189,11 @@ TELEMETRY_QUERIES = {
 # is a different question than a hardware-utilization one.
 #
 # vLLM's own metrics carry no pod/namespace label at all (just `engine` and
-# `model_name`) -- the `pod="{pod_name}"` filter below only works because
+# `model_name`) -- the `namespace`/`pod` filters below only work because
 # the aibom-vllm-metrics PodMonitor (charts/aibom-workload-namespace) scrapes
-# it, and Prometheus's own target-discovery relabeling is what attaches the
-# `pod` label, the same mechanism the cAdvisor container_* queries above rely
-# on, not anything vLLM itself provides.
+# it, and Prometheus's own target-discovery relabeling is what attaches
+# those labels, the same mechanism the cAdvisor container_* queries above
+# rely on, not anything vLLM itself provides.
 #
 # TTFT/ITL are histograms; sum-rate-over-count-rate gives the average latency
 # per time window, reusing compute_metric_stats' min/max/avg/p95/segments
@@ -169,44 +205,56 @@ TELEMETRY_QUERIES = {
 # two metrics. A workload with zero completed requests in a given 5m window
 # divides 0/0 (NaN); parse_range_response drops NaN samples rather than
 # propagating them into min/max/avg.
+#
+# Two metrics were renamed in newer vLLM releases; the pre-rename name is
+# tried via `or` so older servers still report them: inter_token_latency_seconds
+# was time_per_output_token_seconds, and kv_cache_usage_perc was
+# gpu_cache_usage_perc. Both sides are aggregated to an empty label set, so
+# when a server exports both names `or` keeps only the new one.
+#
+# kv_cache_usage_perc is a 0-1 fraction despite its name; it's multiplied by
+# 100 here so the stored value matches its "percent" unit.
 VLLM_TELEMETRY_QUERIES = {
     "time_to_first_token_seconds": {
         "query": (
-            'rate(vllm:time_to_first_token_seconds_sum{pod="{pod_name}"}[5m])'
-            ' / rate(vllm:time_to_first_token_seconds_count{pod="{pod_name}"}[5m])'
+            'sum(rate(vllm:time_to_first_token_seconds_sum{namespace="{namespace}", pod="{pod_name}"}[5m]))'
+            ' / sum(rate(vllm:time_to_first_token_seconds_count{namespace="{namespace}", pod="{pod_name}"}[5m]))'
         ),
         "unit": "seconds",
     },
     "inter_token_latency_seconds": {
         "query": (
-            'rate(vllm:inter_token_latency_seconds_sum{pod="{pod_name}"}[5m])'
-            ' / rate(vllm:inter_token_latency_seconds_count{pod="{pod_name}"}[5m])'
+            '(sum(rate(vllm:inter_token_latency_seconds_sum{namespace="{namespace}", pod="{pod_name}"}[5m]))'
+            ' / sum(rate(vllm:inter_token_latency_seconds_count{namespace="{namespace}", pod="{pod_name}"}[5m])))'
+            ' or (sum(rate(vllm:time_per_output_token_seconds_sum{namespace="{namespace}", pod="{pod_name}"}[5m]))'
+            ' / sum(rate(vllm:time_per_output_token_seconds_count{namespace="{namespace}", pod="{pod_name}"}[5m])))'
         ),
         "unit": "seconds",
     },
     "num_requests_running": {
-        "query": 'avg_over_time(vllm:num_requests_running{pod="{pod_name}"}[5m])',
+        "query": 'sum(avg_over_time(vllm:num_requests_running{namespace="{namespace}", pod="{pod_name}"}[5m]))',
         "unit": "requests",
     },
     "num_requests_waiting": {
-        "query": 'avg_over_time(vllm:num_requests_waiting{pod="{pod_name}"}[5m])',
+        "query": 'sum(avg_over_time(vllm:num_requests_waiting{namespace="{namespace}", pod="{pod_name}"}[5m]))',
         "unit": "requests",
     },
     "kv_cache_usage": {
-        "query": 'avg_over_time(vllm:kv_cache_usage_perc{pod="{pod_name}"}[5m])',
+        "query": (
+            '100 * (avg(avg_over_time(vllm:kv_cache_usage_perc{namespace="{namespace}", pod="{pod_name}"}[5m]))'
+            ' or avg(avg_over_time(vllm:gpu_cache_usage_perc{namespace="{namespace}", pod="{pod_name}"}[5m])))'
+        ),
         "unit": "percent",
     },
     "prompt_throughput": {
-        "query": 'rate(vllm:prompt_tokens_total{pod="{pod_name}"}[5m])',
+        "query": 'sum(rate(vllm:prompt_tokens_total{namespace="{namespace}", pod="{pod_name}"}[5m]))',
         "unit": "tokens_per_sec",
     },
     "generation_throughput": {
-        "query": 'rate(vllm:generation_tokens_total{pod="{pod_name}"}[5m])',
+        "query": 'sum(rate(vllm:generation_tokens_total{namespace="{namespace}", pod="{pod_name}"}[5m]))',
         "unit": "tokens_per_sec",
     },
 }
-
-SCRAPE_INTERVAL_MS = 5 * 60 * 1000
 
 # ---------------------------------------------------------------------------
 # Persisted telemetry time series (see CLAUDE.md's Telemetry Time Series)
@@ -224,8 +272,8 @@ SCRAPE_INTERVAL_MS = 5 * 60 * 1000
 # than the display-scaled units resource_utilization uses.
 #
 # aibom-dataset-sidecar is excluded from per-container queries so the series
-# describe the workload, not this project's own injected container.
-_SERIES_CONTAINERS = 'container!="POD", container!="", container!="aibom-dataset-sidecar"'
+# describe the workload, not this project's own injected container (the same
+# _WORKLOAD_CONTAINERS filter the stats queries use).
 SERIES_QUERIES = {
     "gpu_utilization": {
         "query": (
@@ -251,14 +299,14 @@ SERIES_QUERIES = {
     "cpu_usage": {
         "query": (
             'sum by (pod, container) (rate(container_cpu_usage_seconds_total{namespace="{namespace}", '
-            'pod=~"{pod_regex}", ' + _SERIES_CONTAINERS + '}[5m]))'
+            'pod=~"{pod_regex}", ' + _WORKLOAD_CONTAINERS + '}[5m]))'
         ),
         "unit": "cores", "aggregation": "sum",
     },
     "memory_usage": {
         "query": (
             '{fn} by (pod, container) ({fn}_over_time(container_memory_working_set_bytes{namespace="{namespace}", '
-            'pod=~"{pod_regex}", ' + _SERIES_CONTAINERS + '}[{win}s]))'
+            'pod=~"{pod_regex}", ' + _WORKLOAD_CONTAINERS + '}[{win}s]))'
         ),
         "unit": "bytes", "aggregation": "sum", "gauge": True,
     },
@@ -280,7 +328,7 @@ SERIES_QUERIES = {
     "storage_read_throughput": {
         "query": (
             'sum by (pod) (rate(container_fs_reads_bytes_total{namespace="{namespace}", pod=~"{pod_regex}", '
-            + _SERIES_CONTAINERS + '}[5m]))'
+            + _WORKLOAD_CONTAINERS + '}[5m]))'
             ' or sum by (pod) (rate(container_fs_reads_bytes_total{namespace="{namespace}", '
             'pod=~"{pod_regex}", container=""}[5m]))'
         ),
@@ -289,7 +337,7 @@ SERIES_QUERIES = {
     "storage_write_throughput": {
         "query": (
             'sum by (pod) (rate(container_fs_writes_bytes_total{namespace="{namespace}", pod=~"{pod_regex}", '
-            + _SERIES_CONTAINERS + '}[5m]))'
+            + _WORKLOAD_CONTAINERS + '}[5m]))'
             ' or sum by (pod) (rate(container_fs_writes_bytes_total{namespace="{namespace}", '
             'pod=~"{pod_regex}", container=""}[5m]))'
         ),
@@ -307,8 +355,10 @@ VLLM_SERIES_QUERIES = {
     },
     "inter_token_latency_seconds": {
         "query": (
-            'sum by (pod) (rate(vllm:inter_token_latency_seconds_sum{namespace="{namespace}", pod=~"{pod_regex}"}[5m]))'
-            ' / sum by (pod) (rate(vllm:inter_token_latency_seconds_count{namespace="{namespace}", pod=~"{pod_regex}"}[5m]))'
+            '(sum by (pod) (rate(vllm:inter_token_latency_seconds_sum{namespace="{namespace}", pod=~"{pod_regex}"}[5m]))'
+            ' / sum by (pod) (rate(vllm:inter_token_latency_seconds_count{namespace="{namespace}", pod=~"{pod_regex}"}[5m])))'
+            ' or (sum by (pod) (rate(vllm:time_per_output_token_seconds_sum{namespace="{namespace}", pod=~"{pod_regex}"}[5m]))'
+            ' / sum by (pod) (rate(vllm:time_per_output_token_seconds_count{namespace="{namespace}", pod=~"{pod_regex}"}[5m])))'
         ),
         "unit": "seconds", "aggregation": "avg",
     },
@@ -328,8 +378,11 @@ VLLM_SERIES_QUERIES = {
     },
     "kv_cache_usage": {
         "query": (
-            '{fn} by (pod) ({fn}_over_time(vllm:kv_cache_usage_perc{namespace="{namespace}", '
+            # Pre-rename fallback and 0-1 -> percent scaling: see VLLM_TELEMETRY_QUERIES.
+            '100 * ({fn} by (pod) ({fn}_over_time(vllm:kv_cache_usage_perc{namespace="{namespace}", '
             'pod=~"{pod_regex}"}[{win}s]))'
+            ' or {fn} by (pod) ({fn}_over_time(vllm:gpu_cache_usage_perc{namespace="{namespace}", '
+            'pod=~"{pod_regex}"}[{win}s])))'
         ),
         "unit": "percent", "aggregation": "avg", "gauge": True,
     },
@@ -352,8 +405,8 @@ SERIES_PLURAL = "aibomtelemetries"
 SERIES_TARGET_POINTS = int(os.environ.get("AIBOM_SERIES_TARGET_POINTS", "200"))
 # The step (and so the _over_time window of gauge queries, which equals it) is
 # floored at the Prometheus scrape interval: a bucket narrower than that can
-# contain no sample at all and come back empty. 30s is OpenShift's default.
-SERIES_SCRAPE_INTERVAL_S = int(os.environ.get("AIBOM_SERIES_SCRAPE_INTERVAL_S", "30"))
+# contain no sample at all and come back empty.
+SERIES_SCRAPE_INTERVAL_S = SCRAPE_INTERVAL_S
 # Hard ceiling on the stored document. A custom resource shares etcd's ~1.5 MB
 # object limit (and the CRD's spec.seriesJson maxLength); stay well under.
 SERIES_MAX_BYTES = int(os.environ.get("AIBOM_SERIES_MAX_BYTES", "900000"))
@@ -1185,7 +1238,7 @@ def build_grafana_explore_url(grafana_url, datasource_uid, named_queries, start_
     # Purely presentational: builds a link into whatever Grafana instance you point it
     # at (via GRAFANA_URL/GRAFANA_DATASOURCE_UID), independent of the actual telemetry
     # queries above, which always go straight to PROMETHEUS_URL.
-    end_ms_padded = end_ms + SCRAPE_INTERVAL_MS  # pad to capture the final scrape interval
+    end_ms_padded = end_ms + RATE_WINDOW_MS  # pad to capture the final rate window
     # Metrics span wildly different scales (%, MiB, watts, cores, bytes), so
     # plotting all of them by default produces an unreadable graph. Only the
     # first metric starts visible; the rest are hidden but still present as
@@ -1234,7 +1287,19 @@ def parse_range_response(response):
 
 
 def _chunk_avg(values):
-    return round(sum(values) / len(values), 2) if values else None
+    return sum(values) / len(values) if values else None
+
+
+def _round_stat(value):
+    """Rounding for a reported stat, applied once, after display scaling:
+    2 decimals at magnitude >= 1, 3 significant figures below that. Rounding
+    raw values to 2 decimals (as this used to, before scaling) turned a
+    14 ms inter-token latency into 0.01 s and 0.0006 cores into 0.0."""
+    if value is None:
+        return None
+    if value == 0 or abs(value) >= 1:
+        return round(value, 2)
+    return float(f"{value:.3g}")
 
 
 def compute_metric_stats(data_points):
@@ -1243,8 +1308,9 @@ def compute_metric_stats(data_points):
     A flat average can't distinguish a run that held steady from one that
     started high and degraded (thermal throttling, a stalled data loader,
     checkpoint pauses); the three segments make that shape visible without
-    storing the full series. See CLAUDE.md's Telemetry Retries
-    section."""
+    storing the full series. See CLAUDE.md's Segmented Performance Stats
+    section. Values are left unrounded here; aggregate_pod_metrics rounds
+    once, after scaling to the display unit."""
     if not data_points:
         return None
     values = [p["value"] for p in sorted(data_points, key=lambda p: p["timestamp"])]
@@ -1253,10 +1319,10 @@ def compute_metric_stats(data_points):
     p95_index = min(n - 1, math.ceil(0.95 * n) - 1)
     third = n // 3
     return {
-        "min": round(min(values), 2),
-        "max": round(max(values), 2),
-        "avg": round(sum(values) / n, 2),
-        "p95": round(sorted_values[p95_index], 2),
+        "min": min(values),
+        "max": max(values),
+        "avg": sum(values) / n,
+        "p95": sorted_values[p95_index],
         "segments": {
             "first_third": _chunk_avg(values[:third]),
             "middle_third": _chunk_avg(values[third : 2 * third]),
@@ -1294,7 +1360,7 @@ def _collect_metrics_with_retry(query_defs, metrics, stats_start_ms, end_ms):
                     "unit": query_defs[metric_name]["unit"],
                     **stats,
                 }
-                print(f"      {len(data_points)} data points, avg={stats['avg']}")
+                print(f"      {len(data_points)} data points, avg={stats['avg']:.4g}")
             else:
                 print(f"      no data (attempt {attempt}/{TELEMETRY_RETRY_ATTEMPTS})")
         if len(collected) < len(metrics) and attempt < TELEMETRY_RETRY_ATTEMPTS:
@@ -1302,11 +1368,71 @@ def _collect_metrics_with_retry(query_defs, metrics, stats_start_ms, end_ms):
     return collected
 
 
-def collect_telemetry(discoveries):
+def _utc_now():
+    return datetime.now(timezone.utc)
+
+
+def _utc_iso_z(dt):
+    """ISO-8601 UTC timestamp with a "Z" suffix, e.g. 2026-01-01T00:00:00.123456Z."""
+    return dt.astimezone(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
+
+
+def _pod_finished_ms(pod_name, containers):
+    """The latest container finished_at for pod_name (from containers.json,
+    the watcher's read of ContainerStatuses[].State.Terminated), in epoch ms,
+    or None if any of the pod's containers has no finish time -- still
+    running (e.g. the bare-pod finalizer path, where the pod may not have
+    stopped yet) or its status wasn't captured."""
+    pod_containers = [c for c in containers or [] if c.get("pod_name") == pod_name]
+    if not pod_containers:
+        return None
+    finished = []
+    for c in pod_containers:
+        try:
+            finished.append(_parse_start_utc(c["finished_at"]))
+        except (KeyError, ValueError, AttributeError, TypeError):
+            return None
+    return int(max(finished).timestamp() * 1000)
+
+
+def _pod_stats_window(pod_name, start_time, containers):
+    """Returns (start_ms, end_ms, stats_start_ms, includes_cold_start) for one
+    pod's summary stats, or None if start_time can't be parsed.
+
+    start_time is parsed as UTC (a suffix-less value too -- see
+    _parse_start_utc), the same as the time-series path. The window ends when
+    the pod's containers finished, not at collection time: the [5m] rate and
+    avg_over_time windows keep returning a stopped pod's last samples for up
+    to RATE_WINDOW_MS afterwards, which would otherwise skew the last third
+    of short runs, and more so for pods processed later in a multi-pod loop.
+    Falls back to now when the pod hasn't finished.
+
+    The first scrape interval is excluded as cold start (no observation from
+    the hardware yet), capped at half the run so a very short run still gets
+    a partial correction; includes_cold_start flags a run too short for the
+    full exclusion."""
+    try:
+        start_ms = int(_parse_start_utc(start_time).timestamp() * 1000)
+    except (ValueError, AttributeError, TypeError):
+        return None
+    now_ms = int(_utc_now().timestamp() * 1000)
+    finished_ms = _pod_finished_ms(pod_name, containers)
+    end_ms = now_ms if finished_ms is None else min(finished_ms, now_ms)
+    end_ms = max(end_ms, start_ms)
+    total_ms = end_ms - start_ms
+    exclude_ms = min(SCRAPE_INTERVAL_MS, total_ms // 2)
+    return start_ms, end_ms, start_ms + exclude_ms, exclude_ms < SCRAPE_INTERVAL_MS
+
+
+def _substitute_pod_query(promql, pod_name):
+    return promql.replace("{namespace}", JOB_NAMESPACE).replace("{pod_name}", pod_name)
+
+
+def collect_telemetry(discoveries, containers=None):
     print(f"  Processing {len(discoveries)} pod(s)")
 
     telemetry_summary = {
-        "collected_at": datetime.utcnow().isoformat() + "Z",
+        "collected_at": _utc_iso_z(_utc_now()),
         "prometheus_url": PROMETHEUS_URL,
         "pods": [],
     }
@@ -1328,35 +1454,22 @@ def collect_telemetry(discoveries):
 
         print(f"  Pod: {pod_name} ({pod_uid})")
 
-        try:
-            start_dt = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
-        except (ValueError, AttributeError):
+        window = _pod_stats_window(pod_name, start_time, containers)
+        if window is None:
             print(f"  WARNING: Invalid start_time '{start_time}', skipping", file=sys.stderr)
             continue
-
-        end_dt = datetime.utcnow()
-        start_ms = int(start_dt.timestamp() * 1000)
-        end_ms = int(end_dt.timestamp() * 1000)
+        start_ms, end_ms, stats_start_ms, includes_cold_start = window
 
         metrics = {
-            name: info["query"].replace("{pod_name}", pod_name)
+            name: _substitute_pod_query(info["query"], pod_name)
             for name, info in TELEMETRY_QUERIES.items()
         }
-
-        # Exclude the cold-start window (up to one scrape interval with no
-        # updated observation from the hardware) from the stats below. Capped
-        # at half the run length rather than requiring a fixed minimum
-        # runtime, so short runs still get a partial correction instead of
-        # none at all.
-        total_ms = end_ms - start_ms
-        exclude_ms = min(SCRAPE_INTERVAL_MS, total_ms // 2)
-        stats_start_ms = start_ms + exclude_ms
-        includes_cold_start = exclude_ms < SCRAPE_INTERVAL_MS
 
         pod_telemetry = {
             "pod_uid": pod_uid,
             "pod_name": pod_name,
             "start_time": start_time,
+            "end_ms": end_ms,
             "metrics": {},
             "includes_cold_start": includes_cold_start,
         }
@@ -1375,7 +1488,7 @@ def collect_telemetry(discoveries):
     return telemetry_summary
 
 
-def collect_vllm_telemetry(discoveries):
+def collect_vllm_telemetry(discoveries, containers=None):
     """Collects vLLM's own serving-level metrics (see VLLM_TELEMETRY_QUERIES)
     for each pod, mirroring collect_telemetry's per-pod loop and retry logic
     but querying a disjoint set of series. Callers should only invoke this
@@ -1387,7 +1500,7 @@ def collect_vllm_telemetry(discoveries):
     print(f"  Processing {len(discoveries)} pod(s)")
 
     telemetry_summary = {
-        "collected_at": datetime.utcnow().isoformat() + "Z",
+        "collected_at": _utc_iso_z(_utc_now()),
         "prometheus_url": PROMETHEUS_URL,
         "pods": [],
     }
@@ -1404,30 +1517,22 @@ def collect_vllm_telemetry(discoveries):
 
         print(f"  Pod: {pod_name} ({pod_uid})")
 
-        try:
-            start_dt = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
-        except (ValueError, AttributeError):
+        window = _pod_stats_window(pod_name, start_time, containers)
+        if window is None:
             print(f"  WARNING: Invalid start_time '{start_time}', skipping", file=sys.stderr)
             continue
-
-        end_dt = datetime.utcnow()
-        start_ms = int(start_dt.timestamp() * 1000)
-        end_ms = int(end_dt.timestamp() * 1000)
+        _start_ms, end_ms, stats_start_ms, includes_cold_start = window
 
         metrics = {
-            name: info["query"].replace("{pod_name}", pod_name)
+            name: _substitute_pod_query(info["query"], pod_name)
             for name, info in VLLM_TELEMETRY_QUERIES.items()
         }
-
-        total_ms = end_ms - start_ms
-        exclude_ms = min(SCRAPE_INTERVAL_MS, total_ms // 2)
-        stats_start_ms = start_ms + exclude_ms
-        includes_cold_start = exclude_ms < SCRAPE_INTERVAL_MS
 
         pod_telemetry = {
             "pod_uid": pod_uid,
             "pod_name": pod_name,
             "start_time": start_time,
+            "end_ms": end_ms,
             "metrics": {},
             "includes_cold_start": includes_cold_start,
         }
@@ -1655,7 +1760,10 @@ def collect_telemetry_series(telemetry, vllm_telemetry):
         return None
 
     start_ms = int(min(starts).timestamp() * 1000)
-    end_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    # Ends when the last pod finished (each pod's end_ms, see
+    # _pod_stats_window), not at collection time.
+    pod_ends = [p["end_ms"] for p in all_pods if p.get("end_ms")]
+    end_ms = max(pod_ends) if pod_ends else int(_utc_now().timestamp() * 1000)
     if end_ms <= start_ms:
         return None
     span_s = (end_ms - start_ms) / 1000
@@ -1779,7 +1887,7 @@ def compute_metric_limit(metric_name, pod_names, containers, scale):
     """Resolves resource_utilization.metrics.<metric_name>.limit: the
     configured ceiling usage was measured against, scaled the same way the
     metric's own min/max/avg already are so the two are directly comparable
-    (e.g. "used 7.8 of an 8.0 GB limit"). When a JobSet's sibling pods carry
+    (e.g. "used 7.8 of an 8.0 GiB limit"). When a JobSet's sibling pods carry
     different limits, the tightest one wins -- the ceiling closest to
     actually constraining usage -- mirroring the same "pods can disagree"
     tension CLAUDE.md's Segmented Performance Stats section already notes
@@ -1795,7 +1903,7 @@ def compute_metric_limit(metric_name, pod_names, containers, scale):
     limit = min(pod_limits)
     if resource_key == "cpu_limit_millis":
         limit = limit / 1000  # millicores -> cores, matching cpu_usage's own display unit
-    return round(limit * scale, 2)
+    return _round_stat(limit * scale)
 
 
 def aggregate_pod_metrics(pods, unit_map):
@@ -1818,13 +1926,13 @@ def aggregate_pod_metrics(pods, unit_map):
         segments = {}
         for seg in ("first_third", "middle_third", "last_third"):
             seg_values = [s["segments"][seg] for s in per_pod_stats if s["segments"][seg] is not None]
-            segments[seg] = round(_chunk_avg(seg_values) * scale, 2) if seg_values else None
+            segments[seg] = _round_stat(_chunk_avg(seg_values) * scale) if seg_values else None
         metric_details[metric_name] = {
             "unit": display_unit,
-            "min": round(min(s["min"] for s in per_pod_stats) * scale, 2),
-            "max": round(max(s["max"] for s in per_pod_stats) * scale, 2),
-            "avg": round(_chunk_avg([s["avg"] for s in per_pod_stats]) * scale, 2),
-            "p95": round(_chunk_avg([s["p95"] for s in per_pod_stats]) * scale, 2),
+            "min": _round_stat(min(s["min"] for s in per_pod_stats) * scale),
+            "max": _round_stat(max(s["max"] for s in per_pod_stats) * scale),
+            "avg": _round_stat(_chunk_avg([s["avg"] for s in per_pod_stats]) * scale),
+            "p95": _round_stat(_chunk_avg([s["p95"] for s in per_pod_stats]) * scale),
             "segments": segments,
         }
     return metric_details
@@ -1848,7 +1956,7 @@ def compile_aibom(
 
     # Computed once and reused for both _metadata.generated_at and the
     # duration_seconds calculation below, so the two can't drift apart.
-    generated_at_dt = datetime.utcnow()
+    generated_at_dt = _utc_now()
     generated_at = generated_at_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
     aibom = {}
@@ -1932,12 +2040,19 @@ def compile_aibom(
     # generated_at below, and duplicating them would give this AIBOM two
     # sources of truth for the same fact -- permanently, since spec is
     # immutable once created.
+    # Earliest pod start to the last pod's finish (or to now, if any pod
+    # hasn't finished), both as UTC.
     pod_start_times = [p["start_time"] for p in pods if p.get("start_time")]
     duration_seconds = None
     if pod_start_times:
         try:
-            earliest_dt = min(datetime.fromisoformat(t.replace("Z", "+00:00")) for t in pod_start_times)
-            duration_seconds = round(generated_at_dt.timestamp() - earliest_dt.timestamp())
+            earliest_dt = min(_parse_start_utc(t) for t in pod_start_times)
+            pod_finishes = [_pod_finished_ms(p.get("pod_name"), containers) for p in pods]
+            if pod_finishes and all(f is not None for f in pod_finishes):
+                end_s = min(max(pod_finishes) / 1000, generated_at_dt.timestamp())
+            else:
+                end_s = generated_at_dt.timestamp()
+            duration_seconds = round(end_s - earliest_dt.timestamp())
         except (ValueError, AttributeError):
             print(f"  WARNING: Invalid pod start_time in {pod_start_times}, omitting duration_seconds", file=sys.stderr)
 
@@ -2178,18 +2293,19 @@ def compile_aibom(
     if telemetry and telemetry.get("pods"):
         # display_unit reflects the *scaled* value stored below, not the raw
         # per_pod_stats unit collect_telemetry recorded (e.g. "bytes") -- the
-        # two diverge for memory/network, where scale converts bytes to
-        # GB/Mbps.
+        # two diverge for memory/network/storage. Memory is binary (GiB, the
+        # same unit as a Kubernetes "8Gi" limit); network and storage rates
+        # are decimal, so "Mbps"/"MBps" mean what they say.
         unit_map = {
             "gpu_utilization": (None, "percent"),
             "gpu_memory_used": (None, "MiB"),
             "gpu_power": (None, "watts"),
             "cpu_usage": (None, "cores"),
-            "memory_usage": (1 / (1024**3), "GB"),
-            "network_receive": (8 / (1024 * 1024), "Mbps"),
-            "network_transmit": (8 / (1024 * 1024), "Mbps"),
-            "storage_read_throughput": (1 / (1024 * 1024), "MBps"),
-            "storage_write_throughput": (1 / (1024 * 1024), "MBps"),
+            "memory_usage": (1 / (1024**3), "GiB"),
+            "network_receive": (8 / 1e6, "Mbps"),
+            "network_transmit": (8 / 1e6, "Mbps"),
+            "storage_read_throughput": (1 / 1e6, "MBps"),
+            "storage_write_throughput": (1 / 1e6, "MBps"),
         }
 
         utilization = {"collected_at": telemetry.get("collected_at")}
@@ -2411,13 +2527,13 @@ def main():
     if PROMETHEUS_URL:
         print("--- Phase 1: Telemetry Collection ---")
         try:
-            telemetry = collect_telemetry(discoveries)
+            telemetry = collect_telemetry(discoveries, containers)
         except Exception as e:
             print(f"WARNING: Telemetry collection failed: {e}", file=sys.stderr)
         if (detected_model or {}).get("serving_engine") == "vllm":
             print("--- Phase 1b: vLLM Telemetry Collection ---")
             try:
-                vllm_telemetry = collect_vllm_telemetry(discoveries)
+                vllm_telemetry = collect_vllm_telemetry(discoveries, containers)
             except Exception as e:
                 print(f"WARNING: vLLM telemetry collection failed: {e}", file=sys.stderr)
         # Runs after the stats collection above (and its retries), so the
