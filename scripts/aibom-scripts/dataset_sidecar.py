@@ -2,7 +2,7 @@
 AIBOM Dataset Sidecar - signs and publishes dataset detection data from
 outside the workload's own application container.
 
-runtime_detector.py (usercustomize.py, running inside the app container)
+runtime_detector.py (sitecustomize.py, running inside the app container)
 only ever writes its detection results to a local file on the shared
 aibom-data volume ($AIBOM_DATASET_OUTPUT) -- it never talks to the
 Kubernetes API. This script runs as a Kubernetes native sidecar container

@@ -10,7 +10,7 @@ For filtering, inspecting, and comparing the resulting `AIBOM` custom resources,
 2. An admin creates the `aibom-scripts` ConfigMap in that namespace (see [Setup](#workload-namespace-setup))
 3. A user submits a Job, JobSet, PyTorchJob, or RayJob in that namespace
 4. The Kubernetes API server calls the webhook before creating the pod
-5. The webhook injects an `aibom-discovery` init container (hardware snapshot), dataset detection hooks (`usercustomize.py`), and an `aibom.io/instrumented: "true"` label — see [What Gets Injected](#what-gets-injected)
+5. The webhook injects an `aibom-discovery` init container (hardware snapshot), dataset detection hooks (`sitecustomize.py`), and an `aibom.io/instrumented: "true"` label — see [What Gets Injected](#what-gets-injected)
 6. The pod is created with the injections — the user's original YAML is untouched
 7. When the Job completes (or is deleted, for long-running pods like KServe predictors), the **watcher** creates a postprocess Job to compile the AIBOM — see [Postprocess Flow](#postprocess-flow)
 
@@ -293,7 +293,7 @@ When the webhook mutates a pod, it adds:
 - Signs that data with a per-namespace HMAC key mounted only into this init container — never into the application container — so the watcher can reject a forged or overwritten entry before it's trusted; see `CLAUDE.md`
 
 **Runtime detector (into each application container):**
-- Mounts `runtime_detector.py` as `usercustomize.py` on `PYTHONPATH`
+- Mounts `runtime_detector.py` as `sitecustomize.py` on `PYTHONPATH` (it also runs any `sitecustomize.py` the image already ships)
 - Python auto-imports it at startup — no code changes needed
 - Hooks into PyTorch DataLoader, HuggingFace `datasets.load_dataset`, torchvision datasets, and webdataset, plus `transformers.TrainingArguments`, `transformers.PreTrainedModel.from_pretrained`, and `peft.LoraConfig`
 - Captures dataset name, version, split, fingerprint, license, and training args
