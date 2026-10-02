@@ -358,10 +358,11 @@ def sign_payload(payload):
     discovery container rather than being fabricated or overwritten by the
     workload's own application container, which is never given this key.
     Both keys are safe to sign with the same key: both are written by this
-    same trusted process, unlike dataset-<pod>.json (written by the
-    workload's own runtime_detector.py hook -- see #47) which isn't signed
-    at all, since a key handed to that untrusted process wouldn't prove
-    anything about data that same process produced.
+    same trusted process. dataset-<pod>.json is signed separately, by the
+    aibom-dataset-sidecar container with its own key (see #47) -- never by
+    the workload's runtime_detector.py hook itself, since a key handed to
+    that untrusted process wouldn't prove anything about data that same
+    process produced.
 
     Returns None (unsigned) if the key isn't mounted -- e.g. a namespace
     whose aibom-workload-namespace chart install predates signing.yaml --

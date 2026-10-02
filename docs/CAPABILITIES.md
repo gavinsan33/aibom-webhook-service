@@ -8,7 +8,7 @@ Three components do detection, in this order in the pipeline:
 2. **Runtime hooks** (`runtime_detector.py`, mounted as `usercustomize.py`) — dataset/model/training objects observed live inside the app container's own Python process.
 3. **Postprocess Job** (`postprocess.py`) — parses container CLI args, reconciles/merges everything above, resolves git provenance, and queries Prometheus for telemetry.
 
-Any field can also be set directly via an `aibom.io/*` annotation, which always overrides auto-detected values — see the [annotation table](../README.md#aibom-annotations) in the README.
+Any field can also be set directly via an `aibom.io/*` annotation, which overrides auto-detected values for nearly every field — see the [annotation table](../README.md#aibom-annotations) in the README. The exception is `training.learning_rate`/`batch_size`/`epochs`/`random_seed`: for these the runtime hook wins, then the CLI arg, and the annotation is used only when neither produced a value (#109).
 
 ---
 
@@ -61,9 +61,9 @@ The discovery init container's own `nvidia.com/gpu` claim — what makes `nvidia
 | Field | Detection |
 |---|---|
 | Block devices + size | `lsblk -nd -o NAME,SIZE` (loop devices excluded) |
-| NVMe device count | `/dev/nvme*n` listing |
+| NVMe device count | `ls /dev/nvme*` piped through `grep -c nvme0n` — counts only controller 0's namespaces and partitions, and `/dev` inside an unprivileged container usually has no host NVMe devices at all (#115) |
 | `/tmp` size / available space | `df -h /tmp` |
-| Active I/O scheduler | `/sys/block/sda/queue/scheduler` |
+| Active I/O scheduler | `/sys/block/sda/queue/scheduler` (hardcoded `sda`; empty on NVMe-only nodes) |
 
 **Kernel / cgroup performance config** — ⚠️ all fields below are captured but never surfaced into the compiled AIBOM:
 
@@ -77,8 +77,8 @@ The discovery init container's own `nvidia.com/gpu` claim — what makes `nvidia
 | Max map count | `/proc/sys/vm/max_map_count` |
 | Max open file handles (system-wide) | `/proc/sys/fs/file-max` |
 | Max user processes / open files / stack size / memory size (this container) | `ulimit -u/-n/-s/-m` |
-| cgroup CPU quota / period | `/sys/fs/cgroup/cpu/cpu.cfs_{quota,period}_us` |
-| cgroup memory limit | `/sys/fs/cgroup/memory/memory.limit_in_bytes` |
+| cgroup CPU quota / period | `/sys/fs/cgroup/cpu/cpu.cfs_{quota,period}_us` — cgroup v1 path only; always `N/A` on cgroup v2 nodes (OpenShift 4.14+) |
+| cgroup memory limit | `/sys/fs/cgroup/memory/memory.limit_in_bytes` — cgroup v1 path only; always `N/A` on cgroup v2 nodes |
 
 **Pod metadata** — ✅ surfaced into `execution_metadata.pods[]`: `pod_name`/`pod_uid`/`pod_namespace`/`pod_ip`/`node_name`/`start_time` (from downward-API env vars + a capture timestamp).
 
@@ -108,7 +108,7 @@ The discovery init container's own `nvidia.com/gpu` claim — what makes `nvidia
 
 Dataset entries referring to the same underlying object are correlated (not double-recorded) first by **object identity**, then by **`(builder_name, config_name)`** for the common case of a transformed dataset (`.map`/`.filter`/`.select`/`.shuffle`, or a `DatasetDict` split pull) wrapped in a fresh `DataLoader`. Each merged entry tracks a `seen_via` list of every hook that touched it.
 
-**CLI-arg detection** (`postprocess.py`, from container command/args): `--dataset_name`, `--dataset_config_name`, `--dataset_train_split`.
+**CLI-arg detection** (`postprocess.py`, from container command/args): `--dataset_name`. `--dataset_config_name` and `--dataset_train_split` are parsed too, but neither value currently reaches `dataset.declared` (#114).
 
 **Reconciliation** (`postprocess.py`, `dataset.declared`) — precedence order:
 
@@ -136,7 +136,7 @@ Every `dataset.auto_detected[]` entry gets `matches_declared` — whether its na
 
 | Flag | Field |
 |---|---|
-| `--model` | `model.name` |
+| `--model` | `model.name` (only the `--model` flag — the positional `vllm serve <model>` form isn't detected, #108) |
 | `--dtype` | `model.dtype` |
 | `--quantization` / `-q` | `model.quantization` |
 | `--max-model-len` | `inference.max_model_len` |
@@ -148,6 +148,8 @@ Every `dataset.auto_detected[]` entry gets `matches_declared` — whether its na
 | `--speculative-model`+`--num-speculative-tokens` (legacy), or `--speculative-config` (JSON/`key=value`) | `model.speculative_decoding` |
 | `--override-generation-config` (JSON/`key=value`) | `inference.temperature`, `.top_p`, `.top_k` |
 
+Only the kebab-case spellings above are recognized; vLLM also accepts snake_case (`--max_model_len`), which isn't detected (#108).
+
 ⚠️ Also parsed but **never surfaced** into the compiled AIBOM (dropped after the intermediate detection dict): `--served-model-name`, `--max-num-seqs`, `--seed`, `--trust-remote-code`, `--enforce-eager`, `--enable-prefix-caching`, `--port`.
 
 *trl* (`trl sft`/`trl dpo`-style):
@@ -155,7 +157,7 @@ Every `dataset.auto_detected[]` entry gets `matches_declared` — whether its na
 | Flag | Field |
 |---|---|
 | `--model_name_or_path` | `model.name` |
-| `--use_peft` (+ `--lora_r`/`--use_dora`/`--use_rslora`/`--load_in_4bit`/`--load_in_8bit`) | `fine_tuning.adaptation_method` (`lora`/`qlora`/`dora`/`rslora`/`peft`) |
+| `--use_peft` (+ `--lora_r`/`--use_dora`/`--use_rslora`/`--load_in_4bit`/`--load_in_8bit`) | `fine_tuning.adaptation_method` (`lora`/`qlora`/`dora`/`rslora`/`peft`) — these boolean flags are only recognized with an explicit value (`--use_peft true`); a bare `--use_peft` followed by another flag is ignored (#108) |
 | `--lora_r` | `fine_tuning.lora_rank` |
 | `--lora_alpha` | `fine_tuning.lora_alpha` |
 | `--learning_rate` | `training.learning_rate` |
@@ -183,7 +185,7 @@ Identification only — nothing verifies the weights. A renamed/generic path is 
 - bare `--fsdp` flag → `fsdp`
 - `trl ... --num_processes N>1` (accelerate-launch args passed straight to a CLI that spawns `accelerate launch` internally) → `data_parallel`
 - `trl ... --accelerate_config <path>` → read from the file's own `distributed_type` (`FSDP`→`fsdp`, `DEEPSPEED`→`deepspeed`, `MULTI_GPU`/`MULTI_CPU`→`data_parallel`); falls back to guessing from the filename against known presets (`fsdp1`/`fsdp2`/`zero1`/`zero2`/`zero3`/`multi_gpu`/`single_gpu`) if PyYAML is unavailable or `distributed_type` isn't recognized
-- Lowest-priority fallback: `device_map` captured by the `from_pretrained` runtime hook — any multi-device value → `model_parallel`, only if nothing above already produced a strategy
+- Lowest-priority fallback: `device_map` captured by the `from_pretrained` runtime hook → `model_parallel` for any value other than `cpu`, `cuda` or `cuda:0`, only if nothing above already produced a strategy. Single-device maps such as `{"": 0}`, `0` or `cuda:1` are therefore also reported as `model_parallel` (#109)
 
 ---
 
@@ -209,17 +211,17 @@ Queried directly against Prometheus/Thanos Querier (`PROMETHEUS_URL`) once the w
 
 | Metric | Source | Unit |
 |---|---|---|
-| GPU utilization | `dcgm_gpu_util` | percent |
-| GPU memory used | `dcgm_fb_used` | MiB |
-| GPU power draw | `dcgm_power_usage` | watts |
+| GPU utilization | `DCGM_FI_DEV_GPU_UTIL` | percent |
+| GPU memory used | `DCGM_FI_DEV_FB_USED` | MiB |
+| GPU power draw | `DCGM_FI_DEV_POWER_USAGE` | watts |
 | CPU usage | `container_cpu_usage_seconds_total` (rate) | cores |
-| Memory usage | `container_memory_working_set_bytes` | GB |
-| Network receive throughput | `container_network_receive_bytes_total` (rate) | Mbps |
-| Network transmit throughput | `container_network_transmit_bytes_total` (rate) | Mbps |
-| Storage read throughput | `container_fs_reads_bytes_total` (rate) | MB/s |
-| Storage write throughput | `container_fs_writes_bytes_total` (rate) | MB/s |
+| Memory usage | `container_memory_working_set_bytes` | "GB" (computed as GiB, bytes ÷ 1024³) |
+| Network receive throughput | `container_network_receive_bytes_total` (rate) | "Mbps" (computed as Mibit/s, bits ÷ 1024²) |
+| Network transmit throughput | `container_network_transmit_bytes_total` (rate) | "Mbps" (computed as Mibit/s) |
+| Storage read throughput | `container_fs_reads_bytes_total` (rate) | "MBps" (computed as MiB/s, bytes ÷ 1024²) |
+| Storage write throughput | `container_fs_writes_bytes_total` (rate) | "MBps" (computed as MiB/s) |
 
-Each metric is recorded as summary statistics only (`resource_utilization.metrics.<name>`: `min`/`max`/`avg`/`p95`, plus first/middle/last-third segment averages) — not a raw time series. A short-lived run that couldn't fully exclude the first-scrape-interval cold-start window is flagged via `summary_includes_cold_start`.
+Each metric is recorded as summary statistics only (`resource_utilization.metrics.<name>`: `min`/`max`/`avg`/`p95`, plus first/middle/last-third segment averages) — not a raw time series. The first 5 minutes of each pod's run (`SCRAPE_INTERVAL_MS`, which matches the queries' `[5m]` rate/`avg_over_time` window rather than Prometheus' 30 s scrape interval) are excluded as cold start, capped at half the run length; a run too short to exclude the full 5 minutes is flagged via `summary_includes_cold_start`.
 
 ---
 
