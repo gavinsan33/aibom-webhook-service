@@ -1,5 +1,8 @@
 import base64
 import json
+import re
+import time
+from datetime import datetime, timezone
 
 import pytest
 
@@ -673,7 +676,7 @@ def test_collect_vllm_telemetry_collects_configured_metrics(monkeypatch):
     assert len(summary["pods"]) == 1
     metrics = summary["pods"][0]["metrics"]
     assert set(metrics.keys()) == set(pp.VLLM_TELEMETRY_QUERIES.keys())
-    assert metrics["time_to_first_token_seconds"]["avg"] == 0.3
+    assert metrics["time_to_first_token_seconds"]["avg"] == pytest.approx(0.3)
 
 
 # ---------------------------------------------------------------------------
@@ -1168,6 +1171,7 @@ def test_compile_aibom_utilization_merges_jobset_sibling_pods():
 
 
 def test_compile_aibom_utilization_scales_storage_throughput_to_mbps():
+    # Decimal MB/s (10**6 bytes), matching the "MBps" label.
     telemetry = {
         "collected_at": "2024-01-01T00:00:00Z",
         "pods": [
@@ -1175,12 +1179,12 @@ def test_compile_aibom_utilization_scales_storage_throughput_to_mbps():
                 "pod_name": "job-abc",
                 "metrics": {
                     "storage_read_throughput": _pod_metrics(
-                        avg=10 * 1024 * 1024, min_=1024 * 1024, max_=20 * 1024 * 1024,
-                        p95=19 * 1024 * 1024, unit="bytes_per_sec",
+                        avg=10 * 10**6, min_=10**6, max_=20 * 10**6,
+                        p95=19 * 10**6, unit="bytes_per_sec",
                     ),
                     "storage_write_throughput": _pod_metrics(
-                        avg=5 * 1024 * 1024, min_=512 * 1024, max_=8 * 1024 * 1024,
-                        p95=7 * 1024 * 1024, unit="bytes_per_sec",
+                        avg=5 * 10**6, min_=512 * 1000, max_=8 * 10**6,
+                        p95=7 * 10**6, unit="bytes_per_sec",
                     ),
                 },
             }
@@ -1959,7 +1963,7 @@ def main_env(monkeypatch):
     monkeypatch.setattr(pp, "load_annotations", lambda: {})
     monkeypatch.setattr(pp, "load_containers", lambda: [])
     monkeypatch.setattr(pp, "load_storage", lambda: {})
-    monkeypatch.setattr(pp, "collect_telemetry", lambda discoveries: {"pods": []})
+    monkeypatch.setattr(pp, "collect_telemetry", lambda discoveries, containers=None: {"pods": []})
     encoded = json.dumps({"window": {"start": 1, "end": 2, "step_seconds": 15}, "metrics": {}})
     monkeypatch.setattr(pp, "collect_telemetry_series", lambda t, v: encoded)
     monkeypatch.setattr(pp, "sign_aibom", lambda aibom: (None, None))
@@ -2045,3 +2049,171 @@ def test_main_skips_series_object_when_no_series(main_env, monkeypatch):
     monkeypatch.setattr(pp, "collect_telemetry_series", lambda t, v: None)
     pp.main()
     assert [c[:2] for c in calls] == [("create", "aiboms")]
+
+
+# ---------------------------------------------------------------------------
+# Telemetry stats correctness (#111)
+# ---------------------------------------------------------------------------
+
+
+def _substituted(query_defs, monkeypatch):
+    monkeypatch.setattr(pp, "JOB_NAMESPACE", "team-ns")
+    return {name: pp._substitute_pod_query(q["query"], "pod-a") for name, q in query_defs.items()}
+
+
+def test_stats_queries_aggregate_to_one_series_per_pod(monkeypatch):
+    # Pooling every per-container/per-GPU/per-interface series into one
+    # sample list averaged them together (e.g. an 8 GiB app container plus a
+    # 50 MiB sidecar reported ~4 GiB). Every stats query must aggregate.
+    for name, promql in _substituted({**pp.TELEMETRY_QUERIES, **pp.VLLM_TELEMETRY_QUERIES}, monkeypatch).items():
+        assert re.match(r"^(\(|100 \* \()?(sum|avg)( by \(pod\))? ?\(", promql), (name, promql)
+
+
+def test_stats_queries_are_namespace_scoped(monkeypatch):
+    for name, promql in _substituted({**pp.TELEMETRY_QUERIES, **pp.VLLM_TELEMETRY_QUERIES}, monkeypatch).items():
+        assert "{namespace}" not in promql and "{pod_name}" not in promql, name
+        # Every selector in the query carries the namespace filter.
+        assert promql.count('pod="pod-a"') == promql.count('namespace="team-ns"'), (name, promql)
+
+
+def test_stats_queries_exclude_dataset_sidecar(monkeypatch):
+    queries = _substituted(pp.TELEMETRY_QUERIES, monkeypatch)
+    for name in ("cpu_usage", "memory_usage", "storage_read_throughput", "storage_write_throughput"):
+        assert 'container!="aibom-dataset-sidecar"' in queries[name], name
+
+
+def test_kv_cache_usage_scaled_to_percent_with_pre_rename_fallback():
+    for defs in (pp.VLLM_TELEMETRY_QUERIES, pp.VLLM_SERIES_QUERIES):
+        q = defs["kv_cache_usage"]["query"]
+        assert q.startswith("100 * (")
+        assert "vllm:kv_cache_usage_perc" in q and "vllm:gpu_cache_usage_perc" in q
+        assert defs["kv_cache_usage"]["unit"] == "percent"
+
+
+def test_inter_token_latency_falls_back_to_pre_rename_metric():
+    for defs in (pp.VLLM_TELEMETRY_QUERIES, pp.VLLM_SERIES_QUERIES):
+        q = defs["inter_token_latency_seconds"]["query"]
+        assert "vllm:inter_token_latency_seconds_sum" in q
+        assert " or " in q and "vllm:time_per_output_token_seconds_sum" in q
+
+
+def test_round_stat_keeps_small_values_significant():
+    assert pp._round_stat(0.0144) == 0.0144
+    assert pp._round_stat(0.000634) == 0.000634
+    assert pp._round_stat(0.123456) == 0.123
+    assert pp._round_stat(12.3456) == 12.35
+    assert pp._round_stat(0) == 0
+    assert pp._round_stat(None) is None
+
+
+def test_aggregate_pod_metrics_does_not_round_small_latencies_to_zero():
+    pods = [{"pod_name": "p", "metrics": {"inter_token_latency_seconds": _pod_metrics(
+        avg=0.0144, min_=0.0101, max_=0.0213, p95=0.0198, unit="seconds")}}]
+    m = pp.aggregate_pod_metrics(pods, {"inter_token_latency_seconds": (None, "seconds")})
+    assert m["inter_token_latency_seconds"]["avg"] == 0.0144
+    assert m["inter_token_latency_seconds"]["min"] == 0.0101
+
+
+def test_compute_metric_stats_does_not_round_before_scaling():
+    stats = pp.compute_metric_stats(_points(0.0006, 0.0007, 0.0008))
+    assert stats["avg"] == pytest.approx(0.0007)
+
+
+def test_pod_stats_window_ends_at_container_finish_time():
+    containers = [
+        {"pod_name": "p", "name": "a", "finished_at": "2026-01-01T00:10:00Z"},
+        {"pod_name": "p", "name": "b", "finished_at": "2026-01-01T00:20:00Z"},
+        {"pod_name": "other", "name": "a", "finished_at": "2026-01-01T05:00:00Z"},
+    ]
+    start_ms, end_ms, stats_start_ms, includes_cold_start = pp._pod_stats_window(
+        "p", "2026-01-01T00:00:00Z", containers
+    )
+    assert end_ms - start_ms == 20 * 60 * 1000
+    # Cold start is one scrape interval, not the 5-minute rate window.
+    assert stats_start_ms - start_ms == pp.SCRAPE_INTERVAL_MS
+    assert includes_cold_start is False
+
+
+def test_pod_stats_window_falls_back_to_now_when_pod_still_running():
+    start_dt = datetime.fromtimestamp(time.time() - 600, timezone.utc)
+    containers = [
+        {"pod_name": "p", "name": "a", "finished_at": "2026-01-01T00:10:00Z"},
+        {"pod_name": "p", "name": "b"},  # still running
+    ]
+    _, end_ms, _, _ = pp._pod_stats_window("p", start_dt.isoformat(), containers)
+    assert abs(end_ms - time.time() * 1000) < 5000
+
+
+def test_pod_stats_window_treats_suffixless_start_as_utc():
+    containers = [{"pod_name": "p", "name": "a", "finished_at": "2026-01-01T01:00:00Z"}]
+    with_z = pp._pod_stats_window("p", "2026-01-01T00:00:00Z", containers)
+    naive = pp._pod_stats_window("p", "2026-01-01T00:00:00", containers)
+    assert with_z == naive
+
+
+def test_pod_stats_window_short_run_flags_cold_start():
+    containers = [{"pod_name": "p", "name": "a", "finished_at": "2026-01-01T00:00:40Z"}]
+    start_ms, _, stats_start_ms, includes_cold_start = pp._pod_stats_window(
+        "p", "2026-01-01T00:00:00Z", containers
+    )
+    assert stats_start_ms - start_ms == 20 * 1000  # half the 40 s run
+    assert includes_cold_start is True
+
+
+def test_collect_telemetry_queries_through_pod_finish_time(monkeypatch):
+    ends = []
+
+    def fake_query_range(promql, start_ms, end_ms):
+        ends.append(end_ms)
+        return {"status": "success", "data": {"result": [{"values": [[1767225700, "1"]]}]}}
+
+    monkeypatch.setattr(pp, "query_prometheus_range", fake_query_range)
+    discovery = {
+        "pod_metadata": {"uid": "u", "name": "p", "start_time": "2026-01-01T00:00:00Z"},
+        "gpu": {"gpu_count": 1},
+    }
+    containers = [{"pod_name": "p", "name": "a", "finished_at": "2026-01-01T00:30:00Z"}]
+    summary = pp.collect_telemetry([discovery], containers)
+    finished_ms = int(datetime(2026, 1, 1, 0, 30, tzinfo=timezone.utc).timestamp() * 1000)
+    assert ends and set(ends) == {finished_ms}
+    assert summary["pods"][0]["end_ms"] == finished_ms
+
+
+def test_collect_telemetry_series_window_ends_at_last_pod_finish(monkeypatch):
+    windows = []
+    monkeypatch.setattr(
+        pp, "_collect_series_metrics",
+        lambda defs, ns, pods, start_ms, end_ms, step: windows.append((start_ms, end_ms)) or {"m": {}},
+    )
+    monkeypatch.setattr(pp, "_fit_series_doc", lambda doc, cap: json.dumps(doc))
+    telemetry = {"pods": [
+        {"pod_name": "a", "start_time": "2026-01-01T00:00:00Z", "end_ms": 1767226200000},
+        {"pod_name": "b", "start_time": "2026-01-01T00:05:00Z", "end_ms": 1767226800000},
+    ]}
+    pp.collect_telemetry_series(telemetry, None)
+    assert windows[0] == (1767225600000, 1767226800000)
+
+
+def test_compile_aibom_duration_ends_at_last_pod_finish():
+    discoveries = [{"pod_metadata": {"name": "p", "start_time": "2026-01-01T00:00:00"}}]
+    containers = [{"pod_name": "p", "name": "a", "finished_at": "2026-01-01T00:15:00Z"}]
+    aibom = pp.compile_aibom(
+        discoveries=discoveries, detected_datasets=[], runtime_info={}, annotations={},
+        telemetry=None, containers=containers,
+    )
+    assert aibom["execution_metadata"]["duration_seconds"] == 15 * 60
+
+
+def test_compile_aibom_memory_is_gib_and_network_is_decimal_mbps():
+    telemetry = {"pods": [{"pod_name": "p", "metrics": {
+        "memory_usage": _pod_metrics(avg=2 * 1024**3, min_=1024**3, max_=3 * 1024**3, p95=3 * 1024**3, unit="bytes"),
+        "network_receive": _pod_metrics(avg=125_000, min_=125_000, max_=125_000, p95=125_000, unit="bytes_per_sec"),
+    }}]}
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info={}, annotations={}, telemetry=telemetry,
+    )
+    metrics = aibom["resource_utilization"]["metrics"]
+    assert metrics["memory_usage"]["unit"] == "GiB"
+    assert metrics["memory_usage"]["avg"] == 2
+    assert metrics["network_receive"]["unit"] == "Mbps"
+    assert metrics["network_receive"]["avg"] == 1  # 125 kB/s * 8 = 1 Mbit/s
