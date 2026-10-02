@@ -798,6 +798,11 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 		// container the API never reported a terminated state for.
 		TerminatedReason string `json:"terminated_reason,omitempty"`
 		ExitCode         *int32 `json:"exit_code,omitempty"`
+		// FinishedAt (RFC 3339, UTC) is when the container terminated, so
+		// postprocess.py can end each pod's telemetry window when the pod
+		// actually stopped rather than at collection time. Omitted under the
+		// same conditions as TerminatedReason.
+		FinishedAt string `json:"finished_at,omitempty"`
 		// MemoryLimitBytes/CPULimitMillis come from Spec.Containers[].Resources.Limits --
 		// known at pod-creation time, unlike the terminated fields above -- so
 		// postprocess.py can report telemetry usage against the ceiling that
@@ -817,11 +822,15 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 		imageIDs := make(map[string]string, len(pod.Status.ContainerStatuses))
 		terminatedReasons := make(map[string]string, len(pod.Status.ContainerStatuses))
 		exitCodes := make(map[string]int32, len(pod.Status.ContainerStatuses))
+		finishedAts := make(map[string]string, len(pod.Status.ContainerStatuses))
 		for _, cs := range pod.Status.ContainerStatuses {
 			imageIDs[cs.Name] = cs.ImageID
 			if cs.State.Terminated != nil {
 				terminatedReasons[cs.Name] = cs.State.Terminated.Reason
 				exitCodes[cs.Name] = cs.State.Terminated.ExitCode
+				if !cs.State.Terminated.FinishedAt.IsZero() {
+					finishedAts[cs.Name] = cs.State.Terminated.FinishedAt.UTC().Format(time.RFC3339)
+				}
 			}
 		}
 		for _, c := range pod.Spec.Containers {
@@ -837,6 +846,7 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 				ci.TerminatedReason = reason
 				exitCode := exitCodes[c.Name]
 				ci.ExitCode = &exitCode
+				ci.FinishedAt = finishedAts[c.Name]
 			}
 			if mem, ok := c.Resources.Limits[corev1.ResourceMemory]; ok {
 				v := mem.Value()

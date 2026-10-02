@@ -1544,6 +1544,39 @@ func TestBuildPostprocessInputs_CapturesOOMKilledStatus(t *testing.T) {
 	}
 }
 
+func TestBuildPostprocessInputs_CapturesFinishedAt(t *testing.T) {
+	pod := instrumentedPod("done-job", "ns")
+	finished := time.Date(2026, 1, 2, 3, 4, 5, 0, time.FixedZone("EST", -5*3600))
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{
+		{
+			Name: "training",
+			State: corev1.ContainerState{
+				Terminated: &corev1.ContainerStateTerminated{
+					Reason:     "Completed",
+					FinishedAt: metav1.NewTime(finished),
+				},
+			},
+		},
+	}
+	w := &Watcher{clientset: fake.NewSimpleClientset()}
+
+	_, _, containersJSON, _ := w.buildPostprocessInputs(context.Background(), "ns", "cm-name", []corev1.Pod{*pod})
+
+	var containers []struct {
+		FinishedAt string `json:"finished_at"`
+	}
+	if err := json.Unmarshal([]byte(containersJSON), &containers); err != nil {
+		t.Fatalf("unmarshal containers.json: %v", err)
+	}
+	if len(containers) != 1 {
+		t.Fatalf("expected 1 container entry, got %d", len(containers))
+	}
+	// Always UTC, regardless of the zone the timestamp was recorded in.
+	if want := "2026-01-02T08:04:05Z"; containers[0].FinishedAt != want {
+		t.Errorf("finished_at = %q, want %q", containers[0].FinishedAt, want)
+	}
+}
+
 func TestBuildPostprocessInputs_NoStatusOmitsTerminatedFields(t *testing.T) {
 	pod := instrumentedPod("running-job", "ns")
 	w := &Watcher{clientset: fake.NewSimpleClientset()}
@@ -1552,6 +1585,9 @@ func TestBuildPostprocessInputs_NoStatusOmitsTerminatedFields(t *testing.T) {
 
 	if strings.Contains(containersJSON, "terminated_reason") {
 		t.Errorf("expected no terminated_reason field when no container status is reported, got: %s", containersJSON)
+	}
+	if strings.Contains(containersJSON, "finished_at") {
+		t.Errorf("expected no finished_at field when no container status is reported, got: %s", containersJSON)
 	}
 }
 

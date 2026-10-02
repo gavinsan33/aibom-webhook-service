@@ -215,13 +215,15 @@ Queried directly against Prometheus/Thanos Querier (`PROMETHEUS_URL`) once the w
 | GPU memory used | `DCGM_FI_DEV_FB_USED` | MiB |
 | GPU power draw | `DCGM_FI_DEV_POWER_USAGE` | watts |
 | CPU usage | `container_cpu_usage_seconds_total` (rate) | cores |
-| Memory usage | `container_memory_working_set_bytes` | "GB" (computed as GiB, bytes ÷ 1024³) |
-| Network receive throughput | `container_network_receive_bytes_total` (rate) | "Mbps" (computed as Mibit/s, bits ÷ 1024²) |
-| Network transmit throughput | `container_network_transmit_bytes_total` (rate) | "Mbps" (computed as Mibit/s) |
-| Storage read throughput | `container_fs_reads_bytes_total` (rate) | "MBps" (computed as MiB/s, bytes ÷ 1024²) |
-| Storage write throughput | `container_fs_writes_bytes_total` (rate) | "MBps" (computed as MiB/s) |
+| Memory usage | `container_memory_working_set_bytes` | GiB (binary, like a Kubernetes `8Gi` limit) |
+| Network receive throughput | `container_network_receive_bytes_total` (rate) | Mbps (decimal, 10⁶ bits/s) |
+| Network transmit throughput | `container_network_transmit_bytes_total` (rate) | Mbps (decimal) |
+| Storage read throughput | `container_fs_reads_bytes_total` (rate) | MBps (decimal, 10⁶ bytes/s) |
+| Storage write throughput | `container_fs_writes_bytes_total` (rate) | MBps (decimal) |
 
-Each metric is recorded as summary statistics only (`resource_utilization.metrics.<name>`: `min`/`max`/`avg`/`p95`, plus first/middle/last-third segment averages) — not a raw time series. The first 5 minutes of each pod's run (`SCRAPE_INTERVAL_MS`, which matches the queries' `[5m]` rate/`avg_over_time` window rather than Prometheus' 30 s scrape interval) are excluded as cold start, capped at half the run length; a run too short to exclude the full 5 minutes is flagged via `summary_includes_cold_start`.
+Each query aggregates to one series per pod — summed across containers, GPUs and network interfaces, averaged for GPU utilization — and is scoped to the workload's namespace. CPU, memory and storage exclude the injected `aibom-dataset-sidecar` container.
+
+Each metric is recorded as summary statistics only (`resource_utilization.metrics.<name>`: `min`/`max`/`avg`/`p95`, plus first/middle/last-third segment averages) — not a raw time series. Each pod's window runs from its start time (parsed as UTC) to when its containers finished (`finished_at` in `containers.json`), or to collection time if it hasn't finished. The first scrape interval (30 s, `AIBOM_SERIES_SCRAPE_INTERVAL_S`) is excluded as cold start, capped at half the run length; a run too short for the full exclusion is flagged via `summary_includes_cold_start`. Stats are rounded once, after display scaling: 2 decimals at magnitude ≥ 1, 3 significant figures below that.
 
 ---
 
