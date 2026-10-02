@@ -568,7 +568,7 @@ func (m *Mutator) buildDatasetSidecarContainer(pod *corev1.Pod) corev1.Container
 
 // buildDatasetDetectorPatches creates JSON patches to inject dataset detection
 // into a specific application container. It adds env vars for activation and
-// mounts the detector script as usercustomize.py so Python auto-imports it.
+// mounts the detector script as sitecustomize.py so Python auto-imports it.
 func (m *Mutator) buildDatasetDetectorPatches(pod *corev1.Pod, containerIdx int) []PatchOperation {
 	var patches []PatchOperation
 	container := &pod.Spec.Containers[containerIdx]
@@ -628,8 +628,13 @@ func (m *Mutator) buildDatasetDetectorPatches(pod *corev1.Pod, containerIdx int)
 		}
 	}
 
-	// Mount usercustomize.py (runtime detector) and the aibom-data volume
-	// it writes dataset_detected.json into. No k8s_api.py mount here
+	// Mount sitecustomize.py (runtime detector) and the aibom-data volume
+	// it writes dataset_detected.json into. sitecustomize, not
+	// usercustomize: Python skips usercustomize whenever the user site
+	// directory is disabled -- in any venv without system site-packages
+	// (/opt/venv, uv), under PYTHONNOUSERSITE or -s, and when uid != euid --
+	// while sitecustomize is still imported in all of those. The detector
+	// runs any sitecustomize.py it shadows (#106). No k8s_api.py mount here
 	// anymore -- runtime_detector.py no longer talks to the Kubernetes API
 	// at all (see #47); the aibom-dataset-sidecar container reads this same
 	// aibom-data volume and performs the actual (signed) ConfigMap write
@@ -637,7 +642,7 @@ func (m *Mutator) buildDatasetDetectorPatches(pod *corev1.Pod, containerIdx int)
 	mounts := []corev1.VolumeMount{
 		{
 			Name:      "aibom-scripts",
-			MountPath: "/aibom-hooks/usercustomize.py",
+			MountPath: "/aibom-hooks/sitecustomize.py",
 			SubPath:   "runtime_detector.py",
 			ReadOnly:  true,
 		},
