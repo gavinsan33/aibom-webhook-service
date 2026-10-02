@@ -14,7 +14,7 @@ For filtering, inspecting, and comparing the resulting `AIBOM` custom resources,
 6. The pod is created with the injections — the user's original YAML is untouched
 7. When the Job completes (or is deleted, for long-running pods like KServe predictors), the **watcher** creates a postprocess Job to compile the AIBOM — see [Postprocess Flow](#postprocess-flow)
 
-Pods are matched if they are owned by a Job, JobSet, PyTorchJob, or RayJob, **or** if any container requests `nvidia.com/gpu` resources. The webhook always fails open (`failurePolicy: Ignore`) — if the service is down, pods are created normally.
+Pods are matched if they are owned directly by a Job or PyTorchJob, **or** if any container requests `nvidia.com/gpu` resources. JobSet pods match through their child Jobs. `JobSet` and `RayJob` are also in the mutator's owner-kind set (`matchedOwnerKinds`), but neither ever owns a pod directly — KubeRay pods are owned by a `RayCluster` — so Ray pods are only matched through a GPU request (#105). The webhook always fails open (`failurePolicy: Ignore`) — if the service is down, pods are created normally.
 
 That includes the service being *unreachable*: the API server, not a pod, calls the webhook, so a NetworkPolicy in the install namespace that only admits same-namespace ingress makes every admission call time out, silently — workloads run uninstrumented and no AIBOM is produced, with nothing logged. The chart therefore ships `aibom-webhook-admission` (`templates/networkpolicy.yaml`, on by default; `networkPolicy.enabled=false` to opt out), which allows ingress to the webhook pod's port 8443. If pods in an `aibom.io/enabled` namespace come up without an `aibom-discovery` init container, check this first: a server-side dry run of a bare GPU pod (`oc create --dry-run=server -o yaml`) should come back with the `aibom.io/instrumented` label, and a `mutating pod ...` line should appear in the webhook's log.
 
@@ -335,7 +335,7 @@ Users can optionally annotate their Jobs with `aibom.io/*` keys to provide exper
 | `aibom.io/learning-rate` | `training.learning_rate` |
 | `aibom.io/top-k` | `inference.top_k` |
 
-Without annotations, the AIBOM is still generated from auto-detected data (hardware discovery, dataset detection, telemetry). Auto-detected values are used as defaults; any corresponding annotation always overrides them.
+Without annotations, the AIBOM is still generated from auto-detected data (hardware discovery, dataset detection, telemetry). Auto-detected values are used as defaults; a corresponding annotation overrides them, except for `aibom.io/learning-rate`/`batch-size`/`epochs`/`random-seed`, which are only used when neither the runtime hooks nor the CLI args produced a value (#109).
 
 ### Telemetry (Prometheus)
 

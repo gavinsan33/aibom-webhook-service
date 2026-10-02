@@ -1071,11 +1071,13 @@ func postprocessJobName(jobName string) string {
 	return aibomdata.PostprocessJobName(jobName)
 }
 
-// collectAIBOM runs once a postprocess Job succeeds. The AIBOM custom resource
-// itself is created directly by postprocess.py via the Kubernetes API — a Job
-// success here is proof that create call went through, so all that's left is
-// bookkeeping: mark the Job as collected and clean up the Job/ConfigMap so a
-// same-named rerun of the original workload doesn't collide with leftovers.
+// collectAIBOM runs once a postprocess Job finishes — succeeded or failed (see
+// isJobFinished). The AIBOM custom resource itself is created directly by
+// postprocess.py via the Kubernetes API, so on success that create call has
+// already gone through; either way all that's left is bookkeeping: mark the
+// Job as collected and clean up the Job/ConfigMap so a same-named rerun of
+// the original workload doesn't collide with leftovers. On failure this also
+// discards the failed Job's pod logs (#112).
 func (w *Watcher) collectAIBOM(ctx context.Context, job *batchv1.Job) {
 	originalJobName := job.Labels[LabelPostprocessFor]
 	if originalJobName == "" {

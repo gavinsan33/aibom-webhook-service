@@ -79,7 +79,7 @@ DEBUG_TELEMETRY_ALL_PODS = os.environ.get("AIBOM_DEBUG_TELEMETRY_ALL_PODS", "").
 # average) so stats -- min/max/p95 and a first/middle/last-third breakdown --
 # can be derived from the same series a run's shape actually traced out,
 # instead of needing a second `avg_over_time` query per metric. See
-# compute_metric_stats() and CLAUDE.md's Grafana Telemetry Retries section.
+# compute_metric_stats() and CLAUDE.md's Telemetry Retries section.
 TELEMETRY_QUERIES = {
     # Computed directly from dcgm-exporter's own raw metrics (present on any
     # standard DCGM install) rather than a "nerc:"-prefixed recording rule --
@@ -1243,7 +1243,7 @@ def compute_metric_stats(data_points):
     A flat average can't distinguish a run that held steady from one that
     started high and degraded (thermal throttling, a stalled data loader,
     checkpoint pauses); the three segments make that shape visible without
-    storing the full series. See CLAUDE.md's Grafana Telemetry Retries
+    storing the full series. See CLAUDE.md's Telemetry Retries
     section."""
     if not data_points:
         return None
@@ -1267,7 +1267,7 @@ def compute_metric_stats(data_points):
 
 def _collect_metrics_with_retry(query_defs, metrics, stats_start_ms, end_ms):
     """Runs one pod's worth of range queries with the shared retry-on-empty
-    logic (see CLAUDE.md's Grafana Telemetry Retries) -- only metrics still
+    logic (see CLAUDE.md's Telemetry Retries) -- only metrics still
     missing on a given attempt are re-queried, not the whole batch. query_defs
     is the {name: {"query": ..., "unit": ...}} dict (e.g. TELEMETRY_QUERIES)
     that `metrics` (name -> pod-substituted PromQL string) was built from."""
