@@ -1,7 +1,9 @@
 """
 AIBOM Runtime Detector - Runtime shim for automatic training metadata collection.
 
-Activated via PYTHONSTARTUP or explicit import. Monkey-patches common ML dataset
+Mounted into the app container as sitecustomize.py (on PYTHONPATH), so Python's
+site module imports it at interpreter startup; can also be imported explicitly.
+Monkey-patches common ML dataset
 entry points to capture dataset name, source, and configuration without requiring
 manual specification in intent.yaml, and inspects the training process's own
 argv/config files to capture training args and parallelization strategy.
@@ -31,6 +33,7 @@ All hooks are fault-tolerant — detection failures never interrupt training.
 
 import atexit
 import hashlib
+import importlib.util
 import json
 import os
 import sys
@@ -359,14 +362,15 @@ def _install_dataloader_hook():
 
     if "dataloader" in _hooks_installed:
         return
+    # Look up what's being patched before marking the hook installed, so a
+    # failed lookup leaves it retryable instead of silently "installed".
+    _orig_init = tud.DataLoader.__init__
     _hooks_installed["dataloader"] = True
 
     with _lock:
         _runtime_info["framework"] = "PyTorch"
         _runtime_info["framework_version"] = torch.__version__
     _dbg(f"DataLoader hook: installed (torch {torch.__version__})")
-
-    _orig_init = tud.DataLoader.__init__
 
     def _patched_init(self, dataset=None, *args, **kwargs):
         _orig_init(self, dataset, *args, **kwargs)
@@ -448,10 +452,9 @@ def _install_hf_datasets_hook():
 
     if "hf_datasets" in _hooks_installed:
         return
+    _orig_load = datasets.load_dataset
     _hooks_installed["hf_datasets"] = True
     _dbg("HF datasets hook: installed, patching datasets.load_dataset")
-
-    _orig_load = datasets.load_dataset
 
     def _patched_load(path, *args, **kwargs):
         _dbg(f"HF datasets hook: load_dataset({path!r}) called")
@@ -613,10 +616,9 @@ def _install_webdataset_hook():
 
     if "webdataset" in _hooks_installed:
         return
+    _orig_init = wds.WebDataset.__init__
     _hooks_installed["webdataset"] = True
     _dbg("webdataset hook: installed")
-
-    _orig_init = wds.WebDataset.__init__
 
     def _patched_init(self, urls, *args, **kwargs):
         _orig_init(self, urls, *args, **kwargs)
@@ -664,13 +666,20 @@ def _install_transformers_hook():
 
     if "transformers" in _hooks_installed:
         return
+    _orig_ta_post_init = transformers.TrainingArguments.__post_init__
+    _orig_from_pretrained = transformers.PreTrainedModel.from_pretrained.__func__
     _hooks_installed["transformers"] = True
     _dbg("transformers hook: installed, patching TrainingArguments and PreTrainedModel.from_pretrained")
 
-    _orig_ta_init = transformers.TrainingArguments.__init__
-
-    def _patched_ta_init(self, *args, **kwargs):
-        _orig_ta_init(self, *args, **kwargs)
+    # TrainingArguments is a dataclass, and so are its subclasses (trl's
+    # SFTConfig/DPOConfig/GRPOConfig, Seq2SeqTrainingArguments, ...). Each
+    # subclass gets its own generated __init__ that never calls the parent's,
+    # so patching TrainingArguments.__init__ only ever caught the base class.
+    # Every generated __init__ does call __post_init__, and subclasses that
+    # override it call super().__post_init__(), so hooking that catches them
+    # all -- after TrainingArguments' own normalization has run.
+    def _patched_ta_post_init(self, *args, **kwargs):
+        _orig_ta_post_init(self, *args, **kwargs)
         try:
             info = {"training_framework": "transformers.Trainer"}
             if getattr(self, "learning_rate", None) is not None:
@@ -695,11 +704,9 @@ def _install_transformers_hook():
                 _runtime_info.update(info)
             _dbg(f"transformers hook: captured TrainingArguments {info}")
         except Exception:
-            _dbg_exc("transformers._patched_ta_init")
+            _dbg_exc("transformers._patched_ta_post_init")
 
-    transformers.TrainingArguments.__init__ = _patched_ta_init
-
-    _orig_from_pretrained = transformers.PreTrainedModel.from_pretrained.__func__
+    transformers.TrainingArguments.__post_init__ = _patched_ta_post_init
 
     def _patched_from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
         model = _orig_from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs)
@@ -766,10 +773,9 @@ def _install_peft_hook():
 
     if "peft" in _hooks_installed:
         return
+    _orig_init = peft.LoraConfig.__init__
     _hooks_installed["peft"] = True
     _dbg("peft hook: installed, patching LoraConfig.__init__")
-
-    _orig_init = peft.LoraConfig.__init__
 
     def _patched_init(self, *args, **kwargs):
         _orig_init(self, *args, **kwargs)
@@ -818,60 +824,133 @@ def install_hooks():
     _dbg(f"install_hooks: done, output will go to {_OUTPUT_PATH}")
 
 
-def install_hooks_lazy():
-    """Install hooks lazily — detects framework imports as they happen.
+# Top-level module -> the hook to install once it has finished importing.
+_LAZY_TRIGGERS = {
+    "torch": _install_dataloader_hook,
+    "datasets": _install_hf_datasets_hook,
+    "torchvision": _install_torchvision_hook,
+    "webdataset": _install_webdataset_hook,
+    "transformers": _install_transformers_hook,
+    "peft": _install_peft_hook,
+}
 
-    Use when activated early (e.g., via PYTHONSTARTUP) before frameworks
-    are imported. Wraps builtins.__import__ to intercept torch, datasets,
-    torchvision, and webdataset imports, installing the appropriate hooks
-    when each framework is first loaded.
-    """
-    import builtins
 
-    _orig_import = builtins.__import__
+class _PostImportHookFinder:
+    """sys.meta_path finder that runs a trigger's hook the moment its module
+    finishes executing -- before the import statement that loaded it binds
+    anything.
 
-    _triggers = {
-        "torch": _install_dataloader_hook,
-        "datasets": _install_hf_datasets_hook,
-        "torchvision": _install_torchvision_hook,
-        "webdataset": _install_webdataset_hook,
-        "transformers": _install_transformers_hook,
-        "peft": _install_peft_hook,
-    }
-    _pending = set(_triggers.keys())
-    _import_depth = [0]
+    This replaced a builtins.__import__ wrapper that only installed hooks
+    once the import stack unwound back to depth 0. That missed any module
+    that first imported a framework from inside another import -- a user
+    helper module, or trl's own CLI modules, doing `from datasets import
+    load_dataset` at their top level bound the unpatched function before the
+    hook ran. It also didn't see importlib.import_module() or lazy loaders,
+    which bypass builtins.__import__, and its depth counter was shared across
+    threads.
 
-    def _hooked_import(name, *args, **kwargs):
-        _import_depth[0] += 1
+    The finder never loads anything itself: it asks the finders after it for
+    the real spec and wraps that spec's loader's exec_module on the loader
+    instance (keeping the loader's type, which importlib.resources and
+    friends may check), then removes the wrapper once it has fired."""
+
+    def __init__(self, triggers):
+        self._pending = dict(triggers)
+        self._claim_lock = threading.Lock()
+        self._resolving = threading.local()
+
+    def _claim(self, name):
+        # Hooks run outside this lock: one may import another trigger (the
+        # transformers hook pulls in torch), and holding a lock across an
+        # import risks deadlocking against another thread's module lock.
+        with self._claim_lock:
+            hook = self._pending.pop(name, None)
+            if not self._pending:
+                try:
+                    sys.meta_path.remove(self)
+                except ValueError:
+                    pass
+            return hook
+
+    def fire(self, name):
+        hook = self._claim(name)
+        if hook is None:
+            return
+        _dbg(f"Lazy hook: '{name}' finished importing, installing hook")
         try:
-            result = _orig_import(name, *args, **kwargs)
+            hook()
+        except Exception:
+            _dbg_exc(f"install_hooks_lazy({name})")
+
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname not in self._pending:
+            return None
+        resolving = getattr(self._resolving, "names", None)
+        if resolving is None:
+            resolving = self._resolving.names = set()
+        if fullname in resolving:
+            return None
+        resolving.add(fullname)
+        try:
+            spec = None
+            for finder in list(sys.meta_path):
+                if finder is self:
+                    continue
+                find = getattr(finder, "find_spec", None)
+                if find is None:
+                    continue
+                spec = find(fullname, path, target)
+                if spec is not None:
+                    break
         finally:
-            _import_depth[0] -= 1
+            resolving.discard(fullname)
+        if spec is None or spec.loader is None:
+            return spec
+        self._wrap_loader(spec.loader, fullname)
+        return spec
 
-        if _import_depth[0] == 0:
-            for mod in list(_pending):
-                if mod in sys.modules:
-                    _pending.discard(mod)
-                    _dbg(f"Lazy hook: '{mod}' fully loaded (triggered by import of '{name}'), installing hook")
-                    try:
-                        _triggers[mod]()
-                    except Exception:
-                        _dbg_exc(f"install_hooks_lazy({mod})")
-            if not _pending:
-                builtins.__import__ = _orig_import
-                _dbg("Lazy hook: all hooks installed, restoring original __import__")
-        return result
+    def _wrap_loader(self, loader, fullname):
+        orig_exec = getattr(loader, "exec_module", None)
+        if orig_exec is None or isinstance(loader, type):
+            _dbg(f"Lazy hook: can't wrap loader for '{fullname}' ({loader!r})")
+            return
+        finder = self
 
-    builtins.__import__ = _hooked_import
-
-    for mod, hook in list(_triggers.items()):
-        if mod in sys.modules:
-            _pending.discard(mod)
-            _dbg(f"Lazy hook: '{mod}' already imported, installing hook now")
+        def exec_module(module):
             try:
-                hook()
-            except Exception:
-                _dbg_exc(f"install_hooks_lazy({mod})")
+                orig_exec(module)
+            finally:
+                # A loader instance can be shared across modules (e.g. one
+                # zipimporter per archive), so only fire for our module, and
+                # restore the original method once it has run.
+                if getattr(module, "__name__", None) == fullname:
+                    try:
+                        del loader.exec_module
+                    except AttributeError:
+                        pass
+            if getattr(module, "__name__", None) == fullname:
+                finder.fire(fullname)
+
+        try:
+            loader.exec_module = exec_module
+        except (AttributeError, TypeError):
+            _dbg(f"Lazy hook: can't wrap loader for '{fullname}' ({loader!r})")
+
+
+def install_hooks_lazy():
+    """Install hooks lazily, as each framework finishes importing.
+
+    Use when activated early (e.g., as sitecustomize.py at interpreter
+    startup) before frameworks are imported. Frameworks that are already
+    imported get their hook immediately.
+    """
+    finder = _PostImportHookFinder(_LAZY_TRIGGERS)
+    already = [mod for mod in _LAZY_TRIGGERS if mod in sys.modules]
+    if len(already) < len(_LAZY_TRIGGERS):
+        sys.meta_path.insert(0, finder)
+    for mod in already:
+        _dbg(f"Lazy hook: '{mod}' already imported, installing hook now")
+        finder.fire(mod)
 
     atexit.register(_flush)
     _dbg(f"install_hooks_lazy: done, output will go to {_OUTPUT_PATH}")
@@ -903,3 +982,39 @@ if os.environ.get("AIBOM_DATASET_DETECT", "0") == "1":
     _dbg(f"  AIBOM_DATASET_OUTPUT={_OUTPUT_PATH}")
     _dbg(f"  Loaded from: {__file__}")
     install_hooks_lazy()
+
+
+def _run_shadowed_sitecustomize():
+    """When mounted as sitecustomize.py, this file sits on PYTHONPATH ahead of
+    site-packages, so Python imports it *instead of* any sitecustomize the
+    image ships (Debian/Ubuntu's apport hook, a conda env's, a platform
+    team's own). Find the next one on sys.path and run it, so the image
+    behaves as it would without instrumentation. Errors are reported the way
+    site.py reports its own sitecustomize errors, and never propagate."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    for entry in sys.path:
+        base = os.path.abspath(entry or os.getcwd())
+        if base == here:
+            continue
+        for candidate in (
+            os.path.join(base, "sitecustomize.py"),
+            os.path.join(base, "sitecustomize", "__init__.py"),
+        ):
+            if not os.path.isfile(candidate):
+                continue
+            try:
+                spec = importlib.util.spec_from_file_location("_aibom_shadowed_sitecustomize", candidate)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                _dbg(f"Ran shadowed sitecustomize: {candidate}")
+            except Exception as exc:
+                print(
+                    f"Error in sitecustomize; set PYTHONVERBOSE for traceback:\n"
+                    f"{type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
+            return
+
+
+if __name__ == "sitecustomize":
+    _run_shadowed_sitecustomize()

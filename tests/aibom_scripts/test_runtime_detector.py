@@ -1,4 +1,10 @@
+import importlib
 import json
+import os
+import subprocess
+import sys
+import textwrap
+import types
 
 import pytest
 
@@ -548,3 +554,205 @@ def test_peft_hook_detects_qlora_when_base_model_already_quantized(
     peft.LoraConfig(r=16, lora_alpha=32)
 
     assert rd._runtime_info["adaptation_method"] == "qlora"
+
+
+# ---------------------------------------------------------------------------
+# Hook installation (#106)
+# ---------------------------------------------------------------------------
+
+
+def test_transformers_hook_captures_dataclass_subclass_config(fake_transformers_module):
+    # trl's SFTConfig/DPOConfig are dataclass subclasses of TrainingArguments
+    # with their own generated __init__, which a hook on the parent's
+    # __init__ never saw.
+    rd.install_hooks()
+    import transformers
+
+    transformers.FakeSFTConfig(learning_rate=1e-4, per_device_train_batch_size=2, seed=7)
+
+    assert rd._runtime_info["learning_rate"] == 1e-4
+    assert rd._runtime_info["batch_size"] == 2
+    assert rd._runtime_info["random_seed"] == 7
+    assert rd._runtime_info["optimizer"] == "adamw_torch"
+
+
+def test_hook_not_marked_installed_when_patch_target_missing(monkeypatch):
+    # A module without the attribute being patched (half-initialized, or an
+    # incompatible version) must not leave the hook marked as installed.
+    monkeypatch.setitem(sys.modules, "datasets", types.ModuleType("datasets"))
+    with pytest.raises(AttributeError):
+        rd._install_hf_datasets_hook()
+    assert "hf_datasets" not in rd._hooks_installed
+
+
+@pytest.fixture
+def import_sandbox(tmp_path, monkeypatch):
+    """A sys.path entry for throwaway modules, with the post-import finder
+    and every module imported during the test removed afterwards."""
+    monkeypatch.syspath_prepend(str(tmp_path))
+    before_modules = set(sys.modules)
+    before_meta_path = list(sys.meta_path)
+    importlib.invalidate_caches()
+
+    def write(name, source):
+        path = tmp_path.joinpath(*name.split("/"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(textwrap.dedent(source))
+
+    yield write
+    sys.meta_path[:] = before_meta_path
+    for name in set(sys.modules) - before_modules:
+        del sys.modules[name]
+
+
+_FAKE_DATASETS_PKG = """
+    class Dataset:
+        def __init__(self, path):
+            self.path = path
+
+    def load_dataset(path, *args, **kwargs):
+        return Dataset(path)
+"""
+
+
+def test_post_import_hook_patches_before_nested_from_import_binds(import_sandbox):
+    # A helper module that's itself being imported does
+    # `from datasets import load_dataset`. The old depth-0 trigger installed
+    # the hook only after that name was already bound to the original.
+    import_sandbox("datasets/__init__.py", _FAKE_DATASETS_PKG)
+    import_sandbox("aibom_userlib.py", """
+        from datasets import load_dataset
+
+        def load():
+            return load_dataset("imdb")
+    """)
+    sys.meta_path.insert(0, rd._PostImportHookFinder({"datasets": rd._install_hf_datasets_hook}))
+
+    import aibom_userlib
+
+    aibom_userlib.load()
+    assert [d["dataset_name"] for d in rd.get_detected_datasets()] == ["imdb"]
+
+
+def test_post_import_hook_fires_for_importlib_import_module(import_sandbox):
+    import_sandbox("datasets/__init__.py", _FAKE_DATASETS_PKG)
+    sys.meta_path.insert(0, rd._PostImportHookFinder({"datasets": rd._install_hf_datasets_hook}))
+
+    importlib.import_module("datasets").load_dataset("squad")
+
+    assert [d["dataset_name"] for d in rd.get_detected_datasets()] == ["squad"]
+
+
+def test_post_import_hook_removes_itself_once_every_trigger_fired(import_sandbox):
+    import_sandbox("aibom_fake_a.py", "")
+    import_sandbox("aibom_fake_b.py", "")
+    fired = []
+    finder = rd._PostImportHookFinder({
+        "aibom_fake_a": lambda: fired.append("a"),
+        "aibom_fake_b": lambda: fired.append("b"),
+    })
+    sys.meta_path.insert(0, finder)
+
+    import aibom_fake_a  # noqa: F401
+    assert finder in sys.meta_path
+    import aibom_fake_b  # noqa: F401
+
+    assert fired == ["a", "b"]
+    assert finder not in sys.meta_path
+
+
+def test_post_import_hook_waits_for_a_successful_import(import_sandbox):
+    # A failed import doesn't fire the hook (the module never finished
+    # executing); a later successful import of the same module does.
+    import_sandbox("aibom_flaky.py", "import os\nif os.environ.get('AIBOM_FLAKY_FAIL'):\n    raise RuntimeError('boom')\n")
+    fired = []
+    sys.meta_path.insert(0, rd._PostImportHookFinder({"aibom_flaky": lambda: fired.append(1)}))
+
+    os.environ["AIBOM_FLAKY_FAIL"] = "1"
+    try:
+        with pytest.raises(RuntimeError):
+            import aibom_flaky  # noqa: F401
+    finally:
+        del os.environ["AIBOM_FLAKY_FAIL"]
+    assert fired == []
+
+    import aibom_flaky  # noqa: F401,F811
+    assert fired == [1]
+
+
+def test_post_import_hook_restores_the_loaders_exec_module(import_sandbox):
+    import_sandbox("aibom_fake_c.py", "")
+    sys.meta_path.insert(0, rd._PostImportHookFinder({"aibom_fake_c": lambda: None}))
+
+    import aibom_fake_c
+
+    assert "exec_module" not in vars(aibom_fake_c.__loader__)
+
+
+# ---------------------------------------------------------------------------
+# sitecustomize activation, in a real interpreter (#106)
+# ---------------------------------------------------------------------------
+
+_DETECTOR_SOURCE = os.path.join(os.path.dirname(rd.__file__), "runtime_detector.py")
+_PROBE = (
+    "import sys; m = sys.modules.get('sitecustomize'); "
+    "print('ACTIVE' if m is not None and hasattr(m, 'install_hooks_lazy') else 'INACTIVE')"
+)
+
+
+@pytest.fixture
+def hooks_dir(tmp_path):
+    d = tmp_path / "aibom-hooks"
+    d.mkdir()
+    (d / "sitecustomize.py").write_text(open(_DETECTOR_SOURCE).read())
+    return d
+
+
+def _run_probe(python, hooks_dir, tmp_path, *flags, extra_env=None, extra_path=()):
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "PYTHONPATH": os.pathsep.join([str(hooks_dir), *map(str, extra_path)]),
+        "AIBOM_DATASET_DETECT": "1",
+        "AIBOM_DATASET_OUTPUT": str(tmp_path / "out.json"),
+        **(extra_env or {}),
+    }
+    result = subprocess.run(
+        [str(python), *flags, "-c", _PROBE], env=env, capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
+
+
+@pytest.mark.parametrize("flags,extra_env", [
+    ((), {}),
+    ((), {"PYTHONNOUSERSITE": "1"}),
+    (("-s",), {}),
+])
+def test_detector_activates_with_user_site_disabled(hooks_dir, tmp_path, flags, extra_env):
+    # usercustomize is skipped in all of these; sitecustomize isn't.
+    assert _run_probe(sys.executable, hooks_dir, tmp_path, *flags, extra_env=extra_env) == "ACTIVE"
+
+
+def test_detector_activates_inside_a_venv(hooks_dir, tmp_path):
+    venv = tmp_path / "venv"
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(venv)], check=True, timeout=120)
+    python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    assert _run_probe(python, hooks_dir, tmp_path) == "ACTIVE"
+
+
+def test_detector_runs_the_sitecustomize_it_shadows(hooks_dir, tmp_path):
+    other = tmp_path / "image-site"
+    other.mkdir()
+    marker = tmp_path / "image-sitecustomize-ran"
+    (other / "sitecustomize.py").write_text(f"open({str(marker)!r}, 'w').close()\n")
+
+    assert _run_probe(sys.executable, hooks_dir, tmp_path, extra_path=[other]) == "ACTIVE"
+    assert marker.exists()
+
+
+def test_shadowed_sitecustomize_errors_do_not_break_startup(hooks_dir, tmp_path):
+    other = tmp_path / "image-site"
+    other.mkdir()
+    (other / "sitecustomize.py").write_text("raise RuntimeError('broken image sitecustomize')\n")
+
+    assert _run_probe(sys.executable, hooks_dir, tmp_path, extra_path=[other]) == "ACTIVE"
