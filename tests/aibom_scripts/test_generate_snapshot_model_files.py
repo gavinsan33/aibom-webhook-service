@@ -98,3 +98,109 @@ def test_malformed_json_files_are_skipped(tmp_path):
     (tmp_path / "config.json").write_text("{not json")
     (tmp_path / "model.safetensors.index.json").write_text("[]")
     assert read_model_source_files(str(tmp_path)) is None
+
+
+# ---------------------------------------------------------------------------
+# Fail-open behavior (#104): a bad model PVC or a failing stage must not hang
+# or crash the init container.
+# ---------------------------------------------------------------------------
+
+import signal
+import sys
+
+import pytest
+
+
+def _load_stage_runner(timeout="60"):
+    src = SCRIPT.read_text()
+    start = src.index("_STAGE_TIMEOUT_S")
+    end = src.index("def run_cmd")
+    ns = {"os": os, "signal": signal, "sys": sys}
+    exec(src[start:end], ns)
+    ns["_STAGE_TIMEOUT_S"] = int(timeout)
+    return ns
+
+
+def _guard(seconds=10):
+    """Fail the test, rather than hang the suite, if something blocks."""
+    def _boom(signum, frame):
+        raise AssertionError("blocked: fail-open guard did not work")
+    previous = signal.signal(signal.SIGALRM, _boom)
+    signal.alarm(seconds)
+    return previous
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs mkfifo")
+def test_read_model_source_files_skips_fifo_readme(tmp_path):
+    _make_model(tmp_path)
+    (tmp_path / "README.md").unlink()
+    os.mkfifo(tmp_path / "README.md")
+    previous = _guard()
+    try:
+        result = read_model_source_files(str(tmp_path))
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+    # The FIFO is ignored, the rest of the model's files are still read.
+    assert result["architectures"] == ["Qwen2ForCausalLM"]
+    assert "repo_id" not in result
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs mkfifo")
+def test_read_model_source_files_skips_symlink_to_fifo(tmp_path):
+    _make_model(tmp_path)
+    os.mkfifo(tmp_path / "pipe")
+    (tmp_path / "config.json").unlink()
+    (tmp_path / "config.json").symlink_to(tmp_path / "pipe")
+    previous = _guard()
+    try:
+        result = read_model_source_files(str(tmp_path))
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+    assert "architectures" not in result
+
+
+def test_run_stage_returns_value_on_success():
+    ns = _load_stage_runner()
+    assert ns["_run_stage"]("ok", lambda: 42) == 42
+
+
+def test_run_stage_swallows_exception_and_uses_on_error():
+    ns = _load_stage_runner()
+
+    def boom():
+        raise FileNotFoundError("true")
+
+    assert ns["_run_stage"]("boom", boom) is None
+    assert ns["_run_stage"]("boom", boom, ns["_benchmark_error"]) == {"error": "true"}
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs mkfifo")
+def test_run_stage_times_out_a_blocked_open(tmp_path):
+    ns = _load_stage_runner()
+    fifo = tmp_path / "pipe"
+    os.mkfifo(fifo)
+
+    def blocked_open():
+        with open(fifo, "rb") as f:  # blocks until a writer appears
+            return f.read()
+
+    previous = _guard()
+    try:
+        result = ns["_run_stage"]("blocked", blocked_open, lambda exc: "fallback", timeout_s=1)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+    assert result == "fallback"
+
+
+def test_run_stage_restores_previous_signal_handler():
+    ns = _load_stage_runner()
+    sentinel = lambda signum, frame: None
+    previous = signal.signal(signal.SIGALRM, sentinel)
+    try:
+        ns["_run_stage"]("ok", lambda: None)
+        assert signal.getsignal(signal.SIGALRM) is sentinel
+    finally:
+        signal.signal(signal.SIGALRM, previous)
