@@ -277,6 +277,42 @@ def test_git_remote_url_reads_origin_from_config(tmp_path):
     assert rd._git_remote_url(str(git_dir)) == "https://github.com/org/repo.git"
 
 
+REDACTION_CASES = [
+    ("https://user:ghp_SECRET@github.com/org/repo.git", "https://github.com/org/repo.git"),
+    ("https://ghp_SECRET@github.com/org/repo", "https://github.com/org/repo"),
+    ("https://x-access-token:ghp_SECRET@github.com:8443/org/repo", "https://github.com:8443/org/repo"),
+    ("https://github.com/org/repo.git?private_token=SECRET", "https://github.com/org/repo.git"),
+    ("https://github.com/org/repo.git?token=SECRET#frag", "https://github.com/org/repo.git"),
+    ("ssh://git:SECRET@host/org/repo.git", "ssh://git@host/org/repo.git"),
+    ("ssh://git@host/org/repo.git", "ssh://git@host/org/repo.git"),
+    ("git@github.com:org/repo.git", "git@github.com:org/repo.git"),
+    ("https://github.com/org/repo", "https://github.com/org/repo"),
+    ("/local/path/repo", "/local/path/repo"),
+    (None, None),
+    ("", ""),
+]
+
+
+@pytest.mark.parametrize("url,expected", REDACTION_CASES)
+def test_redact_git_url(url, expected):
+    assert rd._redact_git_url(url) == expected
+
+
+def test_redact_git_url_unparseable_still_drops_userinfo():
+    out = rd._redact_git_url("https://user:SECRET@[::1/org/repo?token=SECRET")
+    assert "SECRET" not in out
+
+
+def test_git_remote_url_strips_credentials(tmp_path):
+    git_dir = tmp_path / ".git"
+    git_dir.mkdir()
+    (git_dir / "config").write_text(
+        '[remote "origin"]\n'
+        "\turl = https://user:ghp_SECRET@github.com/org/repo.git\n"
+    )
+    assert rd._git_remote_url(str(git_dir)) == "https://github.com/org/repo.git"
+
+
 def test_git_remote_url_missing_config_returns_none(tmp_path):
     assert rd._git_remote_url(str(tmp_path / ".git")) is None
 

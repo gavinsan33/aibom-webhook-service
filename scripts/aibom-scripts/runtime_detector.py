@@ -225,6 +225,42 @@ def _resolve_git_ref(git_dir, ref):
     return None
 
 
+def _redact_git_url(url):
+    """Strip credentials from a git remote URL before it's recorded (#102).
+
+    `git clone https://user:TOKEN@host/repo` stores that URL verbatim in
+    .git/config and in the container command, and it would otherwise land in
+    the signed, immutable AIBOM. For http(s)/ftp the whole userinfo goes (a
+    bare username is often the token itself, e.g. a GitHub PAT); for other
+    schemes (ssh://git@host/...) only a password is dropped, since the
+    username isn't secret. scp-style `git@host:org/repo` has no scheme and is
+    returned as-is for the same reason. Query string and fragment are dropped
+    entirely (`?token=`, `?private_token=`), since they never identify the
+    repository.
+    """
+    if not isinstance(url, str) or "://" not in url:
+        return url
+    # Imported here, not at module level: this runs as sitecustomize in the
+    # user's own process at startup, and this is only needed at exit.
+    import re
+    import urllib.parse
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        # Unparseable (e.g. malformed IPv6 host): drop anything that looks
+        # like userinfo, query and fragment rather than risk keeping a secret.
+        return re.sub(r"[?#].*$", "", re.sub(r"^([^:/]+://)[^/]*@", r"\1", url))
+    netloc = parts.netloc
+    if "@" in netloc:
+        userinfo, _, hostport = netloc.rpartition("@")
+        if parts.scheme.lower() in ("http", "https", "ftp", "ftps"):
+            netloc = hostport
+        else:
+            user = userinfo.partition(":")[0]
+            netloc = f"{user}@{hostport}" if user else hostport
+    return f"{parts.scheme}://{netloc}{parts.path}"
+
+
 def _git_remote_url(git_dir):
     """Best-effort read of the "origin" remote URL straight out of
     .git/config, without shelling out to the git binary (which isn't
@@ -238,7 +274,7 @@ def _git_remote_url(git_dir):
         parser.read(config_path)
         for section in parser.sections():
             if section.startswith("remote") and "origin" in section:
-                return parser.get(section, "url", fallback=None)
+                return _redact_git_url(parser.get(section, "url", fallback=None))
     except Exception:
         _dbg_exc("_git_remote_url")
     return None
