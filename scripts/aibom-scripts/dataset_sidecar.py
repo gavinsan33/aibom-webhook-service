@@ -43,6 +43,7 @@ import os
 import signal
 import sys
 import threading
+import time
 
 import k8s_api
 
@@ -54,12 +55,19 @@ _DATA_CONFIGMAP = os.environ.get("AIBOM_DATA_CONFIGMAP") or k8s_api.resolve_data
 
 _SIGNING_KEY_PATH = "/var/run/secrets/aibom/dataset-signing/hmac-key"
 
-# How often to check _OUTPUT_PATH for changes. Detection typically flushes
-# once, at process exit (runtime_detector.py's atexit hook), so this doesn't
+# How often to check _OUTPUT_PATH for changes. runtime_detector.py flushes
+# shortly after each detection (debounced) and again at exit, so this doesn't
 # need to be tight -- it only has to catch up before the pod actually
 # terminates, and native sidecars get a final chance to run after the main
-# container(s) exit (see _run_once's use at shutdown, below).
+# container(s) exit (see _publish_final's use at shutdown, below).
 _POLL_INTERVAL_S = float(os.environ.get("AIBOM_DATASET_SIDECAR_POLL_INTERVAL", "5"))
+
+# The shutdown publish is the last chance to get the final flush out, so a
+# single failed ConfigMap write there must not lose it (#107). Bounded by the
+# kubelet's termination grace period (30s by default): 4 attempts with
+# 1s, 2s, 4s backoff is ~7s.
+_FINAL_PUBLISH_ATTEMPTS = int(os.environ.get("AIBOM_DATASET_SIDECAR_FINAL_ATTEMPTS", "4"))
+_FINAL_PUBLISH_BACKOFF_S = float(os.environ.get("AIBOM_DATASET_SIDECAR_FINAL_BACKOFF", "1"))
 
 _shutdown_event = threading.Event()
 
@@ -154,6 +162,29 @@ def _run_once(last_mtime):
     return mtime
 
 
+def _publish_final(last_mtime):
+    """The shutdown pass: like _run_once, but retried with backoff while the
+    file on disk is still newer than what was last published."""
+    for attempt in range(_FINAL_PUBLISH_ATTEMPTS):
+        last_mtime = _run_once(last_mtime)
+        try:
+            current = os.stat(_OUTPUT_PATH).st_mtime
+        except FileNotFoundError:
+            return last_mtime
+        if current == last_mtime:
+            return last_mtime
+        if attempt + 1 < _FINAL_PUBLISH_ATTEMPTS:
+            delay = _FINAL_PUBLISH_BACKOFF_S * (2 ** attempt)
+            _dbg(f"final publish incomplete, retrying in {delay}s")
+            time.sleep(delay)
+    print(
+        f"WARNING: dataset sidecar gave up publishing {_OUTPUT_PATH} after "
+        f"{_FINAL_PUBLISH_ATTEMPTS} attempts",
+        file=sys.stderr,
+    )
+    return last_mtime
+
+
 def main():
     signal.signal(signal.SIGTERM, _handle_sigterm)
     _dbg(f"watching {_OUTPUT_PATH} for pod {_POD_NAMESPACE}/{_POD_NAME}, configmap={_DATA_CONFIGMAP}")
@@ -167,7 +198,7 @@ def main():
     # SIGTERM after every main container has already exited, so this is the
     # last chance to catch a final atexit-triggered flush from
     # runtime_detector.py before the pod terminates.
-    _run_once(last_mtime)
+    _publish_final(last_mtime)
     _dbg("shutting down")
 
 
