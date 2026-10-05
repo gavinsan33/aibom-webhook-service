@@ -566,6 +566,10 @@ func (m *Mutator) buildDatasetSidecarContainer(pod *corev1.Pod) corev1.Container
 	}
 }
 
+// imagePythonPathAnnotation lets a workload tell the webhook what PYTHONPATH
+// its image sets via ENV, which the webhook can't see at admission (#103).
+const imagePythonPathAnnotation = "aibom.io/python-path"
+
 // buildDatasetDetectorPatches creates JSON patches to inject dataset detection
 // into a specific application container. It adds env vars for activation and
 // mounts the detector script as sitecustomize.py so Python auto-imports it.
@@ -573,29 +577,62 @@ func (m *Mutator) buildDatasetDetectorPatches(pod *corev1.Pod, containerIdx int)
 	var patches []PatchOperation
 	container := &pod.Spec.Containers[containerIdx]
 
-	// Build PYTHONPATH value, prepending to any existing value
-	pythonPath := "/aibom-hooks"
-	for _, env := range container.Env {
-		if env.Name == "PYTHONPATH" && env.Value != "" {
-			pythonPath = "/aibom-hooks:" + env.Value
-			break
-		}
-	}
-
 	// No AIBOM_DATA_CONFIGMAP here -- unlike the discovery init container
 	// and the dataset sidecar, this container no longer talks to the
 	// Kubernetes API at all (see #47), so it has no use for the ConfigMap
-	// name.
+	// name. AIBOM_DEBUG is deliberately not injected either: it used to be
+	// hardcoded to "1", which made every Python process in every
+	// instrumented container write debug lines to stderr (#103). A workload
+	// that wants them sets AIBOM_DEBUG itself.
 	envVars := []corev1.EnvVar{
 		{Name: "AIBOM_DATASET_DETECT", Value: "1"},
-		{Name: "AIBOM_DEBUG", Value: "1"},
 		{Name: "AIBOM_DATASET_OUTPUT", Value: "/tmp/aibom/dataset_detected.json"},
 		downwardAPIEnv("POD_NAME", "metadata.name"),
 		downwardAPIEnv("POD_NAMESPACE", "metadata.namespace"),
-		{Name: "PYTHONPATH", Value: pythonPath},
 	}
 
+	// PYTHONPATH has three shapes in the spec (#103):
+	//   - absent: add it.
+	//   - literal value: replace it with the hook dir prepended.
+	//   - valueFrom (Secret/ConfigMap/fieldRef): there is no value member to
+	//     replace (a JSON Patch replace on it is invalid), and setting both
+	//     value and valueFrom is invalid too. Instead append a second
+	//     PYTHONPATH entry that expands $(PYTHONPATH) -- Kubernetes resolves
+	//     $(VAR) against earlier entries, and the later duplicate wins -- so
+	//     the original source is preserved behind the hook dir.
+	pythonPathIdx := -1
+	for j, env := range container.Env {
+		if env.Name == "PYTHONPATH" {
+			pythonPathIdx = j
+			break
+		}
+	}
+	var pythonPathReplace *PatchOperation
 	envPath := fmt.Sprintf("/spec/containers/%d/env", containerIdx)
+	switch {
+	case pythonPathIdx < 0:
+		// An image-level ENV PYTHONPATH isn't visible at admission and
+		// would be overridden by ours, so the workload can declare it via
+		// the pod annotation and we append it behind the hook dir.
+		pythonPath := "/aibom-hooks"
+		if imagePath := pod.Annotations[imagePythonPathAnnotation]; imagePath != "" {
+			pythonPath += ":" + imagePath
+		}
+		envVars = append(envVars, corev1.EnvVar{Name: "PYTHONPATH", Value: pythonPath})
+	case container.Env[pythonPathIdx].ValueFrom != nil:
+		envVars = append(envVars, corev1.EnvVar{Name: "PYTHONPATH", Value: "/aibom-hooks:$(PYTHONPATH)"})
+	default:
+		pythonPath := "/aibom-hooks"
+		if v := container.Env[pythonPathIdx].Value; v != "" {
+			pythonPath = "/aibom-hooks:" + v
+		}
+		pythonPathReplace = &PatchOperation{
+			Op:    "replace",
+			Path:  fmt.Sprintf("%s/%d/value", envPath, pythonPathIdx),
+			Value: pythonPath,
+		}
+	}
+
 	if len(container.Env) == 0 {
 		patches = append(patches, PatchOperation{
 			Op:    "add",
@@ -603,23 +640,10 @@ func (m *Mutator) buildDatasetDetectorPatches(pod *corev1.Pod, containerIdx int)
 			Value: envVars,
 		})
 	} else {
-		// If PYTHONPATH already exists, replace it; add the rest
-		pythonPathExists := false
-		for j, env := range container.Env {
-			if env.Name == "PYTHONPATH" {
-				patches = append(patches, PatchOperation{
-					Op:    "replace",
-					Path:  fmt.Sprintf("%s/%d/value", envPath, j),
-					Value: pythonPath,
-				})
-				pythonPathExists = true
-				break
-			}
+		if pythonPathReplace != nil {
+			patches = append(patches, *pythonPathReplace)
 		}
 		for _, env := range envVars {
-			if env.Name == "PYTHONPATH" && pythonPathExists {
-				continue
-			}
 			patches = append(patches, PatchOperation{
 				Op:    "add",
 				Path:  envPath + "/-",
