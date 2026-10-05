@@ -38,7 +38,12 @@ func main() {
 	flag.BoolVar(&cfg.DebugKeepPostprocessJobs, "debug-keep-postprocess-jobs", false, "skip deleting succeeded postprocess Jobs/data ConfigMaps, for inspecting their logs/state after the fact (leaks one of each per completed workload — not for routine production use)")
 	flag.BoolVar(&cfg.DebugTelemetryAllPods, "debug-telemetry-all-pods", false, "postprocess Jobs query Prometheus telemetry for every pod regardless of detected GPU count (for local testing on clusters with no real GPU hardware, e.g. kind — not for routine production use)")
 	flag.StringVar(&cfg.DatasetSidecarImage, "dataset-sidecar-image", "python:3.12-slim", "image for the dataset-signing sidecar container")
+	stripFinalizers := flag.Bool("strip-finalizers", false, "remove this project's aibom.io/log-extraction and aibom.io/log-extraction-pod finalizers from every Job and Pod in the cluster, then exit (run by the chart's post-delete hook)")
 	flag.Parse()
+
+	if *stripFinalizers {
+		os.Exit(runStripFinalizers())
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -116,6 +121,25 @@ func main() {
 		log.Fatalf("shutdown error: %v", err)
 	}
 	log.Println("server stopped")
+}
+
+// runStripFinalizers is the one-shot mode behind the chart's post-delete hook
+// (#104). Returns the process exit code.
+func runStripFinalizers() int {
+	clientset, err := buildClientset()
+	if err != nil {
+		log.Printf("cannot build Kubernetes clientset: %v", err)
+		return 1
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+	jobs, pods, err := watcher.StripAllFinalizers(ctx, clientset)
+	log.Printf("removed finalizers from %d job(s) and %d pod(s)", jobs, pods)
+	if err != nil {
+		log.Printf("finalizer cleanup incomplete: %v", err)
+		return 1
+	}
+	return 0
 }
 
 func buildClientset() (*kubernetes.Clientset, error) {
