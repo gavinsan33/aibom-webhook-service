@@ -735,15 +735,30 @@ func (w *Watcher) createDataConfigMap(ctx context.Context, namespace, configMapN
 }
 
 // mergeDatasets combines multiple dataset JSON strings into one.
+//
+// Datasets are deduped by (dataset_name, source), the same key
+// runtime_detector.py uses when its processes merge into one file, so N pods
+// loading the same dataset (a JobSet, a torchrun job) produce one entry, not N.
+//
+// runtime_info is first-pod-wins per key, except the git_* keys: those are one
+// observation of one checkout, so the whole group comes from the first pod
+// that reported any of it. Per-key merging could otherwise combine one pod's
+// commit with another's branch or dirty flag (#107).
 func mergeDatasets(datasets []string) string {
 	type datasetFile struct {
 		Datasets    []json.RawMessage      `json:"datasets,omitempty"`
 		RuntimeInfo map[string]interface{} `json:"runtime_info,omitempty"`
 	}
+	type datasetKey struct {
+		Name   string `json:"dataset_name"`
+		Source string `json:"source"`
+	}
 
 	merged := datasetFile{
 		RuntimeInfo: make(map[string]interface{}),
 	}
+	seen := make(map[datasetKey]bool)
+	gitTaken := false
 
 	for _, raw := range datasets {
 		if raw == "" {
@@ -753,11 +768,38 @@ func mergeDatasets(datasets []string) string {
 		if err := json.Unmarshal([]byte(raw), &df); err != nil {
 			continue
 		}
-		merged.Datasets = append(merged.Datasets, df.Datasets...)
-		for k, v := range df.RuntimeInfo {
-			if _, exists := merged.RuntimeInfo[k]; !exists {
-				merged.RuntimeInfo[k] = v
+		for _, entry := range df.Datasets {
+			var key datasetKey
+			if err := json.Unmarshal(entry, &key); err != nil {
+				merged.Datasets = append(merged.Datasets, entry)
+				continue
 			}
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			merged.Datasets = append(merged.Datasets, entry)
+		}
+
+		hasGit := false
+		for k := range df.RuntimeInfo {
+			if strings.HasPrefix(k, "git_") {
+				hasGit = true
+				break
+			}
+		}
+		for k, v := range df.RuntimeInfo {
+			if strings.HasPrefix(k, "git_") {
+				if gitTaken {
+					continue
+				}
+			} else if _, exists := merged.RuntimeInfo[k]; exists {
+				continue
+			}
+			merged.RuntimeInfo[k] = v
+		}
+		if hasGit {
+			gitTaken = true
 		}
 	}
 
