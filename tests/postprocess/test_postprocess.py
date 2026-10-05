@@ -355,6 +355,67 @@ def test_detect_git_clone_from_command_basic():
     }
 
 
+REDACTION_CASES = [
+    ("https://user:ghp_SECRET@github.com/org/repo.git", "https://github.com/org/repo.git"),
+    ("https://ghp_SECRET@github.com/org/repo", "https://github.com/org/repo"),
+    ("https://x-access-token:ghp_SECRET@github.com:8443/org/repo", "https://github.com:8443/org/repo"),
+    ("https://github.com/org/repo.git?private_token=SECRET", "https://github.com/org/repo.git"),
+    ("https://github.com/org/repo.git?token=SECRET#frag", "https://github.com/org/repo.git"),
+    ("ssh://git:SECRET@host/org/repo.git", "ssh://git@host/org/repo.git"),
+    ("ssh://git@host/org/repo.git", "ssh://git@host/org/repo.git"),
+    ("git@github.com:org/repo.git", "git@github.com:org/repo.git"),
+    ("https://github.com/org/repo", "https://github.com/org/repo"),
+    ("/local/path/repo", "/local/path/repo"),
+    (None, None),
+    ("", ""),
+]
+
+
+@pytest.mark.parametrize("url,expected", REDACTION_CASES)
+def test_redact_git_url(url, expected):
+    assert pp.redact_git_url(url) == expected
+
+
+def test_redact_git_url_unparseable_still_drops_userinfo():
+    out = pp.redact_git_url("https://user:SECRET@[::1/org/repo?token=SECRET")
+    assert "SECRET" not in out
+
+
+def test_detect_git_clone_from_command_strips_credentials():
+    tokens = ["git", "clone", "https://x-access-token:ghp_SECRET@github.com/org/repo", "&&", "python", "train.py"]
+    assert pp.detect_git_clone_from_command(tokens) == {"git_repository": "https://github.com/org/repo"}
+
+
+def test_detect_git_provenance_from_runtime_info_strips_credentials():
+    result = pp.detect_git_provenance_from_runtime_info(
+        {"git_commit": "abc1234", "git_repository": "https://u:SECRET@github.com/org/repo"}
+    )
+    assert result["git_repository"] == "https://github.com/org/repo"
+
+
+def test_compile_aibom_redacts_annotation_and_detected_repository():
+    for annotations, provenance in (
+        ({"git-repository": "https://u:SECRET@github.com/org/repo"}, None),
+        ({}, {"git_repository": "https://u:SECRET@github.com/org/repo", "detected_via": "future_tier"}),
+    ):
+        aibom = pp.compile_aibom(
+            discoveries=[], detected_datasets=[], runtime_info={}, annotations=annotations,
+            telemetry=None, detected_model=None, cli_dataset=None,
+            detected_provenance=provenance,
+        )
+        assert aibom["source_code"]["git_repository"] == "https://github.com/org/repo"
+        assert "SECRET" not in json.dumps(aibom)
+
+
+def test_load_datasets_redacts_runtime_info_repository(tmp_path, monkeypatch):
+    (tmp_path / "dataset.json").write_text(json.dumps(
+        {"datasets": [], "runtime_info": {"git_repository": "https://u:SECRET@github.com/org/repo"}}
+    ))
+    monkeypatch.setattr(pp, "INPUT_DIR", str(tmp_path))
+    _, runtime_info = pp.load_datasets()
+    assert runtime_info["git_repository"] == "https://github.com/org/repo"
+
+
 def test_detect_git_clone_from_command_with_checkout_sha():
     tokens = [
         "git", "clone", "https://github.com/org/repo", "&&",
