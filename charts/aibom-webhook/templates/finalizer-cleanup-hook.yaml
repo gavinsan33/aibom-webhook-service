@@ -1,0 +1,95 @@
+{{- if .Values.finalizerCleanup.enabled }}
+# Post-delete hook (#104): `helm uninstall` removes the watcher, and with it
+# the only thing that ever releases the aibom.io/log-extraction (Job) and
+# aibom.io/log-extraction-pod (Pod) finalizers. Any Job or predictor Pod still
+# carrying one would stay Terminating forever, and deleting its namespace
+# would hang. This runs the webhook binary once in --strip-finalizers mode to
+# remove them cluster-wide.
+#
+# post-delete, not pre-delete: while the Deployment still exists the watcher
+# can re-add a finalizer to a Job it sees after the strip. Running after the
+# release's resources are gone means nothing can. That also means the
+# release's own ServiceAccount and ClusterRole no longer exist, so the hook
+# carries its own, and removes them again once it succeeds. If it fails they
+# are left in place for debugging; `before-hook-creation` clears them on the
+# next attempt. Skip with `helm uninstall --no-hooks` if it ever blocks.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aibom-webhook-finalizer-cleanup
+  namespace: {{ include "aibom-webhook.namespace" . }}
+  annotations:
+    "helm.sh/hook": post-delete
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: aibom-webhook-finalizer-cleanup
+  annotations:
+    "helm.sh/hook": post-delete
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+rules:
+  # Cluster-wide list (it has to find objects in namespaces that already
+  # opted out) plus get/patch to drop one finalizer. Nothing else.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list", "get", "patch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["list", "get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: aibom-webhook-finalizer-cleanup
+  annotations:
+    "helm.sh/hook": post-delete
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: aibom-webhook-finalizer-cleanup
+subjects:
+  - kind: ServiceAccount
+    name: aibom-webhook-finalizer-cleanup
+    namespace: {{ include "aibom-webhook.namespace" . }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: aibom-webhook-finalizer-cleanup
+  namespace: {{ include "aibom-webhook.namespace" . }}
+  annotations:
+    "helm.sh/hook": post-delete
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        app: aibom-webhook-finalizer-cleanup
+    spec:
+      serviceAccountName: aibom-webhook-finalizer-cleanup
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: cleanup
+          image: "{{ .Values.image.webhook.repository }}:{{ .Values.image.webhook.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --strip-finalizers
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+{{- end }}

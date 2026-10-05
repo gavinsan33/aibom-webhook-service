@@ -83,6 +83,15 @@ build:
 watcher:
   enabled: true
 
+# Post-delete hook that strips the watcher's aibom.io/log-extraction and
+# aibom.io/log-extraction-pod finalizers from every Job and Pod cluster-wide
+# on `helm uninstall`, so nothing is left Terminating forever (#104). Needs
+# cluster-wide list/patch on Jobs and Pods, granted only to the hook's own
+# short-lived ServiceAccount. Disable if the installing identity can't create
+# ClusterRoles, or run `helm uninstall --no-hooks`.
+finalizerCleanup:
+  enabled: true
+
 # Prometheus/Thanos endpoint the postprocess Job queries directly for telemetry.
 # Auth (bearer ServiceAccount token) and TLS trust (the service-ca ConfigMap
 # aibom-workload-namespace creates per opted-in namespace, or the system trust
