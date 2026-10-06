@@ -486,13 +486,18 @@ def load_containers():
 # Model detection (ported from coldpress/model_detector.py)
 # ---------------------------------------------------------------------------
 
+# A name segment ends where the next character isn't alphanumeric. Not `\b`:
+# underscore is a word character, so `\b` would reject `fp8_e4m3`.
+_END = r"(?![A-Za-z0-9])"
+
+# Matched case-insensitively, first match wins -- so the more specific
+# patterns (GPTQ with its bit width, GGUF block types) precede the generic ones.
 _QUANT_PATTERNS = [
     (r"GPTQ[_-]Int8", "gptq", 8),
     (r"GPTQ[_-]Int4", "gptq", 4),
     (r"gptq[_-]4bit", "gptq", 4),
     (r"GPTQ", "gptq", 4),
-    (r"[_-]AWQ\b", "awq", 4),
-    (r"[_-]awq\b", "awq", 4),
+    (r"[_-]AWQ" + _END, "awq", 4),
     (r"AQLM[_-](\d+)Bit", "aqlm", None),
     (r"AQLM", "aqlm", 2),
     (r"EXL2", "exl2", None),
@@ -500,29 +505,31 @@ _QUANT_PATTERNS = [
     (r"SqueezeLLM", "squeezellm", 4),
     (r"HQQ[_-](\d+)bit", "hqq", None),
     (r"HQQ", "hqq", 4),
-    (r"QuIP", "quip", 2),
+    (r"(?<![A-Za-z])QuIP", "quip", 2),
     (r"EETQ", "eetq", 8),
     (r"AutoRound", "autoround", 4),
-    (r"[_-]NVFP4\b", "fp4", 4),
-    (r"[_-]MXFP4\b", "fp4", 4),
-    (r"[_-]FP4\b", "fp4", 4),
-    (r"[_-]FP8\b", "fp8", 8),
-    (r"[_-]fp8\b", "fp8", 8),
+    (r"[_-]NVFP4" + _END, "fp4", 4),
+    (r"[_-]MXFP4" + _END, "fp4", 4),
+    (r"[_-]FP4" + _END, "fp4", 4),
+    (r"[_-]FP8" + _END, "fp8", 8),
     (r"bnb[_-]4bit", "bitsandbytes", 4),
     (r"bnb[_-]8bit", "bitsandbytes", 8),
-    (r"[_-]NF4\b", "bitsandbytes", 4),
-    (r"[_-]nf4\b", "bitsandbytes", 4),
-    (r"[_-]INT4\b", "int4", 4),
-    (r"[_-]int4\b", "int4", 4),
-    (r"[_-]INT8\b", "int8", 8),
-    (r"[_-]int8\b", "int8", 8),
-    (r"[_-]Marlin\b", "marlin", 4),
-    (r"[_-]marlin\b", "marlin", 4),
+    (r"[_-]NF4" + _END, "bitsandbytes", 4),
+    (r"[_-]INT4" + _END, "int4", 4),
+    (r"[_-]INT8" + _END, "int8", 8),
+    (r"[_-]Marlin" + _END, "marlin", 4),
+    # llm-compressor / compressed-tensors naming (e.g. RedHatAI's
+    # `...-quantized.w4a16`): the bits are the weight bits.
+    (r"[._-]W(\d+)A\d+" + _END, "compressed-tensors", None),
+    # llama.cpp block types: Q4_K_M, Q8_0, IQ3_XS, ...
+    (r"(?<![A-Za-z0-9])I?Q(\d)_(?:K(?:_[SML])?|[01]|XXS|XS|NL)" + _END, "gguf", None),
     (r"GGUF", "gguf", None),
     (r"GGML", "ggml", None),
 ]
 
-_COMPILED_QUANT_PATTERNS = [(re.compile(p), method, bits) for p, method, bits in _QUANT_PATTERNS]
+_COMPILED_QUANT_PATTERNS = [
+    (re.compile(p, re.IGNORECASE), method, bits) for p, method, bits in _QUANT_PATTERNS
+]
 
 
 def detect_quantization_from_name(model_name):
@@ -856,6 +863,9 @@ def _parallelization_strategy_from_device_map(device_map):
     return "model_parallel"
 
 
+_HF_URI_RE = re.compile(r"^([^/@:]+(?:/[^/@:]+)?)(?:[@:]([^/]+))?(?:/.*)?$")
+
+
 def _parse_storage_uri(uri):
     """Split a scheme-aware storageUri into (name, revision, declared_via),
     or None for schemes that only get the generic last-segment treatment.
@@ -868,10 +878,10 @@ def _parse_storage_uri(uri):
     if not uri:
         return None
     if uri.startswith("hf://"):
-        ref = uri[len("hf://"):].strip("/")
-        name, _, revision = ref.partition(":")
-        if name:
-            return name, revision or None, "hf_uri"
+        # hf://org/model[:rev | @rev][/subpath] -- only org/model is the repo id.
+        m = _HF_URI_RE.match(uri[len("hf://"):].strip("/"))
+        if m:
+            return m.group(1), m.group(2), "hf_uri"
     elif uri.startswith("oci://"):
         ref = uri[len("oci://"):]
         ref = ref.split("@", 1)[0]

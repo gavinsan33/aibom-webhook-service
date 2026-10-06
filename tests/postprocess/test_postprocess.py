@@ -2278,3 +2278,43 @@ def test_compile_aibom_memory_is_gib_and_network_is_decimal_mbps():
     assert metrics["memory_usage"]["avg"] == 2
     assert metrics["network_receive"]["unit"] == "Mbps"
     assert metrics["network_receive"]["avg"] == 1  # 125 kB/s * 8 = 1 Mbit/s
+
+
+# ---------------------------------------------------------------------------
+# Quantization names, hf:// URIs (#108)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "name, method, bits",
+    [
+        ("Qwen2-7B-Instruct-gptq-int4", "gptq", 4),
+        ("Qwen2-7B-Instruct-GPTQ-Int8", "gptq", 8),
+        ("llama-3-8b.Q4_K_M.gguf", "gguf", 4),
+        ("llama-3-8b-Q8_0.gguf", "gguf", 8),
+        ("llama-3-8b-IQ3_XS.gguf", "gguf", 3),
+        ("model.gguf", "gguf", None),
+        ("Llama-3.1-8B-fp8_e4m3", "fp8", 8),
+        ("Meta-Llama-3.1-8B-Instruct-quantized.w4a16", "compressed-tensors", 4),
+        ("Meta-Llama-3.1-8B-Instruct-quantized.w8a8", "compressed-tensors", 8),
+        ("Llama-3.1-8B-Instruct-FP8-dynamic", "fp8", 8),
+        ("Llama-3-8B-AWQ", "awq", 4),
+        ("Llama-3-8B-AWQ-INT4", "awq", 4),
+    ],
+)
+def test_quantization_name_variants(name, method, bits):
+    result = pp.detect_quantization_from_name(name)
+    assert result["quantization_method"] == method
+    assert result.get("quantization_bits") == bits
+
+
+@pytest.mark.parametrize("name", ["Llama-3-8B", "Qwen2.5-7B-Instruct", "Equipment-Model", "Q-learning-8B"])
+def test_quantization_name_no_false_positives(name):
+    assert pp.detect_quantization_from_name(name) is None
+
+
+def test_hf_uri_subpath_and_revision_forms():
+    assert pp._parse_storage_uri("hf://org/model/sub/dir") == ("org/model", None, "hf_uri")
+    assert pp._parse_storage_uri("hf://org/model@main") == ("org/model", "main", "hf_uri")
+    assert pp._parse_storage_uri("hf://org/model:abc123") == ("org/model", "abc123", "hf_uri")
+    assert pp._parse_storage_uri("hf://org/model@v1/sub") == ("org/model", "v1", "hf_uri")
