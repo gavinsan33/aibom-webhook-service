@@ -18,7 +18,9 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 func enabledNamespace(name string) *corev1.Namespace {
@@ -1741,6 +1743,131 @@ func TestJobResult(t *testing.T) {
 		if got := jobResult(tc.job); got != tc.want {
 			t.Errorf("%s: jobResult = %q, want %q", name, got, tc.want)
 		}
+	}
+}
+
+func failedPostprocessFixtures(jobName, namespace string) (*batchv1.Job, *corev1.ConfigMap) {
+	ppJob, _, dataConfigMap := newAIBOMPostprocessFixtures(jobName, namespace)
+	ppJob.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue}}
+	return ppJob, dataConfigMap
+}
+
+func TestCollectAIBOM_KeepsFailedPostprocessJobAndConfigMap(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	ppJob, dataConfigMap := failedPostprocessFixtures("train-job", "test-ns")
+	identityName := aibomdata.WorkloadIdentityName("train-job")
+	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: identityName, Namespace: "test-ns"}}
+
+	client := fake.NewSimpleClientset(ns, ppJob, dataConfigMap, sa)
+	w := New(client, Config{PostprocessImage: "aibom-postprocess:latest"})
+	startWatcher(t, w)
+
+	w.onJobEvent(ppJob)
+
+	got, err := client.BatchV1().Jobs("test-ns").Get(context.TODO(), "train-job-aibom-postprocess", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("failed postprocess job must be kept for inspection, got err=%v", err)
+	}
+	if got.Annotations[AnnotationAIBOMCollected] == "" {
+		t.Error("kept job must still be marked collected so a resync doesn't collect it again")
+	}
+	if _, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), "train-job-aibom-postprocess-data", metav1.GetOptions{}); err != nil {
+		t.Errorf("data configmap must be kept so the run can be retried by hand, got err=%v", err)
+	}
+	if _, err := client.CoreV1().ServiceAccounts("test-ns").Get(context.TODO(), identityName, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("workload identity should still be cleaned up, got err=%v", err)
+	}
+
+	// A resync must not collect it a second time.
+	w.onJobEvent(got)
+	if _, err := client.BatchV1().Jobs("test-ns").Get(context.TODO(), "train-job-aibom-postprocess", metav1.GetOptions{}); err != nil {
+		t.Errorf("kept job disappeared on resync: %v", err)
+	}
+}
+
+func TestCreatePostprocessJob_SetsTTLAndOwnsConfigMap(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	job := completedJob("train-job", "test-ns")
+	pod := instrumentedPod("train-job", "test-ns")
+	client := fake.NewSimpleClientset(ns, job, pod)
+	// The fake API server assigns no UIDs, so give the Job one on create.
+	client.PrependReactor("create", "jobs", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		obj := action.(k8stesting.CreateAction).GetObject().(*batchv1.Job)
+		obj.UID = "pp-uid"
+		return false, obj, nil
+	})
+	w := New(client, Config{PostprocessImage: "aibom-postprocess:latest"})
+
+	if err := w.createPostprocessJob(context.TODO(), job); err != nil {
+		t.Fatalf("createPostprocessJob: %v", err)
+	}
+
+	pp, err := client.BatchV1().Jobs("test-ns").Get(context.TODO(), "train-job-aibom-postprocess", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get postprocess job: %v", err)
+	}
+	if pp.Spec.TTLSecondsAfterFinished == nil || *pp.Spec.TTLSecondsAfterFinished != failedPostprocessTTLSeconds {
+		t.Errorf("TTLSecondsAfterFinished = %v, want %d", pp.Spec.TTLSecondsAfterFinished, failedPostprocessTTLSeconds)
+	}
+	cm, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), aibomdata.ConfigMapName("train-job"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get data configmap: %v", err)
+	}
+	if len(cm.OwnerReferences) != 1 || cm.OwnerReferences[0].Kind != "Job" ||
+		cm.OwnerReferences[0].Name != "train-job-aibom-postprocess" || cm.OwnerReferences[0].UID != "pp-uid" {
+		t.Errorf("data configmap should be owned by the postprocess job, got %+v", cm.OwnerReferences)
+	}
+}
+
+func TestCreatePostprocessJob_ReplacesStaleFailedPostprocessJob(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	job := completedJob("train-job", "test-ns")
+	pod := instrumentedPod("train-job", "test-ns")
+	stale, staleCM := failedPostprocessFixtures("train-job", "test-ns")
+	staleCM.Data = map[string]string{"annotations.json": "stale"}
+	client := fake.NewSimpleClientset(ns, job, pod, stale, staleCM)
+	w := New(client, Config{PostprocessImage: "aibom-postprocess:latest"})
+
+	if err := w.createPostprocessJob(context.TODO(), job); err != nil {
+		t.Fatalf("createPostprocessJob: %v", err)
+	}
+
+	pp, err := client.BatchV1().Jobs("test-ns").Get(context.TODO(), "train-job-aibom-postprocess", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get postprocess job: %v", err)
+	}
+	if jobResult(pp) != "" {
+		t.Errorf("the failed leftover should have been replaced by a fresh job, got conditions %+v", pp.Status.Conditions)
+	}
+	cm, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), aibomdata.ConfigMapName("train-job"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get data configmap: %v", err)
+	}
+	if cm.Data["annotations.json"] == "stale" {
+		t.Error("data configmap still holds the previous run's data")
+	}
+}
+
+func TestCreatePostprocessJob_LeavesRunningPostprocessJobAlone(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	job := completedJob("train-job", "test-ns")
+	pod := instrumentedPod("train-job", "test-ns")
+	running, _, _ := newAIBOMPostprocessFixtures("train-job", "test-ns")
+	running.Status.Conditions = nil
+	running.Annotations = map[string]string{"marker": "original"}
+	client := fake.NewSimpleClientset(ns, job, pod, running)
+	w := New(client, Config{PostprocessImage: "aibom-postprocess:latest"})
+
+	if err := w.createPostprocessJob(context.TODO(), job); err != nil {
+		t.Fatalf("createPostprocessJob: %v", err)
+	}
+
+	pp, err := client.BatchV1().Jobs("test-ns").Get(context.TODO(), "train-job-aibom-postprocess", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get postprocess job: %v", err)
+	}
+	if pp.Annotations["marker"] != "original" {
+		t.Error("an in-flight postprocess job must not be deleted and recreated")
 	}
 }
 
