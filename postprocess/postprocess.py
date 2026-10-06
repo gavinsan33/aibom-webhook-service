@@ -579,6 +579,201 @@ def _parse_json_or_kv(val):
     return result or None
 
 
+# ---------------------------------------------------------------------------
+# Command tokenizing and scoping
+#
+# Every detector below works on a flat token list, but a shell-wrapped
+# command line is usually several commands (`pip install trl && trl sft ...`),
+# so each detector first narrows to the tokens of the one invocation it cares
+# about. Scanning the whole script instead matched "vllm" in `trl[vllm]`,
+# read pip's `-q` as vLLM's `--quantization`, and took `pip install deepspeed`
+# for a DeepSpeed launch.
+# ---------------------------------------------------------------------------
+
+_SHELLS = {"sh", "bash", "zsh", "dash", "ash"}
+_SEPARATOR_CHARS = frozenset(";&|")
+_UNEXPANDED_VAR_RE = re.compile(r"\$[{(A-Za-z_]")
+_NUMBER_RE = re.compile(r"^-\d+(\.\d+)?$")
+_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_COMMAND_PREFIXES = {"exec", "nohup", "env", "time", "sudo", "command"}
+_PACKAGE_MANAGERS = {
+    "pip", "pip3", "conda", "mamba", "micromamba", "apt", "apt-get", "apk",
+    "yum", "dnf", "poetry",
+}
+# Commands whose arguments are never a training/serving invocation, so a flag
+# that happens to look like one (`echo --fsdp`) is ignored.
+_NON_TRAINING_COMMANDS = {
+    "echo", "cd", "export", "mkdir", "cp", "mv", "ln", "rm", "ls", "cat",
+    "chmod", "tar", "unzip", "git", "curl", "wget", "printf", "sleep",
+}
+_BOOL_WORDS = {"true", "false", "1", "0", "yes", "no"}
+
+
+def _has_unexpanded_var(value):
+    """True for a `$VAR`/`${VAR}`/`$(VAR)` that was never expanded -- the
+    literal text isn't a model name or a number."""
+    return bool(_UNEXPANDED_VAR_RE.search(value))
+
+
+def _is_flag_token(tok):
+    return tok.startswith("-") and tok != "-" and not _NUMBER_RE.match(tok)
+
+
+def _split_flag(tok, sep):
+    """Split `--key=value` into (key, value-or-None), writing the key's
+    internal `-`/`_` as `sep` so `--max-model-len` and `--max_model_len` look
+    up the same entry. Short flags (`-tp`) are left as they are."""
+    key, eq, val = tok.partition("=")
+    if key.startswith("--"):
+        key = "--" + key[2:].replace("-", "_").replace("_", sep)
+    return key, (val if eq else None)
+
+
+def _int_or_float(val):
+    """`3` -> 3, `0.5` -> 0.5 (e.g. --num_train_epochs)."""
+    f = float(val)
+    if not math.isfinite(f):
+        raise ValueError(val)
+    return int(f) if f.is_integer() else f
+
+
+def _to_bool(val):
+    if isinstance(val, bool):
+        return val
+    return str(val).strip().lower() in ("1", "true", "yes")
+
+
+def _newlines_to_separators(script):
+    """Turn each unquoted newline into `;`, the way a shell treats it. shlex
+    would otherwise read it as whitespace and run two commands together."""
+    out = []
+    quote = None
+    i = 0
+    while i < len(script):
+        ch = script[i]
+        if ch == "\\" and quote != "'" and i + 1 < len(script):
+            out.append(script[i:i + 2])
+            i += 2
+            continue
+        if quote:
+            if ch == quote:
+                quote = None
+            out.append(ch)
+        elif ch in "'\"":
+            quote = ch
+            out.append(ch)
+        elif ch == "\n":
+            out.append(" ; ")
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _shell_script(command):
+    """The script text of `sh -c "..."`, or None if `command` isn't a shell
+    wrapper. Accepts any flag cluster containing `c` (`-c`, `-lc`, `-euc`,
+    `-xc`) after other flags (`bash -l -c`, `bash -o pipefail -c`)."""
+    if len(command) < 3 or os.path.basename(command[0]) not in _SHELLS:
+        return None
+    i = 1
+    while i < len(command) - 1:
+        tok = command[i]
+        if tok in ("-o", "+o"):
+            i += 2
+            continue
+        if not tok.startswith(("-", "+")):
+            return None  # a script file, not an inline script
+        if not tok.startswith("--") and "c" in tok[1:]:
+            return " ".join(command[i + 1:])
+        i += 1
+    return None
+
+
+def _flatten_container_command(container):
+    """Expand `sh -c "..."`/`bash -c "..."` wrappers into a flat token list.
+
+    Jobs that need to `pip install` before running a training CLI (e.g. trl)
+    wrap everything in a single shell string, which would otherwise hide the
+    CLI flags from the per-token detectors below. Command separators
+    (`&&`, `||`, `;`, `|`, `&`, and unquoted newlines) come out as their own
+    tokens; `_split_segments` cuts on them.
+    """
+    command = (container.get("command") or []) + (container.get("args") or [])
+    script = _shell_script(command)
+    if script is None:
+        return command
+    # Join shell line-continuations (`\` immediately followed by a
+    # newline) before tokenizing -- shlex doesn't do this on its own,
+    # and without it a backslash-newline survives as a spurious literal
+    # token that can land right after a bare boolean flag (e.g.
+    # `--use_peft \<newline>--lora_r`) and get misread as its value.
+    script = _newlines_to_separators(re.sub(r"\\\n", " ", script))
+    try:
+        lex = shlex.shlex(script, posix=True, punctuation_chars=";&|")
+        lex.whitespace_split = True
+        lex.commenters = ""
+        return list(lex)
+    except ValueError:
+        return command
+
+
+def _split_segments(tokens):
+    """Cut a flat token list into one list per command."""
+    segments = []
+    current = []
+    for tok in tokens:
+        if tok and set(tok) <= _SEPARATOR_CHARS:
+            if current:
+                segments.append(current)
+                current = []
+        else:
+            current.append(tok)
+    if current:
+        segments.append(current)
+    return segments
+
+
+def _command_start(segment):
+    """Index of the command word, past `FOO=bar` assignments and wrappers
+    like `exec`/`nohup`/`env`."""
+    i = 0
+    while i < len(segment) and (
+        _ASSIGNMENT_RE.match(segment[i]) or segment[i] in _COMMAND_PREFIXES
+    ):
+        i += 1
+    return i
+
+
+def _is_package_install(segment):
+    start = _command_start(segment)
+    if start >= len(segment):
+        return False
+    word = os.path.basename(segment[start])
+    rest = segment[start + 1:start + 3]
+    if word in _PACKAGE_MANAGERS:
+        return True
+    if word == "uv":
+        return bool(rest) and rest[0] in ("pip", "add", "sync")
+    return word.startswith("python") and rest[:2] == ["-m", "pip"]
+
+
+def _invocation_segments(tokens):
+    """Segments that might run a workload: not package installs, not file
+    shuffling."""
+    for seg in _split_segments(tokens or []):
+        if _is_package_install(seg):
+            continue
+        start = _command_start(seg)
+        if start < len(seg) and os.path.basename(seg[start]) in _NON_TRAINING_COMMANDS:
+            continue
+        yield seg
+
+
+# ---------------------------------------------------------------------------
+# vLLM
+# ---------------------------------------------------------------------------
+
 _VLLM_ARG_MAP = {
     "--model": ("model_name", str),
     "--served-model-name": ("served_model_name", str),
@@ -609,44 +804,64 @@ _VLLM_ARG_MAP = {
 _BOOL_FLAGS = {k for k, (_, t) in _VLLM_ARG_MAP.items() if t is bool}
 
 
-def detect_vllm_from_command(command):
-    if not command:
-        return None
-    joined = " ".join(command)
-    if "vllm" not in joined and "vllm.entrypoints" not in joined:
-        return None
+def _vllm_server_args(tokens):
+    """The arguments of the first vLLM *server* invocation (`vllm serve ...`
+    or `python -m vllm.entrypoints...api_server`), or None. `vllm bench ...`
+    and friends are clients, and a bare `vllm` inside `pip install vllm` or
+    `trl[vllm]` isn't an invocation at all."""
+    for seg in _invocation_segments(tokens):
+        for i, tok in enumerate(seg):
+            if os.path.basename(tok) == "vllm" and seg[i + 1:i + 2] == ["serve"]:
+                return seg[i + 2:]
+            if tok.startswith("vllm.entrypoints.") and "api_server" in tok:
+                return seg[i + 1:]
+    return None
 
+
+def _parse_vllm_args(args):
     result = {"serving_engine": "vllm"}
-
-    for i, arg in enumerate(command):
-        if "=" in arg:
-            key, _, val = arg.partition("=")
-        else:
-            key = arg
-            val = None
-
-        if key in _BOOL_FLAGS:
-            result[_VLLM_ARG_MAP[key][0]] = True
+    positional = None
+    # `vllm serve <model>`: the model is the first positional, which can only
+    # be told apart from an unknown flag's value while every flag so far was
+    # one we know the arity of.
+    expect_positional = True
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        i += 1
+        if not _is_flag_token(tok):
+            if expect_positional and positional is None:
+                positional = tok
+            expect_positional = False
             continue
 
-        if key not in _VLLM_ARG_MAP:
+        key, val = _split_flag(tok, "-")
+        negated = False
+        if key.startswith("--no-") and "--" + key[5:] in _BOOL_FLAGS:
+            key, negated = "--" + key[5:], True
+        spec = _VLLM_ARG_MAP.get(key)
+        if spec is None:
+            expect_positional = False
             continue
 
-        name, conv = _VLLM_ARG_MAP[key]
-
-        if val is None and i + 1 < len(command):
-            val = command[i + 1]
-
-        if val is None:
+        name, conv = spec
+        if conv is bool:
+            result[name] = not negated and (True if val is None else _to_bool(val))
             continue
-
+        if val is None and i < len(args) and not _is_flag_token(args[i]):
+            val = args[i]
+            i += 1
+        if val is None or _has_unexpanded_var(val):
+            continue
         try:
             converted = conv(val)
         except (ValueError, TypeError):
             converted = val
-
         if converted is not None:
             result[name] = converted
+
+    if "model_name" not in result and positional and not _has_unexpanded_var(positional):
+        result["model_name"] = positional
 
     if "quantization" not in result and "model_name" in result:
         quant = detect_quantization_from_name(result["model_name"])
@@ -665,77 +880,126 @@ def detect_vllm_from_command(command):
             spec_config["num_speculative_tokens"] = result.pop("num_speculative_tokens")
         result["speculative_config"] = spec_config
 
-    return result if len(result) > 1 else None
+    return result
 
 
-def _to_bool(val):
-    if isinstance(val, bool):
-        return val
-    return str(val).strip().lower() in ("1", "true", "yes")
+def detect_vllm_from_command(command):
+    args = _vllm_server_args(command)
+    return None if args is None else _parse_vllm_args(args)
 
 
+_VLLM_IMAGE_RE = re.compile(r"(?:^|/)vllm-openai$|(?:^|/)vllm/[^/]+$")
+
+
+def _is_vllm_image(image):
+    if not image:
+        return False
+    repo = image.split("@", 1)[0]
+    last = repo.rsplit("/", 1)[-1]
+    if ":" in last:
+        repo = repo[:len(repo) - len(last)] + last.split(":", 1)[0]
+    return bool(_VLLM_IMAGE_RE.search(repo))
+
+
+def _detect_vllm_from_entrypoint_args(container):
+    """The vllm-openai image sets `vllm serve` / the api_server module as its
+    ENTRYPOINT, so a spec that only sets `args` (`["--model", "x", ...]`) has
+    no "vllm" token anywhere. Only applies when `command` is unset, i.e. the
+    image's own ENTRYPOINT runs."""
+    if container.get("command") or not _is_vllm_image(container.get("image")):
+        return None
+    args = list(container.get("args") or [])
+    if args[:1] == ["serve"]:
+        args = args[1:]
+    return _parse_vllm_args(args) if args else None
+
+
+# ---------------------------------------------------------------------------
+# trl
+# ---------------------------------------------------------------------------
+
+# Hyphenated spellings are normalized to these underscore forms first.
 _TRL_ARG_MAP = {
     "--model_name_or_path": ("model_name", str),
-    "--model-name-or-path": ("model_name", str),
-    "--use_peft": ("use_peft", _to_bool),
-    "--use-peft": ("use_peft", _to_bool),
+    "--use_peft": ("use_peft", bool),
     "--lora_r": ("lora_rank", int),
-    "--lora-r": ("lora_rank", int),
     "--lora_alpha": ("lora_alpha", int),
-    "--lora-alpha": ("lora_alpha", int),
-    "--use_dora": ("use_dora", _to_bool),
-    "--use-dora": ("use_dora", _to_bool),
-    "--use_rslora": ("use_rslora", _to_bool),
-    "--use-rslora": ("use_rslora", _to_bool),
-    "--load_in_4bit": ("load_in_4bit", _to_bool),
-    "--load-in-4bit": ("load_in_4bit", _to_bool),
-    "--load_in_8bit": ("load_in_8bit", _to_bool),
-    "--load-in-8bit": ("load_in_8bit", _to_bool),
+    "--use_dora": ("use_dora", bool),
+    "--use_rslora": ("use_rslora", bool),
+    "--load_in_4bit": ("load_in_4bit", bool),
+    "--load_in_8bit": ("load_in_8bit", bool),
     "--learning_rate": ("learning_rate", float),
-    "--learning-rate": ("learning_rate", float),
     "--per_device_train_batch_size": ("batch_size", int),
-    "--per-device-train-batch-size": ("batch_size", int),
-    "--num_train_epochs": ("epochs", int),
-    "--num-train-epochs": ("epochs", int),
+    "--num_train_epochs": ("epochs", _int_or_float),
     "--seed": ("random_seed", int),
 }
+
+_TRL_BOOL_FLAGS = {k for k, (_, t) in _TRL_ARG_MAP.items() if t is bool}
+_TRL_SUBCOMMAND_RE = re.compile(r"^[a-z][a-z_]*$")
+
+
+def _trl_args(tokens):
+    """The arguments of the first `trl <subcommand>` / `python -m trl...`
+    invocation, or None."""
+    for seg in _invocation_segments(tokens):
+        for i, tok in enumerate(seg):
+            if (
+                os.path.basename(tok) == "trl"
+                and i + 1 < len(seg)
+                and _TRL_SUBCOMMAND_RE.match(seg[i + 1])
+            ):
+                return seg[i + 2:]
+            if i > 0 and seg[i - 1] == "-m" and (tok == "trl" or tok.startswith("trl.")):
+                return seg[i + 1:]
+    return None
 
 
 def detect_trl_from_command(command):
     """Detect model/LoRA config from a `trl sft`/`trl dpo`-style CLI invocation."""
-    if not command or not re.search(r"\btrl\b", " ".join(command)):
+    args = _trl_args(command)
+    if args is None:
         return None
 
     result = {"training_framework": "trl"}
 
-    for i, arg in enumerate(command):
-        if arg.startswith("--") and "=" in arg:
-            key, _, val = arg.partition("=")
-        else:
-            key = arg
-            val = None
-
-        if key not in _TRL_ARG_MAP:
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        i += 1
+        if not tok.startswith("--"):
+            continue
+        key, val = _split_flag(tok, "_")
+        negated = False
+        if key.startswith("--no_") and "--" + key[5:] in _TRL_BOOL_FLAGS:
+            key, negated = "--" + key[5:], True
+        spec = _TRL_ARG_MAP.get(key)
+        if spec is None:
             continue
 
-        name, conv = _TRL_ARG_MAP[key]
-
-        if val is None and i + 1 < len(command) and not command[i + 1].startswith("--"):
-            val = command[i + 1]
-
-        if val is None:
+        name, conv = spec
+        if conv is bool:
+            # `--use_peft`, `--use_peft true` and `--use_peft=false` all occur.
+            if val is None and i < len(args) and args[i].lower() in _BOOL_WORDS:
+                val = args[i]
+                i += 1
+            result[name] = not negated and (True if val is None else _to_bool(val))
             continue
-
+        if val is None and i < len(args) and not _is_flag_token(args[i]):
+            val = args[i]
+            i += 1
+        if val is None or _has_unexpanded_var(val):
+            continue
         try:
             converted = conv(val)
         except (ValueError, TypeError):
             converted = val
-
         result[name] = converted
 
     use_dora = result.pop("use_dora", False)
     use_rslora = result.pop("use_rslora", False)
-    quantized = result.pop("load_in_4bit", False) or result.pop("load_in_8bit", False)
+    load_in_4bit = result.pop("load_in_4bit", False)
+    load_in_8bit = result.pop("load_in_8bit", False)
+    quantized = load_in_4bit or load_in_8bit
 
     if result.pop("use_peft", False):
         if "lora_rank" not in result:
@@ -749,36 +1013,19 @@ def detect_trl_from_command(command):
         else:
             result["adaptation_method"] = "lora"
 
-    return result if len(result) > 1 else None
+    return result
 
 
-def _flatten_container_command(container):
-    """Expand `sh -c "..."`/`bash -c "..."` wrappers into a flat token list.
+# ---------------------------------------------------------------------------
+# Parallelization
+# ---------------------------------------------------------------------------
 
-    Jobs that need to `pip install` before running a training CLI (e.g. trl)
-    wrap everything in a single shell string, which would otherwise hide the
-    CLI flags from the per-token detectors below.
-    """
-    command = (container.get("command") or []) + (container.get("args") or [])
-    if (
-        len(command) >= 3
-        and os.path.basename(command[0]) in ("sh", "bash")
-        and command[1] in ("-c", "-lc", "-ec", "-cx")
-    ):
-        # Join shell line-continuations (`\` immediately followed by a
-        # newline) before tokenizing -- shlex doesn't do this on its own,
-        # and without it a backslash-newline survives as a spurious literal
-        # token that can land right after a bare boolean flag (e.g.
-        # `--use_peft \<newline>--lora_r`) and get misread as its value.
-        script = re.sub(r"\\\n", " ", " ".join(command[2:]))
-        try:
-            return shlex.split(script)
-        except ValueError:
-            return command
-    return command
-
-
-_LAUNCHERS = {"accelerate", "deepspeed", "torchrun", "mpirun"}
+_LAUNCHERS = {"accelerate", "deepspeed", "torchrun", "mpirun", "mpiexec"}
+_LAUNCHER_MODULES = {
+    "torch.distributed.run": "torchrun",
+    "torch.distributed.launch": "torchrun",
+    "accelerate.commands.launch": "accelerate",
+}
 
 
 def _find_flag_value(tokens, flag_names):
@@ -807,46 +1054,97 @@ _ACCELERATE_CONFIG_STRATEGIES = {
 }
 
 
-def detect_parallelization_from_command(tokens):
-    """Best-effort detection of a distributed-training parallelization
-    strategy, independent of which training tool (trl, a custom script, ...)
-    is being launched. Covers three shapes:
-      - an explicit launcher binary (accelerate/deepspeed/torchrun/mpirun)
-      - a bare --fsdp/--deepspeed flag on the training command itself
-      - accelerate-launch args (--num_processes, --accelerate_config)
-        passed straight through to a CLI like `trl` that spawns
-        `accelerate launch` internally, with no launcher token visible
-    """
-    if not tokens:
+def _launcher_of(segment):
+    """The distributed launcher this command runs (`torchrun ...`,
+    `python -m torch.distributed.run ...`), or None. Only the command word
+    counts: `pip install deepspeed` doesn't launch DeepSpeed."""
+    start = _command_start(segment)
+    if start >= len(segment):
         return None
+    word = os.path.basename(segment[start])
+    if word == "mpiexec":
+        return "mpirun"
+    if word in _LAUNCHERS:
+        return word
+    if word.startswith("python"):
+        for i, tok in enumerate(segment[start + 1:], start + 1):
+            if tok == "-m" and i + 1 < len(segment):
+                return _LAUNCHER_MODULES.get(segment[i + 1])
+    return None
 
-    launcher = next(
-        (os.path.basename(tok) for tok in tokens if os.path.basename(tok) in _LAUNCHERS),
-        None,
+
+def _is_single_process_launch(launcher, tokens):
+    """`torchrun --nproc_per_node=1` / `mpirun -np 1`: a launcher wrapping one
+    process isn't data parallelism."""
+    if launcher == "torchrun":
+        nproc = _find_flag_value(tokens, ("--nproc_per_node",))
+        nnodes = _find_flag_value(tokens, ("--nnodes",)) or "1"
+        return nproc == "1" and nnodes in ("1", "1:1")
+    if launcher == "mpirun":
+        return _find_flag_value(tokens, ("-np", "-n", "--np")) == "1"
+    return False
+
+
+def _underscore_flag(tok):
+    """`--num-processes=4` -> `--num_processes=4`; the value is untouched."""
+    if not tok.startswith("--"):
+        return tok
+    key, eq, val = tok.partition("=")
+    return "--" + key[2:].replace("-", "_") + eq + val
+
+
+def _segment_parallelization(segment):
+    tokens = [_underscore_flag(t) for t in segment]
+    launcher = _launcher_of(segment)
+    has_fsdp = any(t in ("--fsdp", "--use_fsdp") or t.startswith("--fsdp=") for t in tokens)
+    has_deepspeed_flag = any(
+        t in ("--deepspeed", "--use_deepspeed")
+        or t.startswith(("--deepspeed=", "--deepspeed_config_file"))
+        for t in tokens
     )
-    has_fsdp = any(t == "--fsdp" or t.startswith("--fsdp=") for t in tokens)
-    has_deepspeed_flag = any(t == "--deepspeed" or t.startswith("--deepspeed=") for t in tokens)
-    has_multi_gpu = "--multi_gpu" in tokens or "--multi-gpu" in tokens
-    num_processes = _try_int(_find_flag_value(tokens, ("--num_processes", "--num-processes")))
-    accelerate_config = _find_flag_value(tokens, ("--accelerate_config", "--accelerate-config"))
+    has_multi_gpu = "--multi_gpu" in tokens
+    num_processes = _try_int(_find_flag_value(tokens, ("--num_processes",)))
+    config_flags = ("--accelerate_config", "--config_file") if launcher == "accelerate" else (
+        "--accelerate_config",
+    )
+    accelerate_config = _find_flag_value(tokens, config_flags)
     accelerate_config_name = (
         os.path.splitext(os.path.basename(accelerate_config))[0] if accelerate_config else None
     )
 
     if has_fsdp:
-        strategy = "fsdp"
-    elif has_deepspeed_flag or launcher == "deepspeed":
-        strategy = "deepspeed"
-    elif accelerate_config_name in _ACCELERATE_CONFIG_STRATEGIES:
-        strategy = _ACCELERATE_CONFIG_STRATEGIES[accelerate_config_name]
-    elif has_multi_gpu or launcher in ("torchrun", "mpirun"):
-        strategy = "data_parallel"
-    elif num_processes and num_processes > 1:
-        strategy = "data_parallel"
-    else:
-        strategy = None
+        return "fsdp"
+    if has_deepspeed_flag or launcher == "deepspeed":
+        return "deepspeed"
+    if accelerate_config_name in _ACCELERATE_CONFIG_STRATEGIES:
+        return _ACCELERATE_CONFIG_STRATEGIES[accelerate_config_name]
+    if has_multi_gpu:
+        return "data_parallel"
+    if launcher in ("torchrun", "mpirun") and not _is_single_process_launch(launcher, tokens):
+        return "data_parallel"
+    if num_processes and num_processes > 1:
+        return "data_parallel"
+    return None
 
-    return {"parallelization_strategy": strategy} if strategy else None
+
+def detect_parallelization_from_command(tokens):
+    """Best-effort detection of a distributed-training parallelization
+    strategy, independent of which training tool (trl, a custom script, ...)
+    is being launched. Covers three shapes:
+      - an explicit launcher binary (accelerate/deepspeed/torchrun/mpirun) as
+        the command word of its own command
+      - a bare --fsdp/--deepspeed flag on the training command itself
+      - accelerate-launch args (--num_processes, --accelerate_config)
+        passed straight through to a CLI like `trl` that spawns
+        `accelerate launch` internally, with no launcher token visible
+    Each command in a shell script is judged on its own, so a flag or a
+    package name in an unrelated command doesn't count.
+    """
+    for seg in _invocation_segments(tokens):
+        strategy = _segment_parallelization(seg)
+        if strategy:
+            return {"parallelization_strategy": strategy}
+    return None
 
 
 def _parallelization_strategy_from_device_map(device_map):
@@ -966,7 +1264,11 @@ def detect_model_from_containers(containers):
     for container in containers:
         tokens = _flatten_container_command(container)
         if model_result is None:
-            model_result = detect_vllm_from_command(tokens) or detect_trl_from_command(tokens)
+            model_result = (
+                detect_vllm_from_command(tokens)
+                or detect_trl_from_command(tokens)
+                or _detect_vllm_from_entrypoint_args(container)
+            )
         if parallel_result is None:
             parallel_result = detect_parallelization_from_command(tokens)
         if model_result and parallel_result:
