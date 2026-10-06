@@ -198,6 +198,30 @@ def test_capture_training_args_from_argv(monkeypatch):
     assert rd._runtime_info["batch_size"] == 8
 
 
+def test_capture_training_args_accepts_fractional_epochs(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["train.py", "--num_train_epochs", "0.5"])
+    rd._capture_training_args()
+    assert rd._runtime_info["epochs"] == 0.5
+
+
+def test_capture_training_args_bad_value_keeps_later_args(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv", ["train.py", "--num_train_epochs", "$EPOCHS", "--batch_size", "8"]
+    )
+    rd._capture_training_args()
+    assert "epochs" not in rd._runtime_info
+    assert rd._runtime_info["batch_size"] == 8
+
+
+def test_capture_accelerate_config_reads_config_file_flag(tmp_path, monkeypatch):
+    pytest.importorskip("yaml")
+    config_path = tmp_path / "cfg.yaml"
+    config_path.write_text("distributed_type: DEEPSPEED\n")
+    monkeypatch.setattr("sys.argv", ["accelerate", "launch", "--config_file", str(config_path)])
+    rd._capture_accelerate_config()
+    assert rd._runtime_info["parallelization_strategy"] == "deepspeed"
+
+
 def test_capture_accelerate_config_resolves_strategy_from_yaml(tmp_path, monkeypatch):
     pytest.importorskip("yaml")
     config_path = tmp_path / "fsdp_config.yaml"
