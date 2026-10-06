@@ -2593,3 +2593,110 @@ def test_hf_uri_subpath_and_revision_forms():
     assert pp._parse_storage_uri("hf://org/model@main") == ("org/model", "main", "hf_uri")
     assert pp._parse_storage_uri("hf://org/model:abc123") == ("org/model", "abc123", "hf_uri")
     assert pp._parse_storage_uri("hf://org/model@v1/sub") == ("org/model", "v1", "hf_uri")
+
+
+# ---------------------------------------------------------------------------
+# Termination status: retries, restarts, Job outcome (#112)
+# ---------------------------------------------------------------------------
+
+
+def _status_aibom(pod_names, containers):
+    return pp.compile_aibom(
+        discoveries=[{"pod_metadata": {"name": n}} for n in pod_names],
+        detected_datasets=[], runtime_info={}, annotations={}, telemetry=None,
+        containers=containers,
+    )
+
+
+def _container(pod, reason, exit_code, **extra):
+    return {"pod_name": pod, "name": "training", "terminated_reason": reason,
+            "exit_code": exit_code, **extra}
+
+
+def test_retried_job_that_completed_is_reported_completed():
+    containers = [
+        _container("job-a1", "OOMKilled", 137, job_result="Complete"),
+        _container("job-a2", "Error", 1, job_result="Complete"),
+        _container("job-a3", "Completed", 0, job_result="Complete"),
+    ]
+    em = _status_aibom(["job-a1", "job-a2", "job-a3"], containers)["execution_metadata"]
+    assert em["status"] == "Completed"
+
+
+def test_failed_attempts_keep_their_own_detail_and_are_flagged():
+    containers = [
+        _container("job-a1", "OOMKilled", 137, job_result="Complete"),
+        _container("job-a2", "Completed", 0, job_result="Complete"),
+    ]
+    pods = {p["pod_name"]: p for p in _status_aibom(["job-a1", "job-a2"], containers)["execution_metadata"]["pods"]}
+    assert pods["job-a1"]["status"] == "OOMKilled"
+    assert pods["job-a1"]["exit_code"] == 137
+    assert pods["job-a1"]["retried_attempt"] is True
+    assert "retried_attempt" not in pods["job-a2"]
+
+
+def test_failed_job_still_reports_the_failure():
+    containers = [
+        _container("job-a1", "OOMKilled", 137, job_result="Failed"),
+        _container("job-a2", "Error", 1, job_result="Failed"),
+    ]
+    em = _status_aibom(["job-a1", "job-a2"], containers)["execution_metadata"]
+    assert em["status"] == "OOMKilled"
+    assert not any(p.get("retried_attempt") for p in em["pods"])
+
+
+def test_failed_job_with_no_reported_container_failure_is_failed():
+    containers = [_container("job-a1", "Completed", 0, job_result="Failed")]
+    assert _status_aibom(["job-a1"], containers)["execution_metadata"]["status"] == "Failed"
+
+
+def test_only_the_completed_jobs_failed_pods_are_discounted_in_a_jobset():
+    containers = [
+        _container("server-a1", "OOMKilled", 137, job_result="Complete"),
+        _container("server-a2", "Completed", 0, job_result="Complete"),
+        _container("client-a1", "Error", 1, job_result="Failed"),
+    ]
+    em = _status_aibom(["server-a1", "server-a2", "client-a1"], containers)["execution_metadata"]
+    assert em["status"] == "Error"
+
+
+def test_completed_job_with_no_terminated_state_is_completed():
+    containers = [{"pod_name": "job-a1", "name": "training", "job_result": "Complete"}]
+    assert _status_aibom(["job-a1"], containers)["execution_metadata"]["status"] == "Completed"
+
+
+def test_bare_pod_without_job_result_is_unchanged():
+    containers = [_container("pod-1", "OOMKilled", 137)]
+    em = _status_aibom(["pod-1"], containers)["execution_metadata"]
+    assert em["status"] == "OOMKilled"
+    assert "retried_attempt" not in em["pods"][0]
+
+
+def test_restart_history_surfaces_an_earlier_oom_kill():
+    containers = [_container(
+        "job-a1", "Completed", 0,
+        restart_count=1, last_terminated_reason="OOMKilled", last_exit_code=137,
+    )]
+    em = _status_aibom(["job-a1"], containers)["execution_metadata"]
+    pod = em["pods"][0]
+    assert pod["status"] == "Completed"  # the final outcome is unchanged
+    assert pod["restart_count"] == 1
+    assert pod["last_termination_reason"] == "OOMKilled"
+    assert pod["last_exit_code"] == 137
+    assert em["status"] == "Completed"
+
+
+def test_restart_info_prefers_oomkilled_and_sums_restarts():
+    containers = [
+        {"pod_name": "p", "name": "a", "restart_count": 2, "last_terminated_reason": "Error", "last_exit_code": 1},
+        {"pod_name": "p", "name": "b", "restart_count": 1, "last_terminated_reason": "OOMKilled", "last_exit_code": 137},
+    ]
+    assert pp.pod_restart_info("p", containers) == {
+        "restart_count": 3, "last_termination_reason": "OOMKilled", "last_exit_code": 137,
+    }
+
+
+def test_restart_info_empty_when_nothing_restarted():
+    assert pp.pod_restart_info("p", [_container("p", "Completed", 0)]) == {}
+    pod = _status_aibom(["p"], [_container("p", "Completed", 0)])["execution_metadata"]["pods"][0]
+    assert "restart_count" not in pod

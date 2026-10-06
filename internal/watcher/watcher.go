@@ -528,6 +528,20 @@ func (w *Watcher) isJobFinished(job *batchv1.Job) bool {
 	return false
 }
 
+// jobResult returns the Job's terminal condition ("Complete" or "Failed"), or
+// "" if it hasn't reached one (still running, or being deleted).
+func jobResult(job *batchv1.Job) string {
+	for _, c := range job.Status.Conditions {
+		if c.Status != corev1.ConditionTrue {
+			continue
+		}
+		if c.Type == batchv1.JobComplete || c.Type == batchv1.JobFailed {
+			return string(c.Type)
+		}
+	}
+	return ""
+}
+
 func podsRequestGPU(pods []corev1.Pod) bool {
 	gpuResource := corev1.ResourceName("nvidia.com/gpu")
 	zero := resource.MustParse("0")
@@ -553,6 +567,14 @@ func (w *Watcher) getInstrumentedPods(job *batchv1.Job) ([]corev1.Pod, error) {
 		return nil, fmt.Errorf("list pods for job %s/%s: %w", job.Namespace, job.Name, err)
 	}
 	return pods.Items, nil
+}
+
+// podJobName is the name of the Job that owns the pod, "" for a bare pod.
+func podJobName(pod *corev1.Pod) string {
+	if name := pod.Labels["batch.kubernetes.io/job-name"]; name != "" {
+		return name
+	}
+	return pod.Labels["job-name"]
 }
 
 // extractDataFromPod reads a pod's contribution to the AIBOM data ConfigMap.
@@ -816,8 +838,10 @@ func mergeDatasets(datasets []string) string {
 
 // buildPostprocessInputs reads the discovery, dataset, and storage data the
 // pods themselves already wrote into the data ConfigMap, and serializes
-// container command/args info for CLI-based model detection.
-func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configMapName string, pods []corev1.Pod) (discoveries, datasets []string, containersJSON, storageJSON string) {
+// container command/args info for CLI-based model detection. jobResults maps a
+// Job name to its terminal condition (see jobResult) so each pod's containers
+// can be tagged with how the Job that owns them ended; nil for a bare pod.
+func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configMapName string, pods []corev1.Pod, jobResults map[string]string) (discoveries, datasets []string, containersJSON, storageJSON string) {
 	dataCM, err := w.clientset.CoreV1().ConfigMaps(namespace).Get(ctx, configMapName, metav1.GetOptions{})
 	if err != nil {
 		if !errors.IsNotFound(err) {
@@ -887,6 +911,19 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 		// a real and common case, not a zero value.
 		MemoryLimitBytes *int64 `json:"memory_limit_bytes,omitempty"`
 		CPULimitMillis   *int64 `json:"cpu_limit_millis,omitempty"`
+		// RestartCount/LastTerminatedReason/LastExitCode come from the
+		// container's previous termination (LastTerminationState). With
+		// restartPolicy OnFailure a container that was OOM-killed and then
+		// restarted successfully has a clean current state, so without these
+		// the kill is invisible (#112). Set only when the container restarted.
+		RestartCount         int32  `json:"restart_count,omitempty"`
+		LastTerminatedReason string `json:"last_terminated_reason,omitempty"`
+		LastExitCode         *int32 `json:"last_exit_code,omitempty"`
+		// JobResult is the terminal condition ("Complete"/"Failed") of the Job
+		// that owns this container's pod, so a failed attempt of a Job that
+		// went on to complete can be told apart from a Job that failed. Empty
+		// for a bare pod, or a Job that hadn't finished (e.g. being deleted).
+		JobResult string `json:"job_result,omitempty"`
 	}
 	var containers []containerInfo
 	for _, pod := range pods {
@@ -899,8 +936,12 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 		terminatedReasons := make(map[string]string, len(pod.Status.ContainerStatuses))
 		exitCodes := make(map[string]int32, len(pod.Status.ContainerStatuses))
 		finishedAts := make(map[string]string, len(pod.Status.ContainerStatuses))
+		restarts := make(map[string]corev1.ContainerStatus, len(pod.Status.ContainerStatuses))
 		for _, cs := range pod.Status.ContainerStatuses {
 			imageIDs[cs.Name] = cs.ImageID
+			if cs.RestartCount > 0 && cs.LastTerminationState.Terminated != nil {
+				restarts[cs.Name] = cs
+			}
 			if cs.State.Terminated != nil {
 				terminatedReasons[cs.Name] = cs.State.Terminated.Reason
 				exitCodes[cs.Name] = cs.State.Terminated.ExitCode
@@ -917,6 +958,14 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 				ImageID: imageIDs[c.Name],
 				Command: c.Command,
 				Args:    c.Args,
+			}
+			ci.JobResult = jobResults[podJobName(&pod)]
+			if cs, ok := restarts[c.Name]; ok {
+				last := cs.LastTerminationState.Terminated
+				lastExit := last.ExitCode
+				ci.RestartCount = cs.RestartCount
+				ci.LastTerminatedReason = last.Reason
+				ci.LastExitCode = &lastExit
 			}
 			if reason, ok := terminatedReasons[c.Name]; ok {
 				ci.TerminatedReason = reason
@@ -944,11 +993,11 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 // data gathered from the given pods. It does not patch AnnotationPostprocess back onto
 // the trigger resource — callers must do that themselves, since the trigger's kind
 // (Job vs Pod) determines which client to patch with.
-func (w *Watcher) createPostprocessJobCore(ctx context.Context, namespace, triggerName string, pods []corev1.Pod, annotations map[string]string) (string, error) {
+func (w *Watcher) createPostprocessJobCore(ctx context.Context, namespace, triggerName string, pods []corev1.Pod, annotations map[string]string, jobResults map[string]string) (string, error) {
 	postprocessName := postprocessJobName(triggerName)
 	configMapName := aibomdata.ConfigMapName(triggerName)
 
-	discoveries, datasets, containersJSON, storageJSON := w.buildPostprocessInputs(ctx, namespace, configMapName, pods)
+	discoveries, datasets, containersJSON, storageJSON := w.buildPostprocessInputs(ctx, namespace, configMapName, pods, jobResults)
 
 	if err := w.createDataConfigMap(ctx, namespace, configMapName, triggerName, discoveries, datasets, annotations, containersJSON, storageJSON); err != nil {
 		log.Printf("warning: could not create data configmap for %s/%s: %v", namespace, triggerName, err)
@@ -1102,23 +1151,31 @@ func (w *Watcher) createPostprocessJob(ctx context.Context, job *batchv1.Job) er
 		}
 	}
 
-	// Collect AIBOM annotations from the job and sibling jobs in the JobSet
+	// Collect AIBOM annotations from the job and sibling jobs in the JobSet,
+	// and each Job's terminal condition (#112): a pod of a Job that completed
+	// is not a failure even if an earlier attempt of it was.
 	annotations := collectAIBOMAnnotations(job.Annotations)
-	if jobsetName := job.Labels["jobset.sigs.k8s.io/jobset-name"]; jobsetName != "" && len(annotations) == 0 {
+	jobResults := map[string]string{job.Name: jobResult(job)}
+	if jobsetName := job.Labels["jobset.sigs.k8s.io/jobset-name"]; jobsetName != "" {
 		siblingJobs, err := w.clientset.BatchV1().Jobs(job.Namespace).List(ctx, metav1.ListOptions{
 			LabelSelector: fmt.Sprintf("jobset.sigs.k8s.io/jobset-name=%s", jobsetName),
 		})
 		if err == nil {
 			for i := range siblingJobs.Items {
-				if sa := collectAIBOMAnnotations(siblingJobs.Items[i].Annotations); len(sa) > 0 {
-					annotations = sa
-					break
+				sibling := &siblingJobs.Items[i]
+				if _, ok := jobResults[sibling.Name]; !ok {
+					jobResults[sibling.Name] = jobResult(sibling)
+				}
+				if len(annotations) == 0 {
+					if sa := collectAIBOMAnnotations(sibling.Annotations); len(sa) > 0 {
+						annotations = sa
+					}
 				}
 			}
 		}
 	}
 
-	postprocessName, err := w.createPostprocessJobCore(ctx, job.Namespace, job.Name, pods, annotations)
+	postprocessName, err := w.createPostprocessJobCore(ctx, job.Namespace, job.Name, pods, annotations, jobResults)
 	if err != nil {
 		return err
 	}
@@ -1139,7 +1196,7 @@ func (w *Watcher) createPostprocessJob(ctx context.Context, job *batchv1.Job) er
 func (w *Watcher) createPostprocessJobForPod(ctx context.Context, pod *corev1.Pod) error {
 	annotations := collectAIBOMAnnotations(pod.Annotations)
 
-	postprocessName, err := w.createPostprocessJobCore(ctx, pod.Namespace, pod.Name, []corev1.Pod{*pod}, annotations)
+	postprocessName, err := w.createPostprocessJobCore(ctx, pod.Namespace, pod.Name, []corev1.Pod{*pod}, annotations, nil)
 	if err != nil {
 		return err
 	}

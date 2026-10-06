@@ -1522,7 +1522,7 @@ func TestBuildPostprocessInputs_CapturesOOMKilledStatus(t *testing.T) {
 	}
 	w := &Watcher{clientset: fake.NewSimpleClientset()}
 
-	_, _, containersJSON, _ := w.buildPostprocessInputs(context.Background(), "ns", "cm-name", []corev1.Pod{*pod})
+	_, _, containersJSON, _ := w.buildPostprocessInputs(context.Background(), "ns", "cm-name", []corev1.Pod{*pod}, nil)
 
 	var containers []struct {
 		PodName          string `json:"pod_name"`
@@ -1560,7 +1560,7 @@ func TestBuildPostprocessInputs_CapturesFinishedAt(t *testing.T) {
 	}
 	w := &Watcher{clientset: fake.NewSimpleClientset()}
 
-	_, _, containersJSON, _ := w.buildPostprocessInputs(context.Background(), "ns", "cm-name", []corev1.Pod{*pod})
+	_, _, containersJSON, _ := w.buildPostprocessInputs(context.Background(), "ns", "cm-name", []corev1.Pod{*pod}, nil)
 
 	var containers []struct {
 		FinishedAt string `json:"finished_at"`
@@ -1581,7 +1581,7 @@ func TestBuildPostprocessInputs_NoStatusOmitsTerminatedFields(t *testing.T) {
 	pod := instrumentedPod("running-job", "ns")
 	w := &Watcher{clientset: fake.NewSimpleClientset()}
 
-	_, _, containersJSON, _ := w.buildPostprocessInputs(context.Background(), "ns", "cm-name", []corev1.Pod{*pod})
+	_, _, containersJSON, _ := w.buildPostprocessInputs(context.Background(), "ns", "cm-name", []corev1.Pod{*pod}, nil)
 
 	if strings.Contains(containersJSON, "terminated_reason") {
 		t.Errorf("expected no terminated_reason field when no container status is reported, got: %s", containersJSON)
@@ -1597,7 +1597,7 @@ func TestBuildPostprocessInputs_CapturesResourceLimits(t *testing.T) {
 	pod.Spec.Containers[0].Resources.Limits[corev1.ResourceCPU] = resource.MustParse("2")
 	w := &Watcher{clientset: fake.NewSimpleClientset()}
 
-	_, _, containersJSON, _ := w.buildPostprocessInputs(context.Background(), "ns", "cm-name", []corev1.Pod{*pod})
+	_, _, containersJSON, _ := w.buildPostprocessInputs(context.Background(), "ns", "cm-name", []corev1.Pod{*pod}, nil)
 
 	var containers []struct {
 		MemoryLimitBytes *int64 `json:"memory_limit_bytes"`
@@ -1623,10 +1623,124 @@ func TestBuildPostprocessInputs_NoResourceLimitsOmitsLimitFields(t *testing.T) {
 	pod := instrumentedPod("no-limits-job", "ns")
 	w := &Watcher{clientset: fake.NewSimpleClientset()}
 
-	_, _, containersJSON, _ := w.buildPostprocessInputs(context.Background(), "ns", "cm-name", []corev1.Pod{*pod})
+	_, _, containersJSON, _ := w.buildPostprocessInputs(context.Background(), "ns", "cm-name", []corev1.Pod{*pod}, nil)
 
 	if strings.Contains(containersJSON, "memory_limit_bytes") || strings.Contains(containersJSON, "cpu_limit_millis") {
 		t.Errorf("expected no limit fields when the container sets no memory/cpu limit, got: %s", containersJSON)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Termination status and failed postprocess Jobs (#112)
+// ---------------------------------------------------------------------------
+
+type capturedContainer struct {
+	PodName              string `json:"pod_name"`
+	TerminatedReason     string `json:"terminated_reason"`
+	JobResult            string `json:"job_result"`
+	RestartCount         int32  `json:"restart_count"`
+	LastTerminatedReason string `json:"last_terminated_reason"`
+	LastExitCode         *int32 `json:"last_exit_code"`
+}
+
+func capturedContainers(t *testing.T, w *Watcher, pods []corev1.Pod, jobResults map[string]string) []capturedContainer {
+	t.Helper()
+	_, _, containersJSON, _ := w.buildPostprocessInputs(context.Background(), "ns", "cm-name", pods, jobResults)
+	var containers []capturedContainer
+	if err := json.Unmarshal([]byte(containersJSON), &containers); err != nil {
+		t.Fatalf("unmarshal containers.json: %v", err)
+	}
+	return containers
+}
+
+func TestBuildPostprocessInputs_CapturesRestartHistory(t *testing.T) {
+	pod := instrumentedPod("retry-job", "ns")
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name:         "training",
+		RestartCount: 2,
+		State: corev1.ContainerState{
+			Terminated: &corev1.ContainerStateTerminated{Reason: "Completed", ExitCode: 0},
+		},
+		LastTerminationState: corev1.ContainerState{
+			Terminated: &corev1.ContainerStateTerminated{Reason: "OOMKilled", ExitCode: 137},
+		},
+	}}
+	w := &Watcher{clientset: fake.NewSimpleClientset()}
+
+	got := capturedContainers(t, w, []corev1.Pod{*pod}, nil)
+
+	if len(got) != 1 {
+		t.Fatalf("want 1 container, got %d", len(got))
+	}
+	if got[0].TerminatedReason != "Completed" {
+		t.Errorf("current state should still be reported, got %q", got[0].TerminatedReason)
+	}
+	if got[0].RestartCount != 2 || got[0].LastTerminatedReason != "OOMKilled" ||
+		got[0].LastExitCode == nil || *got[0].LastExitCode != 137 {
+		t.Errorf("earlier OOM kill not captured: %+v", got[0])
+	}
+}
+
+func TestBuildPostprocessInputs_NoRestartHistoryWhenNeverRestarted(t *testing.T) {
+	pod := instrumentedPod("clean-job", "ns")
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name:  "training",
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{Reason: "Completed"}},
+	}}
+	w := &Watcher{clientset: fake.NewSimpleClientset()}
+
+	_, _, containersJSON, _ := w.buildPostprocessInputs(context.Background(), "ns", "cm-name", []corev1.Pod{*pod}, nil)
+
+	for _, key := range []string{"restart_count", "last_terminated_reason", "last_exit_code", "job_result"} {
+		if strings.Contains(containersJSON, key) {
+			t.Errorf("%s should be omitted, got: %s", key, containersJSON)
+		}
+	}
+}
+
+func TestBuildPostprocessInputs_TagsEachPodWithItsJobsResult(t *testing.T) {
+	failedAttempt := instrumentedPod("train-job", "ns")
+	failedAttempt.Name = "train-job-attempt1"
+	sibling := instrumentedPod("sibling-job", "ns")
+	bare := instrumentedPod("x", "ns")
+	bare.Name = "bare"
+	bare.Labels = map[string]string{LabelInstrumented: "true"}
+	for _, p := range []*corev1.Pod{failedAttempt, sibling, bare} {
+		p.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "training"}}
+	}
+	w := &Watcher{clientset: fake.NewSimpleClientset()}
+
+	got := capturedContainers(t, w, []corev1.Pod{*failedAttempt, *sibling, *bare},
+		map[string]string{"train-job": "Complete", "sibling-job": "Failed"})
+
+	want := map[string]string{"train-job-attempt1": "Complete", "sibling-job-pod": "Failed", "bare": ""}
+	for _, c := range got {
+		if c.JobResult != want[c.PodName] {
+			t.Errorf("pod %s: job_result = %q, want %q", c.PodName, c.JobResult, want[c.PodName])
+		}
+	}
+}
+
+func TestJobResult(t *testing.T) {
+	failed := completedJob("j", "ns")
+	failed.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue}}
+	notTrue := completedJob("j", "ns")
+	notTrue.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionFalse}}
+	running := completedJob("j", "ns")
+	running.Status.Conditions = nil
+
+	for name, tc := range map[string]struct {
+		job  *batchv1.Job
+		want string
+	}{
+		"complete": {completedJob("j", "ns"), "Complete"},
+		"failed":   {failed, "Failed"},
+		"false":    {notTrue, ""},
+		"running":  {running, ""},
+	} {
+		if got := jobResult(tc.job); got != tc.want {
+			t.Errorf("%s: jobResult = %q, want %q", name, got, tc.want)
+		}
 	}
 }
 
