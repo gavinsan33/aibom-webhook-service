@@ -1,0 +1,205 @@
+/* Small refinements on top of Material. Colors come from the palette in
+   mkdocs.yml; only shape and spacing are tuned here. */
+
+.md-typeset h1 {
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.md-typeset h2 {
+  font-weight: 600;
+  margin-top: 2.2em;
+  padding-bottom: 0.3em;
+  border-bottom: 1px solid var(--md-default-fg-color--lightest);
+}
+
+/* Rounded cards for code, tables and admonitions */
+.md-typeset pre > code,
+.md-typeset .admonition,
+.md-typeset details {
+  border-radius: 0.5rem;
+}
+
+.md-typeset table:not([class]) {
+  border-radius: 0.5rem;
+  border: 1px solid var(--md-default-fg-color--lightest);
+  box-shadow: none;
+  overflow: hidden;
+}
+
+.md-typeset table:not([class]) th {
+  background-color: var(--md-default-fg-color--lightest);
+  font-weight: 600;
+}
+
+/* Inline code reads better with a touch more padding */
+.md-typeset code {
+  border-radius: 0.3rem;
+  padding: 0.1em 0.4em;
+}
+
+.md-header {
+  box-shadow: none;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+/* ---------------------------------------------------------------------------
+   Dark scheme: deeper neutral background and a vivid accent, instead of
+   Material's default blue-grey slate. Light scheme keeps the stock palette.
+   --------------------------------------------------------------------------- */
+[data-md-color-scheme="slate"] {
+  --md-hue: 220;
+  --md-default-bg-color: #23262b;
+  --md-default-bg-color--light: #2a2d33;
+  --md-default-bg-color--lighter: #32363d;
+  --md-default-bg-color--lightest: #3b3f47;
+  --md-default-fg-color: #e6e7ea;
+  --md-default-fg-color--light: #b8bbc2;
+  --md-default-fg-color--lighter: #9296a0;
+  --md-default-fg-color--lightest: #3d4149;
+
+  --md-primary-fg-color: #5b5bf0;
+  --md-primary-fg-color--light: #8585ff;
+  --md-primary-fg-color--dark: #3f3fc9;
+  --md-primary-bg-color: #ffffff;
+  --md-accent-fg-color: #2ee6c5;
+  --md-accent-fg-color--transparent: rgba(46, 230, 197, 0.1);
+
+  --md-typeset-a-color: #7aa2ff;
+  --md-code-bg-color: #2b2e35;
+  --md-code-fg-color: #e6e7ea;
+  --md-footer-bg-color: #1c1e22;
+  --md-footer-bg-color--dark: #16181b;
+}
+
+[data-md-color-scheme="slate"] .md-header,
+[data-md-color-scheme="slate"] .md-tabs {
+  background: linear-gradient(90deg, #3f3fc9 0%, #7c3aed 100%);
+}
+
+[data-md-color-scheme="slate"] .md-typeset h1 {
+  background: linear-gradient(90deg, #8585ff, #2ee6c5);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+[data-md-color-scheme="slate"] .md-typeset a:hover {
+  color: var(--md-accent-fg-color);
+}
+
+[data-md-color-scheme="slate"] .md-nav__item .md-nav__link--active {
+  color: var(--md-accent-fg-color);
+}
+
+[data-md-color-scheme="slate"] .md-typeset table:not([class]) th {
+  background-color: #32363d;
+}
+
+[data-md-color-scheme="slate"] .md-typeset code {
+  color: #ffb86b;
+}
+
+[data-md-color-scheme="slate"] .md-typeset pre > code {
+  color: var(--md-code-fg-color);
+}
+
+/* ---------------------------------------------------------------------------
+   Navigation: Material's defaults are small (0.7-0.8rem). Make the top tabs
+   and left sidebar easier to see and click, in both schemes.
+   --------------------------------------------------------------------------- */
+
+/* Top tabs */
+.md-tabs {
+  height: auto;
+}
+
+.md-tabs__list {
+  contain: none;
+}
+
+.md-tabs__link {
+  font-size: 0.9rem;
+  font-weight: 500;
+  opacity: 0.75;
+  margin-top: 0;
+  padding: 0.9rem 0.4rem 0.7rem;
+  border-bottom: 3px solid transparent;
+  transition: opacity 0.15s, border-color 0.15s;
+}
+
+.md-tabs__item {
+  height: auto;
+  padding: 0 0.6rem 0 0;
+}
+
+.md-tabs__link:hover {
+  opacity: 1;
+}
+
+.md-tabs__item--active .md-tabs__link {
+  opacity: 1;
+  font-weight: 700;
+  border-bottom-color: currentColor;
+}
+
+/* Left sidebar */
+.md-nav--primary .md-nav__link,
+.md-nav--secondary .md-nav__link {
+  font-size: 0.85rem;
+  padding: 0.35rem 0.6rem;
+  border-radius: 0.4rem;
+}
+
+.md-nav--primary .md-nav__link:hover,
+.md-nav--secondary .md-nav__link:hover {
+  background-color: var(--md-accent-fg-color--transparent);
+}
+
+/* Section headings in the sidebar ("User Guide", "Reference") */
+.md-nav--primary .md-nav__item--section > .md-nav__link {
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  margin-top: 1rem;
+  color: var(--md-default-fg-color--light);
+}
+
+/* Current page */
+.md-nav__link--active {
+  font-weight: 600;
+}
+
+.md-nav--primary .md-nav__item .md-nav__link--active {
+  background-color: var(--md-accent-fg-color--transparent);
+}
+
+/* ---------------------------------------------------------------------------
+   Header hierarchy: the site title should outrank the tabs beneath it.
+   --------------------------------------------------------------------------- */
+.md-header__title {
+  font-size: 1.15rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.md-header__button.md-logo img,
+.md-header__button.md-logo svg {
+  height: 1.7rem;
+  width: 1.7rem;
+}
+
+/* GitHub link in the top right */
+.md-source {
+  font-size: 0.8rem;
+}
+
+.md-source__repository {
+  font-weight: 500;
+}
+
+/* Tabs: still clearly visible, but a step below the title */
+.md-tabs__link {
+  font-size: 0.85rem;
+}
