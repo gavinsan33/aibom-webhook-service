@@ -1,3 +1,4 @@
+import dataclasses
 import enum
 import sys
 import types
@@ -145,27 +146,44 @@ class FakeOptimizerNames(str, enum.Enum):
     ADAMW_BNB_8BIT = "adamw_bnb_8bit"
 
 
-class FakeTrainingArguments:
-    def __init__(
-        self, output_dir=None, learning_rate=5e-5, per_device_train_batch_size=8,
-        num_train_epochs=3, optim="adamw_torch", seed=42, bf16=False, fp16=False, **kwargs,
-    ):
-        self.output_dir = output_dir
-        self.learning_rate = learning_rate
-        self.per_device_train_batch_size = per_device_train_batch_size
-        self.num_train_epochs = num_train_epochs
-        # Real TrainingArguments.__post_init__ normalizes a plain string optim
-        # into an OptimizerNames enum member -- mirror that here.
-        self.optim = FakeOptimizerNames(optim)
-        self.seed = seed
-        self.bf16 = bf16
-        self.fp16 = fp16
+def _make_fake_training_arguments():
+    """Fresh classes per test (the hooks patch them in place). Real
+    TrainingArguments is a dataclass, and so are its subclasses (trl's
+    SFTConfig etc.), each with its own generated __init__ -- mirrored here so
+    a hook on __init__ instead of __post_init__ would miss the subclass."""
+
+    @dataclasses.dataclass
+    class FakeTrainingArguments:
+        output_dir: str = None
+        learning_rate: float = 5e-5
+        per_device_train_batch_size: int = 8
+        num_train_epochs: float = 3
+        optim: str = "adamw_torch"
+        seed: int = 42
+        bf16: bool = False
+        fp16: bool = False
+
+        def __post_init__(self):
+            # Real TrainingArguments.__post_init__ normalizes a plain string
+            # optim into an OptimizerNames enum member -- mirror that here.
+            self.optim = FakeOptimizerNames(self.optim)
+
+    @dataclasses.dataclass
+    class FakeSFTConfig(FakeTrainingArguments):
+        max_length: int = 1024
+
+        def __post_init__(self):
+            super().__post_init__()
+
+    return FakeTrainingArguments, FakeSFTConfig
 
 
 @pytest.fixture
 def fake_transformers_module(monkeypatch):
+    training_arguments, sft_config = _make_fake_training_arguments()
     module = types.ModuleType("transformers")
-    module.TrainingArguments = FakeTrainingArguments
+    module.TrainingArguments = training_arguments
+    module.FakeSFTConfig = sft_config
     module.PreTrainedModel = FakePreTrainedModel
     monkeypatch.setitem(sys.modules, "transformers", module)
     return module
