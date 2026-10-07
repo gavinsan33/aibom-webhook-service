@@ -1,4 +1,4 @@
-# Annotations
+a# Annotations
 
 You can annotate your Jobs with `aibom.io/*` keys to provide experiment metadata. Annotations are optional: without them, the AIBOM is still generated from auto-detected data (hardware discovery, dataset detection, telemetry).
 
