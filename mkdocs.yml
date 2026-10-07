@@ -46,4 +46,4 @@ nav:
   - Reference:
       - Detected Fields: CAPABILITIES.md
       - AIBOM Schema: reference/schema.md
-      - Chart Values: reference/chart-values.md
+      - Configuration: reference/configuration.md
