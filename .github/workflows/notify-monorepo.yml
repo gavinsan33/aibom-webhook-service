@@ -1,7 +1,7 @@
 name: Notify monorepo
 
-# Tells gavinsan33/aibom-monorepo to sync whenever the default branch changes.
-# Requires the MONOREPO_DISPATCH_TOKEN secret (fine-grained PAT with Contents: read/write on aibom-monorepo).
+# Tells gavinsan33/project-aibom to sync whenever the default branch changes.
+# Requires the MONOREPO_DISPATCH_TOKEN secret (fine-grained PAT with Contents: read/write on project-aibom).
 on:
   push:
     branches: [main]
@@ -14,6 +14,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.MONOREPO_DISPATCH_TOKEN }}
         run: |
-          gh api repos/gavinsan33/aibom-monorepo/dispatches \
+          gh api repos/gavinsan33/project-aibom/dispatches \
             -f event_type=source-updated \
             -f 'client_payload[repo]=${{ github.repository }}'

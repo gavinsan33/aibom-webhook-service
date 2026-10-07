@@ -1,0 +1,30 @@
+# Standalone config, for previewing and checking these docs on their own.
+# The combined site (with oc-aibom and the console plugin) is built from
+# gavinsan33/project-aibom, which includes this file; its theme, styling and
+# markdown extensions apply there, so keep this one minimal.
+site_name: AIBOM Webhook Service
+repo_url: https://github.com/gavinsan33/aibom-webhook-service
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+
+exclude_docs: requirements.txt
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.superfences
+
+nav:
+  - Home: index.md
+  - User Guide:
+      - Getting Started: user-guide/getting-started.md
+      - Annotations: user-guide/annotations.md
+      - Troubleshooting: user-guide/troubleshooting.md
+  - Reference:
+      - Detected Fields: CAPABILITIES.md
+      - AIBOM Schema: reference/schema.md
+      - Configuration: reference/configuration.md
