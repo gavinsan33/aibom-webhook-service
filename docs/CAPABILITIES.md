@@ -8,7 +8,7 @@ Three components do detection, in this order in the pipeline:
 2. **Runtime hooks** (`runtime_detector.py`, mounted as `sitecustomize.py`) — dataset/model/training objects observed live inside the app container's own Python process.
 3. **Postprocess Job** (`postprocess.py`) — parses container CLI args, reconciles/merges everything above, resolves git provenance, and queries Prometheus for telemetry.
 
-Any field can also be set directly via an `aibom.io/*` annotation, which overrides auto-detected values for nearly every field — see the [annotation table](../README.md#aibom-annotations) in the README. The exception is `training.learning_rate`/`batch_size`/`epochs`/`random_seed`: for these the runtime hook wins, then the CLI arg, and the annotation is used only when neither produced a value (#109).
+Any field can also be set directly via an `aibom.io/*` annotation, which overrides auto-detected values for nearly every field — see the [annotation table](https://github.com/gavinsan33/aibom-webhook-service/blob/main/README.md#aibom-annotations) in the README. The exception is `training.learning_rate`/`batch_size`/`epochs`/`random_seed`: for these the runtime hook wins, then the CLI arg, and the annotation is used only when neither produced a value (#109).
 
 ---
 

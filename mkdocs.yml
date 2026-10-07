@@ -1,0 +1,49 @@
+site_name: AIBOM Webhook Service
+site_url: https://gavinsan33.github.io/aibom-webhook-service/
+repo_url: https://github.com/gavinsan33/aibom-webhook-service
+repo_name: gavinsan33/aibom-webhook-service
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - content.action.edit
+    - search.suggest
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences
+  # Pull files in from the repo (e.g. examples/*.yaml) instead of copying them:
+  #   --8<-- "examples/vllm-inference.yaml"
+  - pymdownx.snippets:
+      base_path: [.]
+      check_paths: true
+
+nav:
+  - Home: index.md
+  - User Guide:
+      - Getting Started: user-guide/getting-started.md
+      - Annotations: user-guide/annotations.md
+      - Troubleshooting: user-guide/troubleshooting.md
+  - Reference:
+      - Detected Fields: CAPABILITIES.md
+      - AIBOM Schema: reference/schema.md
+      - Chart Values: reference/chart-values.md
