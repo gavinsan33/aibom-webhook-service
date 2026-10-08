@@ -392,8 +392,15 @@ func (m *Mutator) buildDiscoveryInitContainer(pod *corev1.Pod) corev1.Container 
 		Name:    "aibom-discovery",
 		Image:   m.DiscoveryImage,
 		Command: []string{"/bin/bash", "-c"},
-		Args:    []string{"python3 /scripts/generate_snapshot.py"},
-		Env:     env,
+		// Fail open (#104): this init container gates the workload's own
+		// containers, so any failure to even start the script (no python3 in
+		// --discovery-image, an error before its own guards are in place)
+		// is logged and swallowed rather than failing the pod.
+		Args: []string{
+			`python3 /scripts/generate_snapshot.py || ` +
+				`echo "aibom-discovery: generate_snapshot.py failed (exit $?); continuing without discovery data" >&2`,
+		},
+		Env: env,
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: "aibom-data", MountPath: "/tmp/result"},
 			{Name: "aibom-scripts", MountPath: "/scripts", ReadOnly: true},

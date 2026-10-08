@@ -2,7 +2,9 @@
 
 import hashlib
 import hmac
+import signal
 import subprocess
+import sys
 import json
 import time
 import os
@@ -13,6 +15,47 @@ try:
     import k8s_api
 except ImportError:
     k8s_api = None
+
+# Instrumentation must never take the workload down (fail open, #104): this
+# is an init container, so a crash or a hang here keeps the user's pod from
+# starting at all. Every stage that touches something the workload or its
+# image controls (a missing binary, a FIFO on the model PVC, a stalled API
+# call) therefore runs through _run_stage, which turns an exception or a
+# timeout into a warning plus a fallback value so whatever was collected still
+# gets written. The mutator's `|| echo ...` wrapper around this script covers
+# the rest (python3 missing, an error before the first stage).
+_STAGE_TIMEOUT_S = int(os.environ.get("AIBOM_DISCOVERY_STAGE_TIMEOUT_S", "60"))
+
+
+class _StageTimeout(Exception):
+    pass
+
+
+def _run_stage(name, fn, on_error=lambda exc: None, timeout_s=None):
+    """Run fn() under a SIGALRM deadline; on any exception (including the
+    timeout) warn and return on_error(exc). SIGALRM interrupts a blocking
+    syscall such as open() on a FIFO, which nothing else in-process can."""
+    timeout_s = timeout_s or _STAGE_TIMEOUT_S
+    armed = hasattr(signal, "SIGALRM")
+    if armed:
+        def _on_alarm(signum, frame):
+            raise _StageTimeout(f"timed out after {timeout_s}s")
+        previous = signal.signal(signal.SIGALRM, _on_alarm)
+        signal.alarm(timeout_s)
+    try:
+        return fn()
+    except Exception as exc:
+        print(f"WARNING: {name} failed, continuing without it: {exc}", file=sys.stderr)
+        return on_error(exc)
+    finally:
+        if armed:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, previous)
+
+
+def _benchmark_error(exc):
+    return {"error": str(exc)}
+
 
 def run_cmd(command):
     try:
@@ -197,21 +240,28 @@ snapshot = {
 # Dynamic Benchmarks
 print("Running CPU compute benchmark...")
 snapshot["benchmarks"] = {
-    "cpu_compute": cpu_benchmark()
+    "cpu_compute": _run_stage("CPU benchmark", cpu_benchmark, _benchmark_error)
 }
 
 print("Running memory bandwidth benchmark...")
-snapshot["benchmarks"]["memory_bandwidth"] = memory_bandwidth_benchmark()
+snapshot["benchmarks"]["memory_bandwidth"] = _run_stage(
+    "memory bandwidth benchmark", memory_bandwidth_benchmark, _benchmark_error)
 
 print("Running disk I/O benchmark...")
-snapshot["benchmarks"]["disk_io"] = disk_io_benchmark()
+snapshot["benchmarks"]["disk_io"] = _run_stage("disk I/O benchmark", disk_io_benchmark, _benchmark_error)
 
 print("Running context switch benchmark...")
-snapshot["benchmarks"]["context_switch"] = context_switch_benchmark()
+snapshot["benchmarks"]["context_switch"] = _run_stage(
+    "context switch benchmark", context_switch_benchmark, _benchmark_error)
 
-# Write JSON locally for debugging/parity with prior behavior
-with open("/tmp/result/discovery.json", "w") as f:
-    json.dump(snapshot, f, indent=2)
+
+def _write_local_snapshot():
+    # Write JSON locally for debugging/parity with prior behavior
+    with open("/tmp/result/discovery.json", "w") as f:
+        json.dump(snapshot, f, indent=2)
+
+
+_run_stage("local snapshot write", _write_local_snapshot)
 
 def resolve_inference_service_storage(namespace):
     """Resolve model identity from the owning KServe InferenceService's
@@ -263,6 +313,11 @@ _HEX40 = re.compile(r"^[0-9a-f]{40}$")
 
 
 def _read_small_file(path, limit=_MODEL_FILE_MAX_BYTES):
+    # Regular files only: the model PVC is workload-controlled, and open() on
+    # a FIFO blocks until a writer appears, hanging the init container (#104).
+    # isfile() follows symlinks, so a link to a FIFO or device is skipped too.
+    if not os.path.isfile(path):
+        return None
     try:
         with open(path, "rb") as f:
             return f.read(limit).decode("utf-8", errors="replace")
@@ -385,7 +440,11 @@ def sign_payload(payload):
 # rather than printing to stdout for the watcher to scrape from pod logs.
 pod_name = os.environ.get("POD_NAME", "")
 pod_namespace = os.environ.get("POD_NAMESPACE", "")
-configmap_name = k8s_api.resolve_data_configmap_name() if k8s_api else ""
+configmap_name = _run_stage(
+    "ConfigMap name lookup",
+    lambda: k8s_api.resolve_data_configmap_name() if k8s_api else "",
+    lambda exc: "",
+)
 
 # Canonical (sorted-key, no incidental whitespace) serialization: this exact
 # string is what gets signed and later re-hashed by the watcher, so it must
@@ -396,8 +455,10 @@ signature = sign_payload(discovery_payload)
 if signature:
     data_updates[f"discovery-{pod_name}.sig"] = signature
 
-storage_info = resolve_inference_service_storage(pod_namespace)
-model_files = read_model_source_files(os.environ.get("AIBOM_MODEL_DIR", ""))
+storage_info = _run_stage(
+    "InferenceService storage lookup", lambda: resolve_inference_service_storage(pod_namespace))
+model_files = _run_stage(
+    "model source file read", lambda: read_model_source_files(os.environ.get("AIBOM_MODEL_DIR", "")))
 if model_files:
     storage_info = dict(storage_info or {})
     storage_info["model_files"] = model_files
@@ -411,10 +472,10 @@ if storage_info:
         data_updates[f"storage-{pod_name}.sig"] = storage_signature
 
 if k8s_api and pod_name and pod_namespace and configmap_name:
-    try:
-        k8s_api.patch_configmap(pod_namespace, configmap_name, data_updates)
-    except Exception as e:
-        print(f"WARNING: could not write discovery data to ConfigMap {configmap_name}: {e}")
+    _run_stage(
+        f"write to ConfigMap {configmap_name}",
+        lambda: k8s_api.patch_configmap(pod_namespace, configmap_name, data_updates),
+    )
 else:
     print("WARNING: k8s_api unavailable or POD_NAME/POD_NAMESPACE/AIBOM_DATA_CONFIGMAP not set, skipping ConfigMap write")
 

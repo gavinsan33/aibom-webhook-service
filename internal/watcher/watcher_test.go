@@ -1629,3 +1629,134 @@ func TestBuildPostprocessInputs_NoResourceLimitsOmitsLimitFields(t *testing.T) {
 		t.Errorf("expected no limit fields when the container sets no memory/cpu limit, got: %s", containersJSON)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Finalizer cleanup (#104)
+// ---------------------------------------------------------------------------
+
+func TestOnJobEvent_OptedOutNamespace_StripsFinalizer(t *testing.T) {
+	now := metav1.Now()
+	job := completedJob("train-job", "disabled-ns")
+	job.DeletionTimestamp = &now
+	job.Finalizers = []string{"other.io/keep", finalizerName}
+
+	client := fake.NewSimpleClientset(disabledNamespace("disabled-ns"), job)
+	w := New(client, Config{PostprocessImage: "busybox:latest"})
+	startWatcher(t, w)
+
+	w.onJobEvent(job)
+
+	got, err := client.BatchV1().Jobs("disabled-ns").Get(context.TODO(), "train-job", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if hasFinalizer(got) {
+		t.Error("our finalizer should be released when the namespace opted out")
+	}
+	if len(got.Finalizers) != 1 || got.Finalizers[0] != "other.io/keep" {
+		t.Errorf("other finalizers must be preserved, got %v", got.Finalizers)
+	}
+	if _, err := client.BatchV1().Jobs("disabled-ns").Get(context.TODO(), "train-job-aibom-postprocess", metav1.GetOptions{}); err == nil {
+		t.Error("no postprocess job should be created for an opted-out namespace")
+	}
+}
+
+func TestOnPodEvent_OptedOutNamespace_StripsFinalizer(t *testing.T) {
+	now := metav1.Now()
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "predictor",
+			Namespace:         "disabled-ns",
+			Labels:            map[string]string{LabelInstrumented: "true"},
+			DeletionTimestamp: &now,
+			Finalizers:        []string{podFinalizerName},
+		},
+	}
+
+	client := fake.NewSimpleClientset(disabledNamespace("disabled-ns"), pod)
+	w := New(client, Config{PostprocessImage: "busybox:latest"})
+	startWatcher(t, w)
+
+	w.onPodEvent(pod)
+
+	got, err := client.CoreV1().Pods("disabled-ns").Get(context.TODO(), "predictor", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get pod: %v", err)
+	}
+	if hasPodFinalizer(got) {
+		t.Error("our pod finalizer should be released when the namespace opted out")
+	}
+}
+
+func TestOnJobEvent_UnknownNamespace_KeepsFinalizer(t *testing.T) {
+	// A namespace missing from the informer cache (not yet synced, or gone)
+	// is not "opted out": stripping on a cache miss would discard the AIBOM of
+	// a workload in a namespace that is still enabled.
+	job := completedJob("train-job", "unknown-ns")
+	job.Finalizers = []string{finalizerName}
+
+	client := fake.NewSimpleClientset(job)
+	w := New(client, Config{PostprocessImage: "busybox:latest"})
+	startWatcher(t, w)
+
+	w.onJobEvent(job)
+
+	got, err := client.BatchV1().Jobs("unknown-ns").Get(context.TODO(), "train-job", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if !hasFinalizer(got) {
+		t.Error("finalizer must be kept when the namespace can't be looked up")
+	}
+}
+
+func TestStripAllFinalizers(t *testing.T) {
+	withBoth := completedJob("a", "ns-one")
+	withBoth.Finalizers = []string{"other.io/keep", finalizerName}
+	withOurs := completedJob("b", "ns-two")
+	withOurs.Finalizers = []string{finalizerName}
+	untouched := completedJob("c", "ns-two")
+	untouched.Finalizers = []string{"other.io/keep"}
+	podWithOurs := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: "p", Namespace: "ns-one", Finalizers: []string{podFinalizerName}}}
+	podOther := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: "q", Namespace: "ns-one", Finalizers: []string{"other.io/keep"}}}
+
+	client := fake.NewSimpleClientset(withBoth, withOurs, untouched, podWithOurs, podOther)
+
+	jobs, pods, err := StripAllFinalizers(context.TODO(), client)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if jobs != 2 || pods != 1 {
+		t.Errorf("stripped %d jobs / %d pods, want 2 / 1", jobs, pods)
+	}
+
+	for _, tc := range []struct {
+		ns, name string
+		want     []string
+	}{
+		{"ns-one", "a", []string{"other.io/keep"}},
+		{"ns-two", "b", nil},
+		{"ns-two", "c", []string{"other.io/keep"}},
+	} {
+		got, _ := client.BatchV1().Jobs(tc.ns).Get(context.TODO(), tc.name, metav1.GetOptions{})
+		if len(got.Finalizers) != len(tc.want) || (len(tc.want) == 1 && got.Finalizers[0] != tc.want[0]) {
+			t.Errorf("job %s/%s finalizers = %v, want %v", tc.ns, tc.name, got.Finalizers, tc.want)
+		}
+	}
+	p, _ := client.CoreV1().Pods("ns-one").Get(context.TODO(), "p", metav1.GetOptions{})
+	if hasPodFinalizer(p) {
+		t.Error("pod finalizer should be stripped")
+	}
+	q, _ := client.CoreV1().Pods("ns-one").Get(context.TODO(), "q", metav1.GetOptions{})
+	if len(q.Finalizers) != 1 || q.Finalizers[0] != "other.io/keep" {
+		t.Errorf("unrelated pod finalizers must be untouched, got %v", q.Finalizers)
+	}
+
+	// Idempotent: a second run (hook retry) has nothing left to do.
+	jobs, pods, err = StripAllFinalizers(context.TODO(), client)
+	if err != nil || jobs != 0 || pods != 0 {
+		t.Errorf("second run = %d jobs / %d pods / %v, want 0 / 0 / nil", jobs, pods, err)
+	}
+}

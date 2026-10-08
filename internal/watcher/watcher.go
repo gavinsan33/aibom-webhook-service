@@ -195,6 +195,18 @@ func (w *Watcher) onJobEvent(obj interface{}) {
 		}
 	}
 
+	// A namespace that opted out after this Job got our finalizer would
+	// otherwise keep it forever: the early return below means nothing else
+	// ever reaches a removal path, leaving the Job Terminating (and the
+	// namespace undeletable) once it's deleted (#104). Skip the postprocess,
+	// not the cleanup.
+	if w.isNamespaceOptedOut(job.Namespace) {
+		if hasFinalizer(job) {
+			w.removeFinalizer(context.TODO(), job)
+		}
+		return
+	}
+
 	if !w.isNamespaceEnabled(job.Namespace) {
 		return
 	}
@@ -286,6 +298,15 @@ func (w *Watcher) onPodEvent(obj interface{}) {
 		if !ok {
 			return
 		}
+	}
+
+	// Same as onJobEvent: always release our own finalizer for a namespace
+	// that opted out (#104).
+	if w.isNamespaceOptedOut(pod.Namespace) {
+		if hasPodFinalizer(pod) {
+			w.removePodFinalizer(context.TODO(), pod)
+		}
+		return
 	}
 
 	if !w.isNamespaceEnabled(pod.Namespace) {
@@ -469,6 +490,19 @@ func (w *Watcher) setPodPostprocessRetries(ctx context.Context, pod *corev1.Pod,
 	if _, err := w.clientset.CoreV1().Pods(pod.Namespace).Patch(ctx, pod.Name, types.MergePatchType, []byte(patch), metav1.PatchOptions{}); err != nil {
 		log.Printf("warning: could not record postprocess retry count for pod %s/%s: %v", pod.Namespace, pod.Name, err)
 	}
+}
+
+// isNamespaceOptedOut reports whether the namespace is known to exist and
+// doesn't carry the enabled label. Unlike !isNamespaceEnabled, a failed
+// lookup (informer not synced, namespace gone) is not "opted out": stripping
+// finalizers on the strength of a transient cache miss would throw away the
+// AIBOM of a workload in a namespace that is still enabled.
+func (w *Watcher) isNamespaceOptedOut(namespace string) bool {
+	ns, err := w.factory.Core().V1().Namespaces().Lister().Get(namespace)
+	if err != nil {
+		return false
+	}
+	return ns.Labels[LabelEnabled] != "true"
 }
 
 func (w *Watcher) isNamespaceEnabled(namespace string) bool {

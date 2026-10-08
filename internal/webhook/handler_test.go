@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	jsonpatch "gopkg.in/evanphx/json-patch.v4"
@@ -379,8 +380,12 @@ func TestMutate_DiscoveryScriptCommand(t *testing.T) {
 			if c.Command[0] != "/bin/bash" {
 				t.Errorf("expected /bin/bash command, got %q", c.Command[0])
 			}
-			if c.Args[0] != "python3 /scripts/generate_snapshot.py" {
+			if !strings.HasPrefix(c.Args[0], "python3 /scripts/generate_snapshot.py") {
 				t.Errorf("expected python3 script command, got %q", c.Args[0])
+			}
+			// Fail open (#104): a failing script must not fail the pod.
+			if !strings.Contains(c.Args[0], "|| echo") {
+				t.Errorf("expected discovery command to swallow failures, got %q", c.Args[0])
 			}
 			return
 		}
