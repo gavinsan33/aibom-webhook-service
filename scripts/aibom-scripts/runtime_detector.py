@@ -28,6 +28,10 @@ credentials the webhook gave the pod, which meant a compromised or malicious
 training script could forge dataset-<pod-name>.json with a syntactically valid
 (if meaningless) write of its own.
 
+Output is written shortly after each detection (debounced), at exit, and on
+SIGTERM, under an flock and via write-then-rename, since many processes share
+the file and any of them can be killed without running atexit (#107).
+
 All hooks are fault-tolerant — detection failures never interrupt training.
 """
 
@@ -36,10 +40,17 @@ import hashlib
 import importlib.util
 import json
 import os
+import signal
 import sys
 import threading
+import time
 import traceback
 import weakref
+
+try:
+    import fcntl
+except ImportError:  # not POSIX; flush falls back to unlocked (still atomic)
+    fcntl = None
 
 _OUTPUT_PATH = os.environ.get(
     "AIBOM_DATASET_OUTPUT", "/results/dataset_detected.json"
@@ -57,8 +68,38 @@ def _dbg_exc(context):
         print(f"[AIBOM-DEBUG] EXCEPTION in {context}:", file=sys.stderr, flush=True)
         traceback.print_exc(file=sys.stderr)
 
+class _NotifyingDict(dict):
+    """runtime_info that schedules a (debounced) flush whenever it changes, so
+    every one of the hook sites that records into it gets durable writes
+    without each having to remember to ask for one (#107)."""
+
+    # Only a real change notifies. _flush re-captures argv-derived values into
+    # this dict on every run, and notifying on an identical write would
+    # reschedule a flush forever.
+
+    def __setitem__(self, key, value):
+        changed = key not in self or self[key] != value
+        super().__setitem__(key, value)
+        if changed:
+            _notify_change()
+
+    def update(self, *args, **kwargs):
+        incoming = dict(*args, **kwargs)
+        changed = any(k not in self or self[k] != v for k, v in incoming.items())
+        super().update(incoming)
+        if changed:
+            _notify_change()
+
+    def setdefault(self, key, default=None):
+        changed = key not in self
+        result = super().setdefault(key, default)
+        if changed:
+            _notify_change()
+        return result
+
+
 _detected_datasets = []
-_runtime_info = {}
+_runtime_info = _NotifyingDict()
 _lock = threading.Lock()
 _hooks_installed = {}
 # Maps a live dataset object (e.g. one returned by datasets.load_dataset) to
@@ -86,6 +127,7 @@ def _record(entry):
     _dbg(f"Recording dataset: {entry.get('dataset_name', '?')} via {entry.get('source', '?')}")
     with _lock:
         _detected_datasets.append(entry)
+    _notify_change()
 
 
 def _path_fingerprint(path):
@@ -300,7 +342,7 @@ def _git_dirty(worktree_dir):
         return None
 
 
-def _capture_git_provenance():
+def _capture_git_provenance(check_dirty=True):
     """Best-effort git provenance from a .git directory in the working
     tree -- covers workloads that `git clone` their training code at
     runtime rather than baking it into the image (see CLAUDE.md's git
@@ -327,7 +369,9 @@ def _capture_git_provenance():
         remote = _git_remote_url(git_dir)
         if remote:
             info["git_repository"] = remote
-        dirty = _git_dirty(os.path.dirname(git_dir))
+        # `git status` can take up to its 10s timeout; skipped when flushing
+        # from a signal handler, where the kubelet's grace period is ticking.
+        dirty = _git_dirty(os.path.dirname(git_dir)) if check_dirty else None
         if dirty is not None:
             info["git_dirty"] = dirty
         with _lock:
@@ -337,49 +381,230 @@ def _capture_git_provenance():
         _dbg_exc("_capture_git_provenance")
 
 
-def _flush():
+# ── Durable, concurrent-safe output (#107) ──────────────────────────────────
+#
+# This file is written by every Python process in every instrumented
+# container of the pod -- each torchrun rank, spawned DataLoader worker, the
+# launcher itself, `pip` -- so a write has to (a) take turns with the others
+# and (b) never leave a half-written file for the sidecar to read. It also
+# can't wait for atexit alone: SIGKILL (OOM, the kubelet's grace-period kill)
+# and SIGTERM under Python's default handler skip it, so changes are flushed
+# shortly after they happen, and SIGTERM flushes before dying.
+
+_FLUSH_DEBOUNCE_S = float(os.environ.get("AIBOM_FLUSH_DEBOUNCE_S", "2"))
+_LOCK_TIMEOUT_S = 5.0
+
+_durable_flush_enabled = False
+_flush_timer = None
+_flush_timer_lock = threading.Lock()
+_git_captured = False
+_fork_handler_registered = False
+_sigterm_installed = False
+
+
+def _notify_change():
+    """Schedule one flush ~_FLUSH_DEBOUNCE_S from now unless one is already
+    pending, so a burst of detections costs a single write. A no-op until
+    hooks are actually installed."""
+    global _flush_timer
+    if not _durable_flush_enabled:
+        return
+    # Bounded wait, not `with`: this is reachable from the SIGTERM handler
+    # (via _flush's argv captures), which may have interrupted this very
+    # function mid-hold.
+    if not _flush_timer_lock.acquire(timeout=0.2):
+        return
+    try:
+        if _flush_timer is not None:
+            return
+        timer = threading.Timer(_FLUSH_DEBOUNCE_S, _debounced_flush)
+        timer.daemon = True
+        _flush_timer = timer
+    finally:
+        _flush_timer_lock.release()
+    try:
+        timer.start()
+    except RuntimeError:  # interpreter shutting down; atexit will flush
+        with _flush_timer_lock:
+            _flush_timer = None
+
+
+def _debounced_flush():
+    global _flush_timer
+    with _flush_timer_lock:
+        _flush_timer = None
+    try:
+        _flush(final=False)
+    except Exception:
+        _dbg_exc("_debounced_flush")
+
+
+def _cancel_pending_flush():
+    global _flush_timer
+    with _flush_timer_lock:
+        timer, _flush_timer = _flush_timer, None
+    if timer is not None:
+        timer.cancel()
+
+
+def _after_fork_in_child():
+    """A forked child (DataLoader worker, multiprocessing) inherits our locks
+    in whatever state another thread left them -- including held by the
+    flush timer thread, which doesn't exist in the child -- and a Timer
+    object that will never fire. Start clean."""
+    global _lock, _flush_timer, _flush_timer_lock, _git_captured
+    _lock = threading.Lock()
+    _flush_timer_lock = threading.Lock()
+    _flush_timer = None
+    _git_captured = False
+
+
+def _on_sigterm(signum, frame):
+    """Flush, then die exactly as the default handler would have: restore
+    SIG_DFL and re-deliver, so the process still terminates by SIGTERM (exit
+    status 143) rather than exiting cleanly. Only installed when the handler
+    was SIG_DFL at startup; an application handler (uvicorn, torchrun) makes
+    its own orderly exit, which runs atexit."""
+    try:
+        _flush(final=True, in_signal=True)
+    except Exception:
+        pass
+    signal.signal(signum, signal.SIG_DFL)
+    os.kill(os.getpid(), signum)
+
+
+def _register_durable_flush():
+    """Wire up everything that gets data out before the process disappears.
+    Called from each install path; safe to call more than once."""
+    global _durable_flush_enabled, _fork_handler_registered, _sigterm_installed
+    _durable_flush_enabled = True
+    atexit.register(_flush)
+    if not _fork_handler_registered and hasattr(os, "register_at_fork"):
+        os.register_at_fork(after_in_child=_after_fork_in_child)
+        _fork_handler_registered = True
+    if not _sigterm_installed:
+        try:
+            if signal.getsignal(signal.SIGTERM) == signal.SIG_DFL:
+                signal.signal(signal.SIGTERM, _on_sigterm)
+                _sigterm_installed = True
+        except (ValueError, OSError):  # not the main thread / no signals
+            _dbg("SIGTERM handler not installed (not main thread)")
+
+
+class _OutputLock:
+    """Exclusive flock on a sidecar-file next to the output, taken with a
+    bounded wait so a stuck holder can never hang process exit."""
+
+    def __init__(self, path, timeout_s):
+        self._path = path + ".lock"
+        self._timeout_s = timeout_s
+        self._file = None
+
+    def __enter__(self):
+        if fcntl is None:
+            return self
+        self._file = open(self._path, "a")
+        deadline = time.monotonic() + self._timeout_s
+        while True:
+            try:
+                fcntl.flock(self._file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return self
+            except OSError:
+                if time.monotonic() >= deadline:
+                    self._file.close()
+                    self._file = None
+                    raise TimeoutError(f"could not lock {self._path} within {self._timeout_s}s")
+                time.sleep(0.02)
+
+    def __exit__(self, *exc):
+        if self._file is not None:
+            self._file.close()  # releases the flock
+            self._file = None
+
+
+def _merge_output(existing, data, info):
+    """Fold this process's detections into what other processes already
+    wrote. Datasets are deduped by (name, source). runtime_info is
+    last-writer-wins per key, except the git_* keys, which are one
+    observation of one checkout: a process that captured any replaces the
+    whole group, so a commit from one working tree is never labelled with the
+    branch (or dirty flag) of another (#107)."""
+    existing_ds = existing.get("datasets", [])
+    seen = {(e.get("dataset_name", ""), e.get("source", "")) for e in existing_ds}
+    for entry in data:
+        key = (entry.get("dataset_name", ""), entry.get("source", ""))
+        if key not in seen:
+            existing_ds.append(entry)
+            seen.add(key)
+
+    output = {"datasets": existing_ds}
+    merged_info = existing.get("runtime_info", {})
+    if any(k.startswith("git_") for k in info):
+        merged_info = {k: v for k, v in merged_info.items() if not k.startswith("git_")}
+    merged_info.update(info)
+    if merged_info:
+        output["runtime_info"] = merged_info
+    return output
+
+
+def _flush(final=True, in_signal=False):
+    """Write what this process has detected into the shared output file.
+
+    final=False is a periodic flush while the process is still running; it
+    still writes everything, but only captures git provenance once. in_signal
+    avoids blocking on `_lock` (the signal may have interrupted the very
+    thread holding it) and skips the slow `git status`.
+    """
+    global _git_captured
     _capture_training_args()
     _capture_accelerate_config()
-    _capture_git_provenance()
-    with _lock:
+
+    got_lock = _lock.acquire(timeout=0.5 if in_signal else -1)
+    try:
         if not _detected_datasets and not _runtime_info:
             _dbg("Flush: nothing detected, skipping write")
             return
-        data = _detected_datasets.copy()
-        info = _runtime_info.copy()
+    finally:
+        if got_lock:
+            _lock.release()
 
-    _dbg(f"Flushing {len(data)} dataset(s) to {_OUTPUT_PATH}")
+    # Only a process that detected something of its own records git
+    # provenance. Capturing it unconditionally made every Python process that
+    # happened to run in a checkout (`pip`, a launcher shim) overwrite the
+    # training process's commit/branch with its own (#107).
+    if final or not _git_captured:
+        _capture_git_provenance(check_dirty=not in_signal)
+        _git_captured = True
+
+    got_lock = _lock.acquire(timeout=0.5 if in_signal else -1)
+    try:
+        data = _detected_datasets.copy()
+        info = dict(_runtime_info)
+    finally:
+        if got_lock:
+            _lock.release()
+
+    _dbg(f"Flushing {len(data)} dataset(s) to {_OUTPUT_PATH} (final={final})")
     try:
         os.makedirs(os.path.dirname(_OUTPUT_PATH) or ".", exist_ok=True)
-
-        existing = {}
-        if os.path.exists(_OUTPUT_PATH):
-            try:
-                with open(_OUTPUT_PATH) as f:
-                    existing = json.load(f)
-                _dbg(f"Merging with existing file ({len(existing.get('datasets', []))} datasets)")
-            except Exception:
-                pass
-
-        existing_ds = existing.get("datasets", [])
-        seen = {(e.get("dataset_name", ""), e.get("source", "")) for e in existing_ds}
-        for entry in data:
-            key = (entry.get("dataset_name", ""), entry.get("source", ""))
-            if key not in seen:
-                existing_ds.append(entry)
-                seen.add(key)
-
-        output = {"datasets": existing_ds}
-
-        merged_info = existing.get("runtime_info", {})
-        merged_info.update(info)
-        if merged_info:
-            output["runtime_info"] = merged_info
-            _dbg(f"Flushing runtime_info: {merged_info}")
-
-        with open(_OUTPUT_PATH, "w") as f:
-            json.dump(output, f, indent=2, default=str)
-        _dbg(f"Flush succeeded: {_OUTPUT_PATH} ({len(existing_ds)} datasets)")
+        with _OutputLock(_OUTPUT_PATH, 1.0 if in_signal else _LOCK_TIMEOUT_S):
+            existing = {}
+            if os.path.exists(_OUTPUT_PATH):
+                try:
+                    with open(_OUTPUT_PATH) as f:
+                        existing = json.load(f)
+                    _dbg(f"Merging with existing file ({len(existing.get('datasets', []))} datasets)")
+                except Exception:
+                    pass
+            output = _merge_output(existing, data, info)
+            # Write-then-rename in the same directory: the sidecar (and the
+            # next writer) only ever sees a complete file, never a truncated
+            # one mid-write.
+            tmp_path = f"{_OUTPUT_PATH}.{os.getpid()}.tmp"
+            with open(tmp_path, "w") as f:
+                json.dump(output, f, indent=2, default=str)
+            os.replace(tmp_path, _OUTPUT_PATH)
+        _dbg(f"Flush succeeded: {_OUTPUT_PATH} ({len(output['datasets'])} datasets)")
         # The ConfigMap write itself now happens in the aibom-dataset-sidecar
         # container (dataset_sidecar.py), which watches this file from
         # outside this process's control and signs what it reads -- see the
@@ -427,6 +652,7 @@ def _install_dataloader_hook():
                 seen_via = existing.setdefault("seen_via", [])
                 if "torch.utils.data.DataLoader" not in seen_via:
                     seen_via.append("torch.utils.data.DataLoader")
+                _notify_change()
                 return
 
             entry = _inspect_torch_dataset(dataset)
@@ -858,7 +1084,7 @@ def install_hooks():
     _install_webdataset_hook()
     _install_transformers_hook()
     _install_peft_hook()
-    atexit.register(_flush)
+    _register_durable_flush()
     _dbg(f"install_hooks: done, output will go to {_OUTPUT_PATH}")
 
 
@@ -990,7 +1216,7 @@ def install_hooks_lazy():
         _dbg(f"Lazy hook: '{mod}' already imported, installing hook now")
         finder.fire(mod)
 
-    atexit.register(_flush)
+    _register_durable_flush()
     _dbg(f"install_hooks_lazy: done, output will go to {_OUTPUT_PATH}")
 
 
@@ -1006,7 +1232,11 @@ def flush():
 
 
 def reset():
-    """Clear detected datasets (for testing)."""
+    """Clear detected datasets and stop any scheduled flush (for testing)."""
+    global _durable_flush_enabled, _git_captured
+    _cancel_pending_flush()
+    _durable_flush_enabled = False
+    _git_captured = False
     with _lock:
         _detected_datasets.clear()
         _hf_dataset_key_registry.clear()
