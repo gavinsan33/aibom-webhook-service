@@ -46,6 +46,15 @@ oc get pod <pod-name> -n <namespace> -o jsonpath='{.spec.initContainers[*].name}
 
 When the Job completes, the AIBOM appears as a custom resource:
 
+Preferred: the `oc aibom` plugin from [`oc-aibom`](https://github.com/gavinsan33/oc-aibom) (a plugin subcommand, not built into `oc`), or the console plugin in the web UI:
+
+```bash
+# Requires the oc-aibom plugin
+oc aibom list -n <namespace>
+```
+
+Fallback, with no plugin needed:
+
 ```bash
 oc get aiboms -n <namespace>
 ```

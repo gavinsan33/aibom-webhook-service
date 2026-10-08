@@ -28,3 +28,4 @@ nav:
       - Detected Fields: CAPABILITIES.md
       - AIBOM Schema: reference/schema.md
       - Configuration: reference/configuration.md
+      - Development: reference/development.md
