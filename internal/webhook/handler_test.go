@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	jsonpatch "gopkg.in/evanphx/json-patch.v4"
 	admissionv1 "k8s.io/api/admission/v1"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	batchv1 "k8s.io/api/batch/v1"
@@ -845,6 +846,61 @@ func TestMutate_PythonPathValueFrom(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected an appended PYTHONPATH entry referencing $(PYTHONPATH)")
+	}
+}
+
+// Applies the real patch to the real pod JSON and checks the resulting spec,
+// since the valueFrom case depends on two same-named PYTHONPATH entries
+// surviving the patch in order (the second expands $(PYTHONPATH) from the first).
+func TestMutate_PythonPathValueFrom_AppliedPatch(t *testing.T) {
+	pod := podWithExistingPythonPath()
+	source := &corev1.EnvVarSource{
+		ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: "py"},
+			Key:                  "path",
+		},
+	}
+	pod.Spec.Containers[0].Env[0] = corev1.EnvVar{Name: "PYTHONPATH", ValueFrom: source}
+
+	patches, err := newTestMutator().Mutate(pod, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	podJSON, err := json.Marshal(pod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	patchJSON, err := json.Marshal(patches)
+	if err != nil {
+		t.Fatal(err)
+	}
+	patch, err := jsonpatch.DecodePatch(patchJSON)
+	if err != nil {
+		t.Fatalf("decode patch: %v", err)
+	}
+	patchedJSON, err := patch.Apply(podJSON)
+	if err != nil {
+		t.Fatalf("patch does not apply: %v", err)
+	}
+	var patched corev1.Pod
+	if err := json.Unmarshal(patchedJSON, &patched); err != nil {
+		t.Fatalf("patched pod does not decode: %v", err)
+	}
+
+	var got []corev1.EnvVar
+	for _, e := range patched.Spec.Containers[0].Env {
+		if e.Name == "PYTHONPATH" {
+			got = append(got, e)
+		}
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 PYTHONPATH entries, got %d: %+v", len(got), got)
+	}
+	if got[0].ValueFrom == nil || got[0].ValueFrom.ConfigMapKeyRef == nil || got[0].Value != "" {
+		t.Errorf("original valueFrom entry must stay first and untouched, got %+v", got[0])
+	}
+	if got[1].Value != "/aibom-hooks:$(PYTHONPATH)" || got[1].ValueFrom != nil {
+		t.Errorf("appended entry must come second, got %+v", got[1])
 	}
 }
 
