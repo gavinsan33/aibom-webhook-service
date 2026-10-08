@@ -758,6 +758,32 @@ def test_compile_aibom_annotation_intent_overrides_detected_model():
     assert aibom["experiment_intent_declared_via"] == "annotation"
 
 
+def test_compile_aibom_surfaces_extra_discovery_and_vllm_fields():
+    discovery = {
+        "system": {"cpu_architecture": "x86_64", "cache_l3": "N/A", "uptime_seconds": "5"},
+        "gpu": {"gpu_memory_per_device_mb": "81920\n81920"},
+        "storage": {"tmpfs_size": "10G", "nvme_count": "0", "io_scheduler": "N/A"},
+        "process_limits": {"cgroup_cpu_quota": "N/A", "max_open_files": "1024"},
+        "benchmarks": {"cpu_compute": {"mflops": "100"}},
+    }
+    detected_model = {"serving_engine": "vllm", "seed": 7, "max_num_seqs": 64, "port": 8000}
+
+    aibom = pp.compile_aibom(
+        discoveries=[discovery], detected_datasets=[], runtime_info={}, annotations={},
+        telemetry=None, detected_model=detected_model, cli_dataset=None,
+    )
+
+    env = aibom["environment"]
+    assert env["cpu"] == {"cpu_architecture": "x86_64"}  # N/A dropped
+    assert env["gpu_memory_mb"] == [81920, 81920]
+    assert env["storage"] == {"tmpfs_size": "10G"}  # nvme_count/io_scheduler not surfaced
+    assert env["process_limits"] == {"max_open_files": "1024"}  # cgroup_* not surfaced
+    assert env["benchmarks"] == {"cpu_compute": {"mflops": "100"}}
+    inf = aibom["inference"]
+    assert (inf["seed"], inf["max_num_seqs"], inf["port"]) == (7, 64, 8000)
+    assert inf["enforce_eager"] is None
+
+
 def test_compile_aibom_infers_inference_intent_from_vllm_detection():
     detected_model = {"serving_engine": "vllm"}
 
