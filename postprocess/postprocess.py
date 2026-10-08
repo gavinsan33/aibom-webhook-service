@@ -2213,6 +2213,41 @@ def pod_status_from_containers(pod_name, containers):
     return pod_containers[0]["terminated_reason"], pod_containers[0].get("exit_code")
 
 
+def pod_job_result(pod_name, containers):
+    """The terminal condition ("Complete"/"Failed") of the Job that owns this
+    pod, as the watcher recorded it in containers.json, or None for a bare pod
+    or a Job that hadn't finished."""
+    for c in containers:
+        if c.get("pod_name") == pod_name and c.get("job_result"):
+            return c["job_result"]
+    return None
+
+
+def pod_restart_info(pod_name, containers):
+    """What a pod's containers went through before their current state, from
+    the container statuses' lastState (#112). With restartPolicy OnFailure a
+    container that was OOM-killed and then restarted successfully reports a
+    clean current state, so the kill is only visible here. Returns a dict with
+    restart_count/last_termination_reason/last_exit_code, or {} if nothing in
+    the pod restarted. As with pod_status_from_containers, OOMKilled wins over
+    other non-zero exits."""
+    restarted = [
+        c for c in containers
+        if c.get("pod_name") == pod_name and c.get("restart_count") and c.get("last_terminated_reason")
+    ]
+    if not restarted:
+        return {}
+    chosen = next(
+        (c for c in restarted if c["last_terminated_reason"] == "OOMKilled"),
+        next((c for c in restarted if c.get("last_exit_code") not in (0, None)), restarted[0]),
+    )
+    return {
+        "restart_count": sum(c["restart_count"] for c in restarted),
+        "last_termination_reason": chosen["last_terminated_reason"],
+        "last_exit_code": chosen.get("last_exit_code"),
+    }
+
+
 # Maps a resource_utilization metric name to the containers.json field
 # holding its configured limit -- only memory/cpu have a Kubernetes resource
 # limit concept; GPU/network/storage don't, so those metrics never get a
@@ -2371,18 +2406,23 @@ def compile_aibom(
         pod_meta = discovery.get("pod_metadata", {})
         pod_name = pod_meta.get("name")
         status, exit_code = pod_status_from_containers(pod_name, containers or [])
-        pods.append(
-            {
-                "pod_name": pod_name,
-                "pod_uid": pod_meta.get("uid"),
-                "pod_namespace": pod_meta.get("namespace"),
-                "pod_ip": pod_meta.get("ip"),
-                "node_name": pod_meta.get("node"),
-                "start_time": pod_meta.get("start_time"),
-                "status": status,
-                "exit_code": exit_code,
-            }
-        )
+        pod_entry = {
+            "pod_name": pod_name,
+            "pod_uid": pod_meta.get("uid"),
+            "pod_namespace": pod_meta.get("namespace"),
+            "pod_ip": pod_meta.get("ip"),
+            "node_name": pod_meta.get("node"),
+            "start_time": pod_meta.get("start_time"),
+            "status": status,
+            "exit_code": exit_code,
+        }
+        pod_entry.update(pod_restart_info(pod_name, containers or []))
+        # A failed pod of a Job that went on to complete is an earlier attempt
+        # (restartPolicy Never + backoffLimit). Its own status stays above as
+        # attempt detail, but it must not make the whole workload look failed.
+        if pod_job_result(pod_name, containers or []) == "Complete" and status not in (None, "Completed"):
+            pod_entry["retried_attempt"] = True
+        pods.append(pod_entry)
 
     # duration_seconds spans from the earliest pod's start (a JobSet can have
     # sibling pods that started at slightly different times) to now --
@@ -2414,7 +2454,9 @@ def compile_aibom(
     # only one pod of a JobSet OOMed while its siblings completed normally),
     # else any other non-Completed status, else "Completed" once every pod that
     # reported a status did so cleanly, else None if no pod reported one at all.
-    pod_statuses = [p["status"] for p in pods if p.get("status")]
+    # Failed attempts of a Job that then completed (retried_attempt) don't
+    # count: the Job's own outcome is what the workload did (#112).
+    pod_statuses = [p["status"] for p in pods if p.get("status") and not p.get("retried_attempt")]
     if "OOMKilled" in pod_statuses:
         status = "OOMKilled"
     elif any(s != "Completed" for s in pod_statuses):
@@ -2423,6 +2465,18 @@ def compile_aibom(
         status = "Completed"
     else:
         status = None
+    # A Job that completed is Completed even if every pod we hold is a failed
+    # earlier attempt, or none reported a terminated state.
+    if status is None and any(
+        pod_job_result(p.get("pod_name"), containers or []) == "Complete" for p in pods
+    ):
+        status = "Completed"
+    # A Job can fail without any container reporting a failure (a deadline hit
+    # while pods were being killed, say); its own condition still says so.
+    if status in (None, "Completed") and any(
+        pod_job_result(p.get("pod_name"), containers or []) == "Failed" for p in pods
+    ):
+        status = "Failed"
 
     aibom["execution_metadata"] = {
         "job_id": JOB_NAME,

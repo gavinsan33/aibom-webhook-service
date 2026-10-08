@@ -18,7 +18,9 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 func enabledNamespace(name string) *corev1.Namespace {
@@ -1522,7 +1524,7 @@ func TestBuildPostprocessInputs_CapturesOOMKilledStatus(t *testing.T) {
 	}
 	w := &Watcher{clientset: fake.NewSimpleClientset()}
 
-	_, _, containersJSON, _ := w.buildPostprocessInputs(context.Background(), "ns", "cm-name", []corev1.Pod{*pod})
+	_, _, containersJSON, _ := w.buildPostprocessInputs(context.Background(), "ns", "cm-name", []corev1.Pod{*pod}, nil)
 
 	var containers []struct {
 		PodName          string `json:"pod_name"`
@@ -1560,7 +1562,7 @@ func TestBuildPostprocessInputs_CapturesFinishedAt(t *testing.T) {
 	}
 	w := &Watcher{clientset: fake.NewSimpleClientset()}
 
-	_, _, containersJSON, _ := w.buildPostprocessInputs(context.Background(), "ns", "cm-name", []corev1.Pod{*pod})
+	_, _, containersJSON, _ := w.buildPostprocessInputs(context.Background(), "ns", "cm-name", []corev1.Pod{*pod}, nil)
 
 	var containers []struct {
 		FinishedAt string `json:"finished_at"`
@@ -1581,7 +1583,7 @@ func TestBuildPostprocessInputs_NoStatusOmitsTerminatedFields(t *testing.T) {
 	pod := instrumentedPod("running-job", "ns")
 	w := &Watcher{clientset: fake.NewSimpleClientset()}
 
-	_, _, containersJSON, _ := w.buildPostprocessInputs(context.Background(), "ns", "cm-name", []corev1.Pod{*pod})
+	_, _, containersJSON, _ := w.buildPostprocessInputs(context.Background(), "ns", "cm-name", []corev1.Pod{*pod}, nil)
 
 	if strings.Contains(containersJSON, "terminated_reason") {
 		t.Errorf("expected no terminated_reason field when no container status is reported, got: %s", containersJSON)
@@ -1597,7 +1599,7 @@ func TestBuildPostprocessInputs_CapturesResourceLimits(t *testing.T) {
 	pod.Spec.Containers[0].Resources.Limits[corev1.ResourceCPU] = resource.MustParse("2")
 	w := &Watcher{clientset: fake.NewSimpleClientset()}
 
-	_, _, containersJSON, _ := w.buildPostprocessInputs(context.Background(), "ns", "cm-name", []corev1.Pod{*pod})
+	_, _, containersJSON, _ := w.buildPostprocessInputs(context.Background(), "ns", "cm-name", []corev1.Pod{*pod}, nil)
 
 	var containers []struct {
 		MemoryLimitBytes *int64 `json:"memory_limit_bytes"`
@@ -1623,10 +1625,249 @@ func TestBuildPostprocessInputs_NoResourceLimitsOmitsLimitFields(t *testing.T) {
 	pod := instrumentedPod("no-limits-job", "ns")
 	w := &Watcher{clientset: fake.NewSimpleClientset()}
 
-	_, _, containersJSON, _ := w.buildPostprocessInputs(context.Background(), "ns", "cm-name", []corev1.Pod{*pod})
+	_, _, containersJSON, _ := w.buildPostprocessInputs(context.Background(), "ns", "cm-name", []corev1.Pod{*pod}, nil)
 
 	if strings.Contains(containersJSON, "memory_limit_bytes") || strings.Contains(containersJSON, "cpu_limit_millis") {
 		t.Errorf("expected no limit fields when the container sets no memory/cpu limit, got: %s", containersJSON)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Termination status and failed postprocess Jobs (#112)
+// ---------------------------------------------------------------------------
+
+type capturedContainer struct {
+	PodName              string `json:"pod_name"`
+	TerminatedReason     string `json:"terminated_reason"`
+	JobResult            string `json:"job_result"`
+	RestartCount         int32  `json:"restart_count"`
+	LastTerminatedReason string `json:"last_terminated_reason"`
+	LastExitCode         *int32 `json:"last_exit_code"`
+}
+
+func capturedContainers(t *testing.T, w *Watcher, pods []corev1.Pod, jobResults map[string]string) []capturedContainer {
+	t.Helper()
+	_, _, containersJSON, _ := w.buildPostprocessInputs(context.Background(), "ns", "cm-name", pods, jobResults)
+	var containers []capturedContainer
+	if err := json.Unmarshal([]byte(containersJSON), &containers); err != nil {
+		t.Fatalf("unmarshal containers.json: %v", err)
+	}
+	return containers
+}
+
+func TestBuildPostprocessInputs_CapturesRestartHistory(t *testing.T) {
+	pod := instrumentedPod("retry-job", "ns")
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name:         "training",
+		RestartCount: 2,
+		State: corev1.ContainerState{
+			Terminated: &corev1.ContainerStateTerminated{Reason: "Completed", ExitCode: 0},
+		},
+		LastTerminationState: corev1.ContainerState{
+			Terminated: &corev1.ContainerStateTerminated{Reason: "OOMKilled", ExitCode: 137},
+		},
+	}}
+	w := &Watcher{clientset: fake.NewSimpleClientset()}
+
+	got := capturedContainers(t, w, []corev1.Pod{*pod}, nil)
+
+	if len(got) != 1 {
+		t.Fatalf("want 1 container, got %d", len(got))
+	}
+	if got[0].TerminatedReason != "Completed" {
+		t.Errorf("current state should still be reported, got %q", got[0].TerminatedReason)
+	}
+	if got[0].RestartCount != 2 || got[0].LastTerminatedReason != "OOMKilled" ||
+		got[0].LastExitCode == nil || *got[0].LastExitCode != 137 {
+		t.Errorf("earlier OOM kill not captured: %+v", got[0])
+	}
+}
+
+func TestBuildPostprocessInputs_NoRestartHistoryWhenNeverRestarted(t *testing.T) {
+	pod := instrumentedPod("clean-job", "ns")
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name:  "training",
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{Reason: "Completed"}},
+	}}
+	w := &Watcher{clientset: fake.NewSimpleClientset()}
+
+	_, _, containersJSON, _ := w.buildPostprocessInputs(context.Background(), "ns", "cm-name", []corev1.Pod{*pod}, nil)
+
+	for _, key := range []string{"restart_count", "last_terminated_reason", "last_exit_code", "job_result"} {
+		if strings.Contains(containersJSON, key) {
+			t.Errorf("%s should be omitted, got: %s", key, containersJSON)
+		}
+	}
+}
+
+func TestBuildPostprocessInputs_TagsEachPodWithItsJobsResult(t *testing.T) {
+	failedAttempt := instrumentedPod("train-job", "ns")
+	failedAttempt.Name = "train-job-attempt1"
+	sibling := instrumentedPod("sibling-job", "ns")
+	bare := instrumentedPod("x", "ns")
+	bare.Name = "bare"
+	bare.Labels = map[string]string{LabelInstrumented: "true"}
+	for _, p := range []*corev1.Pod{failedAttempt, sibling, bare} {
+		p.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "training"}}
+	}
+	w := &Watcher{clientset: fake.NewSimpleClientset()}
+
+	got := capturedContainers(t, w, []corev1.Pod{*failedAttempt, *sibling, *bare},
+		map[string]string{"train-job": "Complete", "sibling-job": "Failed"})
+
+	want := map[string]string{"train-job-attempt1": "Complete", "sibling-job-pod": "Failed", "bare": ""}
+	for _, c := range got {
+		if c.JobResult != want[c.PodName] {
+			t.Errorf("pod %s: job_result = %q, want %q", c.PodName, c.JobResult, want[c.PodName])
+		}
+	}
+}
+
+func TestJobResult(t *testing.T) {
+	failed := completedJob("j", "ns")
+	failed.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue}}
+	notTrue := completedJob("j", "ns")
+	notTrue.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionFalse}}
+	running := completedJob("j", "ns")
+	running.Status.Conditions = nil
+
+	for name, tc := range map[string]struct {
+		job  *batchv1.Job
+		want string
+	}{
+		"complete": {completedJob("j", "ns"), "Complete"},
+		"failed":   {failed, "Failed"},
+		"false":    {notTrue, ""},
+		"running":  {running, ""},
+	} {
+		if got := jobResult(tc.job); got != tc.want {
+			t.Errorf("%s: jobResult = %q, want %q", name, got, tc.want)
+		}
+	}
+}
+
+func failedPostprocessFixtures(jobName, namespace string) (*batchv1.Job, *corev1.ConfigMap) {
+	ppJob, _, dataConfigMap := newAIBOMPostprocessFixtures(jobName, namespace)
+	ppJob.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue}}
+	return ppJob, dataConfigMap
+}
+
+func TestCollectAIBOM_KeepsFailedPostprocessJobAndConfigMap(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	ppJob, dataConfigMap := failedPostprocessFixtures("train-job", "test-ns")
+	identityName := aibomdata.WorkloadIdentityName("train-job")
+	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: identityName, Namespace: "test-ns"}}
+
+	client := fake.NewSimpleClientset(ns, ppJob, dataConfigMap, sa)
+	w := New(client, Config{PostprocessImage: "aibom-postprocess:latest"})
+	startWatcher(t, w)
+
+	w.onJobEvent(ppJob)
+
+	got, err := client.BatchV1().Jobs("test-ns").Get(context.TODO(), "train-job-aibom-postprocess", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("failed postprocess job must be kept for inspection, got err=%v", err)
+	}
+	if got.Annotations[AnnotationAIBOMCollected] == "" {
+		t.Error("kept job must still be marked collected so a resync doesn't collect it again")
+	}
+	if _, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), "train-job-aibom-postprocess-data", metav1.GetOptions{}); err != nil {
+		t.Errorf("data configmap must be kept so the run can be retried by hand, got err=%v", err)
+	}
+	if _, err := client.CoreV1().ServiceAccounts("test-ns").Get(context.TODO(), identityName, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("workload identity should still be cleaned up, got err=%v", err)
+	}
+
+	// A resync must not collect it a second time.
+	w.onJobEvent(got)
+	if _, err := client.BatchV1().Jobs("test-ns").Get(context.TODO(), "train-job-aibom-postprocess", metav1.GetOptions{}); err != nil {
+		t.Errorf("kept job disappeared on resync: %v", err)
+	}
+}
+
+func TestCreatePostprocessJob_SetsTTLAndOwnsConfigMap(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	job := completedJob("train-job", "test-ns")
+	pod := instrumentedPod("train-job", "test-ns")
+	client := fake.NewSimpleClientset(ns, job, pod)
+	// The fake API server assigns no UIDs, so give the Job one on create.
+	client.PrependReactor("create", "jobs", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		obj := action.(k8stesting.CreateAction).GetObject().(*batchv1.Job)
+		obj.UID = "pp-uid"
+		return false, obj, nil
+	})
+	w := New(client, Config{PostprocessImage: "aibom-postprocess:latest"})
+
+	if err := w.createPostprocessJob(context.TODO(), job); err != nil {
+		t.Fatalf("createPostprocessJob: %v", err)
+	}
+
+	pp, err := client.BatchV1().Jobs("test-ns").Get(context.TODO(), "train-job-aibom-postprocess", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get postprocess job: %v", err)
+	}
+	if pp.Spec.TTLSecondsAfterFinished == nil || *pp.Spec.TTLSecondsAfterFinished != failedPostprocessTTLSeconds {
+		t.Errorf("TTLSecondsAfterFinished = %v, want %d", pp.Spec.TTLSecondsAfterFinished, failedPostprocessTTLSeconds)
+	}
+	cm, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), aibomdata.ConfigMapName("train-job"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get data configmap: %v", err)
+	}
+	if len(cm.OwnerReferences) != 1 || cm.OwnerReferences[0].Kind != "Job" ||
+		cm.OwnerReferences[0].Name != "train-job-aibom-postprocess" || cm.OwnerReferences[0].UID != "pp-uid" {
+		t.Errorf("data configmap should be owned by the postprocess job, got %+v", cm.OwnerReferences)
+	}
+}
+
+func TestCreatePostprocessJob_ReplacesStaleFailedPostprocessJob(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	job := completedJob("train-job", "test-ns")
+	pod := instrumentedPod("train-job", "test-ns")
+	stale, staleCM := failedPostprocessFixtures("train-job", "test-ns")
+	staleCM.Data = map[string]string{"annotations.json": "stale"}
+	client := fake.NewSimpleClientset(ns, job, pod, stale, staleCM)
+	w := New(client, Config{PostprocessImage: "aibom-postprocess:latest"})
+
+	if err := w.createPostprocessJob(context.TODO(), job); err != nil {
+		t.Fatalf("createPostprocessJob: %v", err)
+	}
+
+	pp, err := client.BatchV1().Jobs("test-ns").Get(context.TODO(), "train-job-aibom-postprocess", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get postprocess job: %v", err)
+	}
+	if jobResult(pp) != "" {
+		t.Errorf("the failed leftover should have been replaced by a fresh job, got conditions %+v", pp.Status.Conditions)
+	}
+	cm, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), aibomdata.ConfigMapName("train-job"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get data configmap: %v", err)
+	}
+	if cm.Data["annotations.json"] == "stale" {
+		t.Error("data configmap still holds the previous run's data")
+	}
+}
+
+func TestCreatePostprocessJob_LeavesRunningPostprocessJobAlone(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	job := completedJob("train-job", "test-ns")
+	pod := instrumentedPod("train-job", "test-ns")
+	running, _, _ := newAIBOMPostprocessFixtures("train-job", "test-ns")
+	running.Status.Conditions = nil
+	running.Annotations = map[string]string{"marker": "original"}
+	client := fake.NewSimpleClientset(ns, job, pod, running)
+	w := New(client, Config{PostprocessImage: "aibom-postprocess:latest"})
+
+	if err := w.createPostprocessJob(context.TODO(), job); err != nil {
+		t.Fatalf("createPostprocessJob: %v", err)
+	}
+
+	pp, err := client.BatchV1().Jobs("test-ns").Get(context.TODO(), "train-job-aibom-postprocess", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get postprocess job: %v", err)
+	}
+	if pp.Annotations["marker"] != "original" {
+		t.Error("an in-flight postprocess job must not be deleted and recreated")
 	}
 }
 

@@ -75,6 +75,11 @@ const (
 	maxJobNameLength  = aibomdata.MaxJobNameLength
 	postprocessSuffix = aibomdata.PostprocessSuffix
 	configMapSuffix   = aibomdata.ConfigMapSuffix
+
+	// failedPostprocessTTLSeconds is how long a failed postprocess Job (and its
+	// pod logs) stays on the cluster for inspection before Kubernetes' TTL
+	// controller removes it, along with the data ConfigMap it owns (#112).
+	failedPostprocessTTLSeconds = int32(24 * 60 * 60)
 )
 
 // Config bundles the watcher's telemetry-related settings — grouped into a struct
@@ -528,6 +533,20 @@ func (w *Watcher) isJobFinished(job *batchv1.Job) bool {
 	return false
 }
 
+// jobResult returns the Job's terminal condition ("Complete" or "Failed"), or
+// "" if it hasn't reached one (still running, or being deleted).
+func jobResult(job *batchv1.Job) string {
+	for _, c := range job.Status.Conditions {
+		if c.Status != corev1.ConditionTrue {
+			continue
+		}
+		if c.Type == batchv1.JobComplete || c.Type == batchv1.JobFailed {
+			return string(c.Type)
+		}
+	}
+	return ""
+}
+
 func podsRequestGPU(pods []corev1.Pod) bool {
 	gpuResource := corev1.ResourceName("nvidia.com/gpu")
 	zero := resource.MustParse("0")
@@ -553,6 +572,14 @@ func (w *Watcher) getInstrumentedPods(job *batchv1.Job) ([]corev1.Pod, error) {
 		return nil, fmt.Errorf("list pods for job %s/%s: %w", job.Namespace, job.Name, err)
 	}
 	return pods.Items, nil
+}
+
+// podJobName is the name of the Job that owns the pod, "" for a bare pod.
+func podJobName(pod *corev1.Pod) string {
+	if name := pod.Labels["batch.kubernetes.io/job-name"]; name != "" {
+		return name
+	}
+	return pod.Labels["job-name"]
 }
 
 // extractDataFromPod reads a pod's contribution to the AIBOM data ConfigMap.
@@ -816,8 +843,10 @@ func mergeDatasets(datasets []string) string {
 
 // buildPostprocessInputs reads the discovery, dataset, and storage data the
 // pods themselves already wrote into the data ConfigMap, and serializes
-// container command/args info for CLI-based model detection.
-func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configMapName string, pods []corev1.Pod) (discoveries, datasets []string, containersJSON, storageJSON string) {
+// container command/args info for CLI-based model detection. jobResults maps a
+// Job name to its terminal condition (see jobResult) so each pod's containers
+// can be tagged with how the Job that owns them ended; nil for a bare pod.
+func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configMapName string, pods []corev1.Pod, jobResults map[string]string) (discoveries, datasets []string, containersJSON, storageJSON string) {
 	dataCM, err := w.clientset.CoreV1().ConfigMaps(namespace).Get(ctx, configMapName, metav1.GetOptions{})
 	if err != nil {
 		if !errors.IsNotFound(err) {
@@ -887,6 +916,19 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 		// a real and common case, not a zero value.
 		MemoryLimitBytes *int64 `json:"memory_limit_bytes,omitempty"`
 		CPULimitMillis   *int64 `json:"cpu_limit_millis,omitempty"`
+		// RestartCount/LastTerminatedReason/LastExitCode come from the
+		// container's previous termination (LastTerminationState). With
+		// restartPolicy OnFailure a container that was OOM-killed and then
+		// restarted successfully has a clean current state, so without these
+		// the kill is invisible (#112). Set only when the container restarted.
+		RestartCount         int32  `json:"restart_count,omitempty"`
+		LastTerminatedReason string `json:"last_terminated_reason,omitempty"`
+		LastExitCode         *int32 `json:"last_exit_code,omitempty"`
+		// JobResult is the terminal condition ("Complete"/"Failed") of the Job
+		// that owns this container's pod, so a failed attempt of a Job that
+		// went on to complete can be told apart from a Job that failed. Empty
+		// for a bare pod, or a Job that hadn't finished (e.g. being deleted).
+		JobResult string `json:"job_result,omitempty"`
 	}
 	var containers []containerInfo
 	for _, pod := range pods {
@@ -899,8 +941,12 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 		terminatedReasons := make(map[string]string, len(pod.Status.ContainerStatuses))
 		exitCodes := make(map[string]int32, len(pod.Status.ContainerStatuses))
 		finishedAts := make(map[string]string, len(pod.Status.ContainerStatuses))
+		restarts := make(map[string]corev1.ContainerStatus, len(pod.Status.ContainerStatuses))
 		for _, cs := range pod.Status.ContainerStatuses {
 			imageIDs[cs.Name] = cs.ImageID
+			if cs.RestartCount > 0 && cs.LastTerminationState.Terminated != nil {
+				restarts[cs.Name] = cs
+			}
 			if cs.State.Terminated != nil {
 				terminatedReasons[cs.Name] = cs.State.Terminated.Reason
 				exitCodes[cs.Name] = cs.State.Terminated.ExitCode
@@ -917,6 +963,14 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 				ImageID: imageIDs[c.Name],
 				Command: c.Command,
 				Args:    c.Args,
+			}
+			ci.JobResult = jobResults[podJobName(&pod)]
+			if cs, ok := restarts[c.Name]; ok {
+				last := cs.LastTerminationState.Terminated
+				lastExit := last.ExitCode
+				ci.RestartCount = cs.RestartCount
+				ci.LastTerminatedReason = last.Reason
+				ci.LastExitCode = &lastExit
 			}
 			if reason, ok := terminatedReasons[c.Name]; ok {
 				ci.TerminatedReason = reason
@@ -944,17 +998,20 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 // data gathered from the given pods. It does not patch AnnotationPostprocess back onto
 // the trigger resource — callers must do that themselves, since the trigger's kind
 // (Job vs Pod) determines which client to patch with.
-func (w *Watcher) createPostprocessJobCore(ctx context.Context, namespace, triggerName string, pods []corev1.Pod, annotations map[string]string) (string, error) {
+func (w *Watcher) createPostprocessJobCore(ctx context.Context, namespace, triggerName string, pods []corev1.Pod, annotations map[string]string, jobResults map[string]string) (string, error) {
 	postprocessName := postprocessJobName(triggerName)
 	configMapName := aibomdata.ConfigMapName(triggerName)
 
-	discoveries, datasets, containersJSON, storageJSON := w.buildPostprocessInputs(ctx, namespace, configMapName, pods)
+	w.removeStaleFailedPostprocessJob(ctx, namespace, triggerName, postprocessName, configMapName)
+
+	discoveries, datasets, containersJSON, storageJSON := w.buildPostprocessInputs(ctx, namespace, configMapName, pods, jobResults)
 
 	if err := w.createDataConfigMap(ctx, namespace, configMapName, triggerName, discoveries, datasets, annotations, containersJSON, storageJSON); err != nil {
 		log.Printf("warning: could not create data configmap for %s/%s: %v", namespace, triggerName, err)
 	}
 
 	backoffLimit := int32(3)
+	ttlSecondsAfterFinished := failedPostprocessTTLSeconds
 	optional := true
 	runAsNonRoot := true
 	allowPrivilegeEscalation := false
@@ -970,6 +1027,9 @@ func (w *Watcher) createPostprocessJobCore(ctx context.Context, namespace, trigg
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit: &backoffLimit,
+			// Only matters for a Job collectAIBOM leaves in place (a failed one);
+			// a succeeded one is deleted right away.
+			TTLSecondsAfterFinished: &ttlSecondsAfterFinished,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
@@ -1069,13 +1129,68 @@ func (w *Watcher) createPostprocessJobCore(ctx context.Context, namespace, trigg
 		},
 	}
 
-	_, err := w.clientset.BatchV1().Jobs(namespace).Create(ctx, postprocessJob, metav1.CreateOptions{})
+	created, err := w.clientset.BatchV1().Jobs(namespace).Create(ctx, postprocessJob, metav1.CreateOptions{})
 	if err != nil && !errors.IsAlreadyExists(err) {
 		return "", fmt.Errorf("create postprocess job: %w", err)
+	}
+	if err == nil {
+		w.ownDataConfigMap(ctx, created, configMapName)
 	}
 
 	log.Printf("created postprocess job %s/%s for %s", namespace, postprocessName, triggerName)
 	return postprocessName, nil
+}
+
+// ownDataConfigMap makes the postprocess Job the owner of its data ConfigMap,
+// so the TTL controller's removal of a retained failed Job takes the ConfigMap
+// with it instead of leaking it (#112). Skipped when the Job has no UID yet.
+func (w *Watcher) ownDataConfigMap(ctx context.Context, owner *batchv1.Job, configMapName string) {
+	if owner.UID == "" {
+		return
+	}
+	patch, _ := json.Marshal(map[string]any{
+		"metadata": map[string]any{
+			"ownerReferences": []metav1.OwnerReference{{
+				APIVersion: "batch/v1",
+				Kind:       "Job",
+				Name:       owner.Name,
+				UID:        owner.UID,
+			}},
+		},
+	})
+	if _, err := w.clientset.CoreV1().ConfigMaps(owner.Namespace).Patch(ctx, configMapName, types.MergePatchType, patch, metav1.PatchOptions{}); err != nil {
+		log.Printf("warning: could not make postprocess job %s/%s own its data configmap %s: %v", owner.Namespace, owner.Name, configMapName, err)
+	}
+}
+
+// removeStaleFailedPostprocessJob deletes a failed postprocess Job that
+// collectAIBOM kept for inspection, along with its data ConfigMap, when the
+// same workload name is postprocessed again. Without it the new Job's create
+// would hit AlreadyExists and be silently skipped, so a rerun inside the
+// retention window would never get an AIBOM. Only a Job that finished Failed
+// is touched; one still running is left alone.
+func (w *Watcher) removeStaleFailedPostprocessJob(ctx context.Context, namespace, triggerName, postprocessName, configMapName string) {
+	existing, err := w.clientset.BatchV1().Jobs(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("%s=%s", LabelPostprocessFor, triggerName),
+	})
+	if err != nil {
+		log.Printf("warning: could not check for a stale postprocess job for %s/%s: %v", namespace, triggerName, err)
+		return
+	}
+	for i := range existing.Items {
+		old := &existing.Items[i]
+		if old.Name != postprocessName || jobResult(old) != string(batchv1.JobFailed) {
+			continue
+		}
+		log.Printf("removing failed postprocess job %s/%s left from an earlier run before recreating it", namespace, old.Name)
+		background := metav1.DeletePropagationBackground
+		if err := w.clientset.BatchV1().Jobs(namespace).Delete(ctx, old.Name, metav1.DeleteOptions{PropagationPolicy: &background}); err != nil && !errors.IsNotFound(err) {
+			log.Printf("warning: could not delete stale postprocess job %s/%s: %v", namespace, old.Name, err)
+		}
+		if err := w.clientset.CoreV1().ConfigMaps(namespace).Delete(ctx, configMapName, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+			log.Printf("warning: could not delete stale postprocess data configmap %s/%s: %v", namespace, configMapName, err)
+		}
+	}
 }
 
 func (w *Watcher) createPostprocessJob(ctx context.Context, job *batchv1.Job) error {
@@ -1102,23 +1217,31 @@ func (w *Watcher) createPostprocessJob(ctx context.Context, job *batchv1.Job) er
 		}
 	}
 
-	// Collect AIBOM annotations from the job and sibling jobs in the JobSet
+	// Collect AIBOM annotations from the job and sibling jobs in the JobSet,
+	// and each Job's terminal condition (#112): a pod of a Job that completed
+	// is not a failure even if an earlier attempt of it was.
 	annotations := collectAIBOMAnnotations(job.Annotations)
-	if jobsetName := job.Labels["jobset.sigs.k8s.io/jobset-name"]; jobsetName != "" && len(annotations) == 0 {
+	jobResults := map[string]string{job.Name: jobResult(job)}
+	if jobsetName := job.Labels["jobset.sigs.k8s.io/jobset-name"]; jobsetName != "" {
 		siblingJobs, err := w.clientset.BatchV1().Jobs(job.Namespace).List(ctx, metav1.ListOptions{
 			LabelSelector: fmt.Sprintf("jobset.sigs.k8s.io/jobset-name=%s", jobsetName),
 		})
 		if err == nil {
 			for i := range siblingJobs.Items {
-				if sa := collectAIBOMAnnotations(siblingJobs.Items[i].Annotations); len(sa) > 0 {
-					annotations = sa
-					break
+				sibling := &siblingJobs.Items[i]
+				if _, ok := jobResults[sibling.Name]; !ok {
+					jobResults[sibling.Name] = jobResult(sibling)
+				}
+				if len(annotations) == 0 {
+					if sa := collectAIBOMAnnotations(sibling.Annotations); len(sa) > 0 {
+						annotations = sa
+					}
 				}
 			}
 		}
 	}
 
-	postprocessName, err := w.createPostprocessJobCore(ctx, job.Namespace, job.Name, pods, annotations)
+	postprocessName, err := w.createPostprocessJobCore(ctx, job.Namespace, job.Name, pods, annotations, jobResults)
 	if err != nil {
 		return err
 	}
@@ -1139,7 +1262,7 @@ func (w *Watcher) createPostprocessJob(ctx context.Context, job *batchv1.Job) er
 func (w *Watcher) createPostprocessJobForPod(ctx context.Context, pod *corev1.Pod) error {
 	annotations := collectAIBOMAnnotations(pod.Annotations)
 
-	postprocessName, err := w.createPostprocessJobCore(ctx, pod.Namespace, pod.Name, []corev1.Pod{*pod}, annotations)
+	postprocessName, err := w.createPostprocessJobCore(ctx, pod.Namespace, pod.Name, []corev1.Pod{*pod}, annotations, nil)
 	if err != nil {
 		return err
 	}
@@ -1162,8 +1285,9 @@ func postprocessJobName(jobName string) string {
 // postprocess.py via the Kubernetes API, so on success that create call has
 // already gone through; either way all that's left is bookkeeping: mark the
 // Job as collected and clean up the Job/ConfigMap so a same-named rerun of
-// the original workload doesn't collide with leftovers. On failure this also
-// discards the failed Job's pod logs (#112).
+// the original workload doesn't collide with leftovers. A failed Job is the
+// exception: it and its data ConfigMap are kept until the Job's TTL expires,
+// so the failure can be inspected (#112).
 func (w *Watcher) collectAIBOM(ctx context.Context, job *batchv1.Job) {
 	originalJobName := job.Labels[LabelPostprocessFor]
 	if originalJobName == "" {
@@ -1177,6 +1301,18 @@ func (w *Watcher) collectAIBOM(ctx context.Context, job *batchv1.Job) {
 
 	if w.debugKeepPostprocessJobs {
 		log.Printf("debug-keep-postprocess-jobs set: leaving postprocess job %s/%s and its data configmap in place", job.Namespace, job.Name)
+		return
+	}
+
+	// A failed postprocess Job is the only record of why no AIBOM was made: its
+	// pod logs and its data ConfigMap are what you'd inspect or retry from, so
+	// deleting them here left nothing to look at (#112). Keep both; the Job's
+	// TTL (failedPostprocessTTLSeconds) removes them later, and the workload
+	// identity below isn't needed either way.
+	if jobResult(job) == string(batchv1.JobFailed) {
+		log.Printf("postprocess job %s/%s for %s FAILED, no AIBOM was created; keeping it and its data configmap for %s: oc logs -n %s job/%s",
+			job.Namespace, job.Name, originalJobName, time.Duration(failedPostprocessTTLSeconds)*time.Second, job.Namespace, job.Name)
+		w.deleteWorkloadIdentity(ctx, job.Namespace, originalJobName)
 		return
 	}
 
