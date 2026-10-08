@@ -8,6 +8,16 @@ Because `AIBOM` is namespaced, it follows ordinary Kubernetes RBAC: a user with 
 
 `spec` is immutable once created. The CRD rejects any update that changes it, even from a user with `update` or `patch` on `aiboms.aibom.io`. Deletion is still governed by ordinary `delete` RBAC.
 
+Preferred: the `oc aibom` plugin from [`oc-aibom`](https://github.com/gavinsan33/oc-aibom) (a plugin subcommand, not built into `oc`), or the console plugin in the web UI:
+
+```bash
+# Requires the oc-aibom plugin
+oc aibom list -n <namespace>
+oc aibom describe <name> -n <namespace>
+```
+
+Fallback, with no plugin needed (standard `oc`/`kubectl`):
+
 ```bash
 # List AIBOMs in a namespace
 oc get aiboms -n <namespace>
