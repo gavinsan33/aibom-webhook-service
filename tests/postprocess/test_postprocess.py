@@ -2278,3 +2278,318 @@ def test_compile_aibom_memory_is_gib_and_network_is_decimal_mbps():
     assert metrics["memory_usage"]["avg"] == 2
     assert metrics["network_receive"]["unit"] == "Mbps"
     assert metrics["network_receive"]["avg"] == 1  # 125 kB/s * 8 = 1 Mbit/s
+
+
+# ---------------------------------------------------------------------------
+# CLI parsing: forms that used to be missed (#108)
+# ---------------------------------------------------------------------------
+
+
+def _sh(script, shell=("sh", "-c")):
+    return {"command": list(shell), "args": [script]}
+
+
+def test_detect_vllm_positional_model():
+    result = pp.detect_vllm_from_command(["vllm", "serve", "meta-llama/Llama-3.1-8B", "--port", "8000"])
+    assert result["model_name"] == "meta-llama/Llama-3.1-8B"
+    assert result["port"] == 8000
+
+
+def test_detect_vllm_explicit_model_flag_wins_over_positional():
+    result = pp.detect_vllm_from_command(["vllm", "serve", "a/one", "--model", "b/two"])
+    assert result["model_name"] == "b/two"
+
+
+def test_detect_vllm_positional_not_confused_with_unknown_flag_value():
+    result = pp.detect_vllm_from_command(["vllm", "serve", "--host", "0.0.0.0", "--port", "8000"])
+    assert "model_name" not in result
+    assert result["serving_engine"] == "vllm"
+
+
+def test_detect_vllm_bare_serve_still_identifies_engine():
+    assert pp.detect_vllm_from_command(["vllm", "serve", "$MODEL"]) == {"serving_engine": "vllm"}
+
+
+def test_detect_vllm_snake_case_flags():
+    result = pp.detect_vllm_from_command(
+        ["vllm", "serve", "--max_model_len", "4096", "--tensor_parallel_size=2", "--model", "x/y"]
+    )
+    assert result["max_model_len"] == 4096
+    assert result["tensor_parallel_size"] == 2
+
+
+def test_detect_vllm_api_server_module():
+    result = pp.detect_vllm_from_command(
+        ["python3", "-m", "vllm.entrypoints.openai.api_server", "--model", "x/y"]
+    )
+    assert result["model_name"] == "x/y"
+
+
+def test_detect_vllm_entrypoint_only_image():
+    container = {
+        "image": "docker.io/vllm/vllm-openai:v0.6.0",
+        "args": ["--model", "x/y", "--max_model_len", "4096"],
+    }
+    result = pp.detect_model_from_containers([container])
+    assert result["serving_engine"] == "vllm"
+    assert result["model_name"] == "x/y"
+    assert result["max_model_len"] == 4096
+
+
+def test_detect_vllm_entrypoint_only_image_with_serve_and_positional():
+    container = {"image": "registry:5000/vllm/vllm-openai@sha256:abc", "args": ["serve", "x/y"]}
+    assert pp.detect_model_from_containers([container])["model_name"] == "x/y"
+
+
+def test_entrypoint_fallback_needs_vllm_image_and_no_command():
+    assert pp.detect_model_from_containers([{"image": "python:3.12", "args": ["--model", "x"]}]) == {}
+    overridden = {"image": "vllm/vllm-openai:v0", "command": ["python", "app.py"], "args": ["--model", "x"]}
+    assert pp.detect_model_from_containers([overridden]) == {}
+
+
+def test_detect_trl_bare_boolean_flags():
+    result = pp.detect_trl_from_command(
+        ["trl", "sft", "--use_peft", "--lora_r", "16", "--load_in_4bit", "--model_name_or_path", "m"]
+    )
+    assert result["adaptation_method"] == "qlora"
+    assert result["lora_rank"] == 16
+    assert result["model_name"] == "m"
+
+
+def test_detect_trl_explicit_false_and_negated_flags():
+    assert "adaptation_method" not in pp.detect_trl_from_command(["trl", "sft", "--use_peft", "false"])
+    assert "adaptation_method" not in pp.detect_trl_from_command(["trl", "sft", "--use_peft=false"])
+    assert "adaptation_method" not in pp.detect_trl_from_command(["trl", "sft", "--no_use_peft"])
+
+
+def test_detect_trl_hyphenated_flags():
+    result = pp.detect_trl_from_command(["trl", "sft", "--use-peft", "--lora-r", "8"])
+    assert result["adaptation_method"] == "lora"
+    assert result["lora_rank"] == 8
+
+
+def test_detect_trl_config_file_still_identifies_framework():
+    assert pp.detect_trl_from_command(["trl", "sft", "--config", "cfg.yaml"]) == {
+        "training_framework": "trl"
+    }
+
+
+def test_detect_trl_fractional_epochs():
+    result = pp.detect_trl_from_command(["trl", "sft", "--num_train_epochs", "0.5"])
+    assert result["epochs"] == 0.5
+    assert pp.detect_trl_from_command(["trl", "sft", "--num_train_epochs", "3"])["epochs"] == 3
+
+
+def test_detect_trl_load_in_8bit_does_not_leak_when_4bit_set():
+    result = pp.detect_trl_from_command(
+        ["trl", "sft", "--use_peft", "--lora_r", "4", "--load_in_4bit", "--load_in_8bit", "false"]
+    )
+    assert "load_in_8bit" not in result and "load_in_4bit" not in result
+
+
+def test_detect_trl_python_module_form():
+    result = pp.detect_trl_from_command(["python", "-m", "trl", "sft", "--seed", "7"])
+    assert result["random_seed"] == 7
+
+
+@pytest.mark.parametrize("shell", [("bash", "-l", "-c"), ("bash", "-euc"), ("bash", "-xc"),
+                                    ("sh", "-c"), ("bash", "-o", "pipefail", "-c")])
+def test_flatten_handles_shell_flag_variants(shell):
+    tokens = pp._flatten_container_command(_sh("vllm serve a/b", shell))
+    assert tokens == ["vllm", "serve", "a/b"]
+
+
+def test_flatten_splits_separators_without_spaces():
+    tokens = pp._flatten_container_command(_sh("pip install x;vllm serve a/b&&echo done"))
+    assert tokens == ["pip", "install", "x", ";", "vllm", "serve", "a/b", "&&", "echo", "done"]
+
+
+def test_flatten_treats_unquoted_newline_as_separator():
+    tokens = pp._flatten_container_command(_sh("pip install trl\ntrl sft --seed 1"))
+    assert pp.detect_trl_from_command(tokens) == {"training_framework": "trl", "random_seed": 1}
+
+
+def test_flatten_keeps_quoted_newline_in_one_token():
+    tokens = pp._flatten_container_command(_sh("python -c 'a\nb'"))
+    assert tokens == ["python", "-c", "a\nb"]
+
+
+def test_accelerate_use_fsdp_and_use_deepspeed():
+    assert pp.detect_parallelization_from_command(["accelerate", "launch", "--use_fsdp", "t.py"]) == {
+        "parallelization_strategy": "fsdp"
+    }
+    assert pp.detect_parallelization_from_command(["accelerate", "launch", "--use_deepspeed", "t.py"]) == {
+        "parallelization_strategy": "deepspeed"
+    }
+
+
+def test_accelerate_config_file_flag_resolves_preset_name():
+    tokens = ["accelerate", "launch", "--config_file", "/cfg/fsdp2.yaml", "train.py"]
+    assert pp.detect_parallelization_from_command(tokens) == {"parallelization_strategy": "fsdp"}
+
+
+def test_hyphenated_num_processes():
+    tokens = ["trl", "sft", "--num-processes", "4"]
+    assert pp.detect_parallelization_from_command(tokens) == {
+        "parallelization_strategy": "data_parallel"
+    }
+
+
+# ---------------------------------------------------------------------------
+# CLI parsing: false positives (#108)
+# ---------------------------------------------------------------------------
+
+
+def test_trl_use_vllm_flag_is_not_a_vllm_server():
+    result = pp.detect_model_from_containers([_sh("trl grpo --use_vllm --seed 42")])
+    assert "serving_engine" not in result
+    assert result["training_framework"] == "trl"
+    assert result["random_seed"] == 42
+
+
+def test_pip_install_trl_vllm_extra_is_not_a_vllm_server():
+    result = pp.detect_model_from_containers([_sh("pip install trl[vllm] && trl sft --seed 1")])
+    assert "serving_engine" not in result
+    assert result["training_framework"] == "trl"
+
+
+def test_pip_install_trl_peft_is_not_a_trl_invocation():
+    assert pp.detect_trl_from_command(["pip", "install", "trl", "peft"]) is None
+    assert pp.detect_model_from_containers([_sh("pip install trl peft && python train.py")]) == {}
+
+
+def test_pip_dash_q_is_not_vllm_quantization():
+    result = pp.detect_model_from_containers(
+        [_sh("pip install -q vllm==0.6 && vllm serve --model org/m-AWQ")]
+    )
+    assert "quantization" not in result
+    assert result["quantization_method"] == "awq"
+
+
+def test_vllm_bench_client_does_not_override_server():
+    script = "vllm serve x/server & sleep 5; vllm bench serve --model y/client --seed 3"
+    result = pp.detect_model_from_containers([_sh(script)])
+    assert result["model_name"] == "x/server"
+    assert "seed" not in result
+
+
+def test_vllm_bench_alone_is_not_a_server():
+    assert pp.detect_vllm_from_command(["vllm", "bench", "serve", "--model", "y"]) is None
+
+
+def test_torchrun_single_process_is_not_data_parallel():
+    assert pp.detect_parallelization_from_command(["torchrun", "--nproc_per_node=1", "t.py"]) is None
+    assert pp.detect_parallelization_from_command(["torchrun", "--nproc-per-node", "1", "t.py"]) is None
+    assert pp.detect_parallelization_from_command(["mpirun", "-np", "1", "python", "t.py"]) is None
+
+
+def test_torchrun_multi_process_or_node_is_data_parallel():
+    for tokens in (
+        ["torchrun", "--nproc_per_node=8", "t.py"],
+        ["torchrun", "--nproc_per_node=1", "--nnodes=2", "t.py"],
+        ["torchrun", "t.py"],
+    ):
+        assert pp.detect_parallelization_from_command(tokens) == {
+            "parallelization_strategy": "data_parallel"
+        }
+
+
+def test_pip_install_deepspeed_is_not_a_deepspeed_launch():
+    assert pp.detect_model_from_containers([_sh("pip install deepspeed && python train.py")]) == {}
+
+
+def test_launcher_must_be_the_command_word():
+    assert pp.detect_parallelization_from_command(["python", "train.py", "torchrun"]) is None
+
+
+def test_python_dash_m_torch_distributed_run_is_a_launcher():
+    tokens = ["python", "-m", "torch.distributed.run", "--nproc_per_node=4", "t.py"]
+    assert pp.detect_parallelization_from_command(tokens) == {
+        "parallelization_strategy": "data_parallel"
+    }
+
+
+def test_unexpanded_shell_variables_are_not_emitted_as_values():
+    for script in ("vllm serve --model $MODEL", "vllm serve --model ${MODEL}",
+                   "vllm serve --model $(MODEL_ID)", "vllm serve $MODEL"):
+        assert "model_name" not in pp.detect_model_from_containers([_sh(script)]), script
+    assert "epochs" not in pp.detect_trl_from_command(["trl", "sft", "--num_train_epochs", "$E"])
+
+
+def test_vllm_boolean_flag_with_explicit_value():
+    assert pp.detect_vllm_from_command(
+        ["vllm", "serve", "m", "--enable-expert-parallel=false"]
+    )["enable_expert_parallel"] is False
+    assert pp.detect_vllm_from_command(
+        ["vllm", "serve", "m", "--no-enable-prefix-caching"]
+    )["enable_prefix_caching"] is False
+    assert pp.detect_vllm_from_command(
+        ["vllm", "serve", "m", "--enable-expert-parallel"]
+    )["enable_expert_parallel"] is True
+
+
+def _intent_for(script):
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info={}, annotations={}, telemetry=None,
+        detected_model=pp.detect_model_from_containers([_sh(script)]),
+    )
+    return aibom["experiment_intent"]
+
+
+def test_use_vllm_no_longer_flips_intent_to_inference():
+    """The end-to-end failure from the issue: `--use_vllm` made trl look like
+    a vLLM server, so intent became `inference` and the training sections
+    were dropped."""
+    assert _intent_for("trl sft --use_peft --lora_r 16 --use_vllm --model_name_or_path m") == "sft"
+
+
+def test_bare_use_peft_now_yields_sft_intent():
+    assert _intent_for("trl sft --use_peft --lora_r 16 --load_in_4bit") == "sft"
+
+
+def test_positional_vllm_serve_yields_inference_intent():
+    assert _intent_for("vllm serve meta-llama/Llama-3.1-8B") == "inference"
+
+
+def test_trl_config_file_yields_training_intent_instead_of_unknown():
+    assert _intent_for("trl sft --config cfg.yaml") == "training"
+
+
+# ---------------------------------------------------------------------------
+# Quantization names, hf:// URIs (#108)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "name, method, bits",
+    [
+        ("Qwen2-7B-Instruct-gptq-int4", "gptq", 4),
+        ("Qwen2-7B-Instruct-GPTQ-Int8", "gptq", 8),
+        ("llama-3-8b.Q4_K_M.gguf", "gguf", 4),
+        ("llama-3-8b-Q8_0.gguf", "gguf", 8),
+        ("llama-3-8b-IQ3_XS.gguf", "gguf", 3),
+        ("model.gguf", "gguf", None),
+        ("Llama-3.1-8B-fp8_e4m3", "fp8", 8),
+        ("Meta-Llama-3.1-8B-Instruct-quantized.w4a16", "compressed-tensors", 4),
+        ("Meta-Llama-3.1-8B-Instruct-quantized.w8a8", "compressed-tensors", 8),
+        ("Llama-3.1-8B-Instruct-FP8-dynamic", "fp8", 8),
+        ("Llama-3-8B-AWQ", "awq", 4),
+        ("Llama-3-8B-AWQ-INT4", "awq", 4),
+    ],
+)
+def test_quantization_name_variants(name, method, bits):
+    result = pp.detect_quantization_from_name(name)
+    assert result["quantization_method"] == method
+    assert result.get("quantization_bits") == bits
+
+
+@pytest.mark.parametrize("name", ["Llama-3-8B", "Qwen2.5-7B-Instruct", "Equipment-Model", "Q-learning-8B"])
+def test_quantization_name_no_false_positives(name):
+    assert pp.detect_quantization_from_name(name) is None
+
+
+def test_hf_uri_subpath_and_revision_forms():
+    assert pp._parse_storage_uri("hf://org/model/sub/dir") == ("org/model", None, "hf_uri")
+    assert pp._parse_storage_uri("hf://org/model@main") == ("org/model", "main", "hf_uri")
+    assert pp._parse_storage_uri("hf://org/model:abc123") == ("org/model", "abc123", "hf_uri")
+    assert pp._parse_storage_uri("hf://org/model@v1/sub") == ("org/model", "v1", "hf_uri")

@@ -157,14 +157,22 @@ def _path_fingerprint(path):
         return None
 
 
+def _int_or_float(val):
+    """`3` -> 3, `0.5` -> 0.5 (fractional epochs are valid)."""
+    f = float(val)
+    if f != f or f in (float("inf"), float("-inf")):
+        raise ValueError(val)
+    return int(f) if f.is_integer() else f
+
+
 def _capture_training_args():
     """Best-effort extraction of common training args from sys.argv."""
     _arg_map = {
-        "--epochs": ("epochs", int),
-        "--num-epochs": ("epochs", int),
-        "--num_epochs": ("epochs", int),
-        "--num-train-epochs": ("epochs", int),
-        "--num_train_epochs": ("epochs", int),
+        "--epochs": ("epochs", _int_or_float),
+        "--num-epochs": ("epochs", _int_or_float),
+        "--num_epochs": ("epochs", _int_or_float),
+        "--num-train-epochs": ("epochs", _int_or_float),
+        "--num_train_epochs": ("epochs", _int_or_float),
         "--batch-size": ("batch_size", int),
         "--batch_size": ("batch_size", int),
         "--per-device-train-batch-size": ("batch_size", int),
@@ -173,19 +181,22 @@ def _capture_training_args():
         "--learning-rate": ("learning_rate", float),
         "--learning_rate": ("learning_rate", float),
     }
-    try:
-        argv = sys.argv[:]
-        for i, arg in enumerate(argv):
-            key, _, val = arg.partition("=")
-            if key in _arg_map:
-                name, conv = _arg_map[key]
-                if not val and i + 1 < len(argv):
-                    val = argv[i + 1]
-                if val:
-                    _runtime_info[name] = conv(val)
-                    _dbg(f"Captured from argv: {name}={_runtime_info[name]}")
-    except Exception:
-        _dbg_exc("_capture_training_args")
+    argv = sys.argv[:]
+    for i, arg in enumerate(argv):
+        key, _, val = arg.partition("=")
+        if key not in _arg_map:
+            continue
+        # Per argument: one value `conv` can't parse (`--num_epochs $N`) must
+        # not lose every argument after it.
+        try:
+            name, conv = _arg_map[key]
+            if not val and i + 1 < len(argv):
+                val = argv[i + 1]
+            if val:
+                _runtime_info[name] = conv(val)
+                _dbg(f"Captured from argv: {name}={_runtime_info[name]}")
+        except Exception:
+            _dbg_exc("_capture_training_args")
 
 
 _ACCELERATE_DISTRIBUTED_TYPE_STRATEGIES = {
@@ -205,7 +216,8 @@ def _capture_accelerate_config():
         path = None
         for i, arg in enumerate(argv):
             key, _, val = arg.partition("=")
-            if key in ("--accelerate_config", "--accelerate-config"):
+            # `--config_file` is `accelerate launch`'s own spelling of the same flag.
+            if key in ("--accelerate_config", "--accelerate-config", "--config_file", "--config-file"):
                 if not val and i + 1 < len(argv):
                     val = argv[i + 1]
                 path = val or None
