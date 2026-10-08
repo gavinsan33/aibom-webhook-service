@@ -225,6 +225,8 @@ def _resolve_git_ref(git_dir, ref):
     return None
 
 
+# SECURITY: keep this logic identical to postprocess.py's redact_git_url -- the two can't share a
+# module (see tests/test_redact_git_url_sync.py, which fails if they drift).
 def _redact_git_url(url):
     """Strip credentials from a git remote URL before it's recorded (#102).
 

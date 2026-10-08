@@ -1029,6 +1029,8 @@ def detect_dataset_from_containers(containers):
 # actual final checked-out state rather than just the command's stated intent.
 # ---------------------------------------------------------------------------
 
+# SECURITY: keep this logic identical to runtime_detector.py's _redact_git_url -- the two can't share a
+# module (see tests/test_redact_git_url_sync.py, which fails if they drift).
 def redact_git_url(url):
     """Strip credentials from a git remote URL before it's recorded (#102).
 
