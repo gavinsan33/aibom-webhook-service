@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	jsonpatch "gopkg.in/evanphx/json-patch.v4"
 	admissionv1 "k8s.io/api/admission/v1"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	batchv1 "k8s.io/api/batch/v1"
@@ -661,7 +662,7 @@ func TestMutate_InjectsDatasetDetectorEnvVars(t *testing.T) {
 		}
 	}
 
-	for _, expected := range []string{"AIBOM_DATASET_DETECT", "AIBOM_DEBUG", "AIBOM_DATASET_OUTPUT", "PYTHONPATH"} {
+	for _, expected := range []string{"AIBOM_DATASET_DETECT", "AIBOM_DATASET_OUTPUT", "PYTHONPATH"} {
 		if !envVarNames[expected] {
 			t.Errorf("expected env var %q in dataset detector patches", expected)
 		}
@@ -809,6 +810,138 @@ func TestMutate_PythonPathAppend(t *testing.T) {
 		}
 	}
 	t.Error("expected PYTHONPATH replace patch")
+}
+
+func TestMutate_PythonPathValueFrom(t *testing.T) {
+	pod := podWithExistingPythonPath()
+	pod.Spec.Containers[0].Env[0] = corev1.EnvVar{
+		Name: "PYTHONPATH",
+		ValueFrom: &corev1.EnvVarSource{
+			ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: "py"},
+				Key:                  "path",
+			},
+		},
+	}
+	m := newTestMutator()
+	patches, err := m.Mutate(pod, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	found := false
+	for _, p := range patches {
+		// A replace on a valueFrom entry's value is an invalid JSON Patch.
+		if p.Path == "/spec/containers/0/env/0/value" {
+			t.Errorf("must not patch value of a valueFrom PYTHONPATH entry (op %s)", p.Op)
+		}
+		if p.Op == "add" && p.Path == "/spec/containers/0/env/-" {
+			if e, ok := p.Value.(corev1.EnvVar); ok && e.Name == "PYTHONPATH" {
+				found = true
+				if e.Value != "/aibom-hooks:$(PYTHONPATH)" || e.ValueFrom != nil {
+					t.Errorf("expected appended PYTHONPATH=/aibom-hooks:$(PYTHONPATH), got %+v", e)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Error("expected an appended PYTHONPATH entry referencing $(PYTHONPATH)")
+	}
+}
+
+// Applies the real patch to the real pod JSON and checks the resulting spec,
+// since the valueFrom case depends on two same-named PYTHONPATH entries
+// surviving the patch in order (the second expands $(PYTHONPATH) from the first).
+func TestMutate_PythonPathValueFrom_AppliedPatch(t *testing.T) {
+	pod := podWithExistingPythonPath()
+	source := &corev1.EnvVarSource{
+		ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: "py"},
+			Key:                  "path",
+		},
+	}
+	pod.Spec.Containers[0].Env[0] = corev1.EnvVar{Name: "PYTHONPATH", ValueFrom: source}
+
+	patches, err := newTestMutator().Mutate(pod, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	podJSON, err := json.Marshal(pod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	patchJSON, err := json.Marshal(patches)
+	if err != nil {
+		t.Fatal(err)
+	}
+	patch, err := jsonpatch.DecodePatch(patchJSON)
+	if err != nil {
+		t.Fatalf("decode patch: %v", err)
+	}
+	patchedJSON, err := patch.Apply(podJSON)
+	if err != nil {
+		t.Fatalf("patch does not apply: %v", err)
+	}
+	var patched corev1.Pod
+	if err := json.Unmarshal(patchedJSON, &patched); err != nil {
+		t.Fatalf("patched pod does not decode: %v", err)
+	}
+
+	var got []corev1.EnvVar
+	for _, e := range patched.Spec.Containers[0].Env {
+		if e.Name == "PYTHONPATH" {
+			got = append(got, e)
+		}
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 PYTHONPATH entries, got %d: %+v", len(got), got)
+	}
+	if got[0].ValueFrom == nil || got[0].ValueFrom.ConfigMapKeyRef == nil || got[0].Value != "" {
+		t.Errorf("original valueFrom entry must stay first and untouched, got %+v", got[0])
+	}
+	if got[1].Value != "/aibom-hooks:$(PYTHONPATH)" || got[1].ValueFrom != nil {
+		t.Errorf("appended entry must come second, got %+v", got[1])
+	}
+}
+
+func TestMutate_PythonPathImageAnnotation(t *testing.T) {
+	pod := podWithOwner("Job")
+	pod.Annotations = map[string]string{"aibom.io/python-path": "/app:/app/lib"}
+	m := newTestMutator()
+	patches, err := m.Mutate(pod, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, p := range patches {
+		if envs, ok := p.Value.([]corev1.EnvVar); ok && p.Path == "/spec/containers/0/env" {
+			for _, e := range envs {
+				if e.Name == "PYTHONPATH" {
+					if e.Value != "/aibom-hooks:/app:/app/lib" {
+						t.Errorf("got PYTHONPATH %q", e.Value)
+					}
+					return
+				}
+			}
+		}
+	}
+	t.Error("PYTHONPATH env not found in patches")
+}
+
+func TestMutate_NoHardcodedDebug(t *testing.T) {
+	m := newTestMutator()
+	patches, err := m.Mutate(podWithOwner("Job"), "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, p := range patches {
+		if envs, ok := p.Value.([]corev1.EnvVar); ok && p.Path == "/spec/containers/0/env" {
+			for _, e := range envs {
+				if e.Name == "AIBOM_DEBUG" {
+					t.Error("AIBOM_DEBUG must not be injected into the app container")
+				}
+			}
+		}
+	}
 }
 
 func TestMutate_DatasetDetectionDisabled(t *testing.T) {
