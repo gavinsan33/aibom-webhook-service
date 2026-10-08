@@ -452,6 +452,10 @@ def load_datasets():
         return [], {}
     datasets = data.get("datasets", [])
     runtime_info = data.get("runtime_info", {})
+    # Data written by a pod predating the redaction in runtime_detector.py
+    # may still carry credentials; compile_aibom logs runtime_info as-is (#102).
+    if runtime_info.get("git_repository"):
+        runtime_info["git_repository"] = redact_git_url(runtime_info["git_repository"])
     return datasets, runtime_info
 
 
@@ -1025,6 +1029,40 @@ def detect_dataset_from_containers(containers):
 # actual final checked-out state rather than just the command's stated intent.
 # ---------------------------------------------------------------------------
 
+# SECURITY: keep this logic identical to runtime_detector.py's _redact_git_url -- the two can't share a
+# module (see tests/test_redact_git_url_sync.py, which fails if they drift).
+def redact_git_url(url):
+    """Strip credentials from a git remote URL before it's recorded (#102).
+
+    `git clone https://user:TOKEN@host/repo` stores that URL verbatim in
+    .git/config and in the container command, and it would otherwise land in
+    the signed, immutable AIBOM. For http(s)/ftp the whole userinfo goes (a
+    bare username is often the token itself, e.g. a GitHub PAT); for other
+    schemes (ssh://git@host/...) only a password is dropped, since the
+    username isn't secret. scp-style `git@host:org/repo` has no scheme and is
+    returned as-is for the same reason. Query string and fragment are dropped
+    entirely (`?token=`, `?private_token=`), since they never identify the
+    repository.
+    """
+    if not isinstance(url, str) or "://" not in url:
+        return url
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        # Unparseable (e.g. malformed IPv6 host): drop anything that looks
+        # like userinfo, query and fragment rather than risk keeping a secret.
+        return re.sub(r"[?#].*$", "", re.sub(r"^([^:/]+://)[^/]*@", r"\1", url))
+    netloc = parts.netloc
+    if "@" in netloc:
+        userinfo, _, hostport = netloc.rpartition("@")
+        if parts.scheme.lower() in ("http", "https", "ftp", "ftps"):
+            netloc = hostport
+        else:
+            user = userinfo.partition(":")[0]
+            netloc = f"{user}@{hostport}" if user else hostport
+    return f"{parts.scheme}://{netloc}{parts.path}"
+
+
 _COMMIT_SHA_RE = re.compile(r"[0-9a-fA-F]{7,40}")
 # Matches a plausible git remote URL, not just "the first bare token after
 # clone" -- `git clone` accepts value-taking flags before the repo
@@ -1058,7 +1096,7 @@ def detect_git_clone_from_command(tokens):
 
     if not repo:
         return None
-    result = {"git_repository": repo}
+    result = {"git_repository": redact_git_url(repo)}
     if ref:
         # A bare hex string of plausible SHA length is almost certainly a
         # commit; anything else (a branch or tag name) is reported as such.
@@ -1088,7 +1126,7 @@ def detect_git_provenance_from_runtime_info(runtime_info):
         return None
     result = {
         "git_commit": runtime_info.get("git_commit"),
-        "git_repository": runtime_info.get("git_repository"),
+        "git_repository": redact_git_url(runtime_info.get("git_repository")),
         "git_branch": runtime_info.get("git_branch"),
         "detected_via": "git_directory",
     }
@@ -1153,7 +1191,7 @@ def detect_git_provenance_from_containers(containers):
         if commit:
             return {
                 "git_commit": commit,
-                "git_repository": labels.get(_BUILD_LABEL_SOURCE),
+                "git_repository": redact_git_url(labels.get(_BUILD_LABEL_SOURCE)),
                 "git_branch": labels.get(_BUILD_LABEL_REF),
                 "detected_via": "openshift_build_label",
             }
@@ -1162,7 +1200,7 @@ def detect_git_provenance_from_containers(containers):
         if oci_commit:
             return {
                 "git_commit": oci_commit,
-                "git_repository": labels.get(_OCI_LABEL_SOURCE),
+                "git_repository": redact_git_url(labels.get(_OCI_LABEL_SOURCE)),
                 "git_branch": None,
                 "detected_via": "oci_image_label",
             }
@@ -2000,7 +2038,10 @@ def compile_aibom(
         declared_via = dp.get("detected_via")
 
     aibom["source_code"] = {
-        "git_repository": annotations.get("git-repository") or dp.get("git_repository"),
+        # Redacted again here, not just in each detector: an annotation is
+        # free text, and any future detection tier would have the same
+        # problem (#102).
+        "git_repository": redact_git_url(annotations.get("git-repository") or dp.get("git_repository")),
         "git_commit": annotations.get("git-commit") or dp.get("git_commit"),
         "git_branch": annotations.get("git-branch") or dp.get("git_branch"),
         "declared_via": declared_via,
