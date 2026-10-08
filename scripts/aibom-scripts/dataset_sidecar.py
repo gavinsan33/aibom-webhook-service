@@ -45,10 +45,41 @@ import sys
 import threading
 import time
 
-import k8s_api
+_DEBUG = os.environ.get("AIBOM_DEBUG", "0") == "1"
+
+_shutdown_event = threading.Event()
+
+
+def _dbg(msg):
+    if _DEBUG:
+        print(f"[AIBOM-DATASET-SIDECAR-DEBUG] {msg}", file=sys.stderr, flush=True)
+
+
+def _handle_sigterm(signum, frame):
+    # PEP 475 makes time.sleep() resume its remaining duration after a
+    # handled signal rather than returning early, so a plain sleep-based
+    # wait would delay the final shutdown flush below by up to
+    # _POLL_INTERVAL_S. threading.Event.wait() doesn't have that problem --
+    # set() wakes it immediately.
+    _shutdown_event.set()
+    _dbg("received SIGTERM, will do one final pass before exiting")
+
+
+# Installed before the remaining imports and the module-level setup below,
+# not in main(): this process is PID 1 in its container, and the kernel
+# drops a signal with no handler for PID 1 instead of applying its default
+# action. A pod whose main containers exit within a few seconds of this
+# sidecar starting gets its SIGTERM while Python is still importing, so the
+# signal was lost and the kubelet force-killed the sidecar (exit 137) after
+# the full termination grace period, skipping the final publish. Only when
+# run as a script, so importing this module (tests) doesn't change the
+# importer's signal handling.
+if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+
+import k8s_api  # noqa: E402 -- after the SIGTERM handler, see above
 
 _OUTPUT_PATH = os.environ.get("AIBOM_DATASET_OUTPUT", "/tmp/aibom/dataset_detected.json")
-_DEBUG = os.environ.get("AIBOM_DEBUG", "0") == "1"
 _POD_NAME = os.environ.get("POD_NAME", "")
 _POD_NAMESPACE = os.environ.get("POD_NAMESPACE", "")
 _DATA_CONFIGMAP = os.environ.get("AIBOM_DATA_CONFIGMAP") or k8s_api.resolve_data_configmap_name()
@@ -68,24 +99,6 @@ _POLL_INTERVAL_S = float(os.environ.get("AIBOM_DATASET_SIDECAR_POLL_INTERVAL", "
 # 1s, 2s, 4s backoff is ~7s.
 _FINAL_PUBLISH_ATTEMPTS = int(os.environ.get("AIBOM_DATASET_SIDECAR_FINAL_ATTEMPTS", "4"))
 _FINAL_PUBLISH_BACKOFF_S = float(os.environ.get("AIBOM_DATASET_SIDECAR_FINAL_BACKOFF", "1"))
-
-_shutdown_event = threading.Event()
-
-
-def _dbg(msg):
-    if _DEBUG:
-        print(f"[AIBOM-DATASET-SIDECAR-DEBUG] {msg}", file=sys.stderr, flush=True)
-
-
-def _handle_sigterm(signum, frame):
-    # PEP 475 makes time.sleep() resume its remaining duration after a
-    # handled signal rather than returning early, so a plain sleep-based
-    # wait would delay the final shutdown flush below by up to
-    # _POLL_INTERVAL_S. threading.Event.wait() doesn't have that problem --
-    # set() wakes it immediately.
-    _shutdown_event.set()
-    _dbg("received SIGTERM, will do one final pass before exiting")
-
 
 def sign_payload(payload):
     """HMAC-SHA256 payload's canonical bytes with the per-namespace dataset
@@ -186,6 +199,8 @@ def _publish_final(last_mtime):
 
 
 def main():
+    # Already installed at import time when run as a script; this also covers
+    # main() being called from anywhere else.
     signal.signal(signal.SIGTERM, _handle_sigterm)
     _dbg(f"watching {_OUTPUT_PATH} for pod {_POD_NAMESPACE}/{_POD_NAME}, configmap={_DATA_CONFIGMAP}")
 
