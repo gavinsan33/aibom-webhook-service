@@ -7,7 +7,7 @@ SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "aibom-scripts" / "ge
 
 
 def _load_reader():
-    # generate_snapshot.py is a top-level script (benchmarks run at import),
+    # generate_snapshot.py is a top-level script (it runs at import),
     # so exec only the model-file reader section rather than importing it.
     src = SCRIPT.read_text()
     start = src.index("_MODEL_FILE_MAX_BYTES")
@@ -173,7 +173,7 @@ def test_run_stage_swallows_exception_and_uses_on_error():
         raise FileNotFoundError("true")
 
     assert ns["_run_stage"]("boom", boom) is None
-    assert ns["_run_stage"]("boom", boom, ns["_benchmark_error"]) == {"error": "true"}
+    assert ns["_run_stage"]("boom", boom, lambda exc: {"error": str(exc)}) == {"error": "true"}
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs mkfifo")
