@@ -6,7 +6,6 @@ import signal
 import subprocess
 import sys
 import json
-import time
 import os
 import re
 from datetime import datetime
@@ -53,113 +52,12 @@ def _run_stage(name, fn, on_error=lambda exc: None, timeout_s=None):
             signal.signal(signal.SIGALRM, previous)
 
 
-def _benchmark_error(exc):
-    return {"error": str(exc)}
-
-
 def run_cmd(command):
     try:
         out = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=10)
         return out.stdout.strip() if out.returncode == 0 else "Not available"
     except Exception as e:
         return "Not available"
-
-def cpu_benchmark():
-    """Simple CPU compute benchmark - measures MFLOPS"""
-    start = time.time()
-    result = 0.0
-    iterations = 10000000
-    for i in range(iterations):
-        result += i * 1.5 - 0.7
-    elapsed = time.time() - start
-    mflops = (iterations * 2) / (elapsed * 1000000)  # 2 ops per iteration
-    return {
-        "iterations": iterations,
-        "time_seconds": f"{elapsed:.4f}",
-        "mflops": f"{mflops:.2f}"
-    }
-
-def memory_bandwidth_benchmark():
-    """Memory sequential read/write benchmark"""
-    size_mb = 100
-    size_bytes = size_mb * 1024 * 1024
-    data = bytearray(size_bytes)
-
-    # Write test
-    start = time.time()
-    for i in range(0, size_bytes, 8):
-        data[i:i+8] = b'\x00\x01\x02\x03\x04\x05\x06\x07'
-    write_time = time.time() - start
-    write_bw = (size_mb / write_time) if write_time > 0 else 0
-
-    # Read test
-    start = time.time()
-    checksum = 0
-    for i in range(0, size_bytes, 8):
-        checksum += data[i]
-    read_time = time.time() - start
-    read_bw = (size_mb / read_time) if read_time > 0 else 0
-
-    return {
-        "test_size_mb": size_mb,
-        "write_bandwidth_mbps": f"{write_bw:.2f}",
-        "read_bandwidth_mbps": f"{read_bw:.2f}",
-        "write_time_sec": f"{write_time:.4f}",
-        "read_time_sec": f"{read_time:.4f}"
-    }
-
-def disk_io_benchmark():
-    """Disk I/O benchmark using /tmp"""
-    test_file = "/tmp/io_bench_test.dat"
-    size_mb = 50
-    block_size = 1024 * 1024  # 1MB blocks
-
-    try:
-        # Write test
-        start = time.time()
-        with open(test_file, 'wb') as f:
-            for _ in range(size_mb):
-                f.write(os.urandom(block_size))
-            f.flush()
-            os.fsync(f.fileno())
-        write_time = time.time() - start
-        write_bw = (size_mb / write_time) if write_time > 0 else 0
-
-        # Read test
-        start = time.time()
-        with open(test_file, 'rb') as f:
-            while f.read(block_size):
-                pass
-        read_time = time.time() - start
-        read_bw = (size_mb / read_time) if read_time > 0 else 0
-
-        # Cleanup
-        os.remove(test_file)
-
-        return {
-            "test_size_mb": size_mb,
-            "write_bandwidth_mbps": f"{write_bw:.2f}",
-            "read_bandwidth_mbps": f"{read_bw:.2f}",
-            "write_time_sec": f"{write_time:.4f}",
-            "read_time_sec": f"{read_time:.4f}"
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-def context_switch_benchmark():
-    """Measure context switch overhead using subprocess spawning"""
-    iterations = 100
-    start = time.time()
-    for _ in range(iterations):
-        subprocess.run(['true'], capture_output=True)
-    elapsed = time.time() - start
-    avg_per_switch = (elapsed / iterations) * 1000  # milliseconds
-
-    return {
-        "iterations": iterations,
-        "total_time_sec": f"{elapsed:.4f}",
-        "avg_per_spawn_ms": f"{avg_per_switch:.4f}"
-    }
 
 print("Collecting static system information...")
 
@@ -236,24 +134,6 @@ snapshot = {
         "cgroup_memory_limit_bytes": run_cmd("cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo 'N/A'")
     }
 }
-
-# Dynamic Benchmarks
-print("Running CPU compute benchmark...")
-snapshot["benchmarks"] = {
-    "cpu_compute": _run_stage("CPU benchmark", cpu_benchmark, _benchmark_error)
-}
-
-print("Running memory bandwidth benchmark...")
-snapshot["benchmarks"]["memory_bandwidth"] = _run_stage(
-    "memory bandwidth benchmark", memory_bandwidth_benchmark, _benchmark_error)
-
-print("Running disk I/O benchmark...")
-snapshot["benchmarks"]["disk_io"] = _run_stage("disk I/O benchmark", disk_io_benchmark, _benchmark_error)
-
-print("Running context switch benchmark...")
-snapshot["benchmarks"]["context_switch"] = _run_stage(
-    "context switch benchmark", context_switch_benchmark, _benchmark_error)
-
 
 def _write_local_snapshot():
     # Write JSON locally for debugging/parity with prior behavior

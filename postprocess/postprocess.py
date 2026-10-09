@@ -2768,25 +2768,19 @@ def compile_aibom(
 
 _VLLM_EXTRA_KEYS = (
     "served_model_name", "max_num_seqs", "seed", "trust_remote_code",
-    "enforce_eager", "enable_prefix_caching", "port",
+    "enforce_eager", "enable_prefix_caching",
 )
 
-# Discovery fields surfaced as-is, minus values that are always empty or wrong
-# (cgroup v1 paths, hardcoded sda, /dev/nvme* in an unprivileged container,
-# point-in-time uptime/free memory/current clock).
+# Discovery fields surfaced into environment.*. The rest of discovery.json is
+# captured but deliberately left out: node-level tuning, point-in-time readings
+# and values that are empty or wrong from inside a container (cgroup v1 paths,
+# hardcoded sda, /dev/nvme*, the init container's own ulimits).
 _DISCOVERY_DETAILS = {
-    "cpu": ("system", ("cpu_architecture", "cpu_cores_per_socket", "cpu_threads_per_core",
-                       "cpu_max_freq_mhz", "cpu_min_freq_mhz",
-                       "cache_l1d", "cache_l1i", "cache_l2", "cache_l3")),
-    "network": ("network", ("interface_names", "rdma_devices", "rdma_device_count",
-                            "primary_mtu", "tcp_rmem", "tcp_wmem", "tcp_congestion_control")),
-    "storage": ("storage", ("block_devices", "tmpfs_size", "tmpfs_avail")),
-    "kernel_config": ("performance_config", ("cpu_governor", "numa_balancing", "transparent_hugepages",
-                                             "swappiness", "dirty_ratio", "dirty_background_ratio",
-                                             "max_map_count", "file_max")),
-    "process_limits": ("process_limits", ("max_user_processes", "max_open_files",
-                                          "max_stack_size_kb", "max_memory_size_kb")),
-    "benchmarks": ("benchmarks", None),
+    "cpu": ("system", ("cpu_architecture", "cpu_cores_per_socket", "cpu_threads_per_core", "cache_l3")),
+    "network": ("network", ("rdma_devices", "rdma_device_count", "primary_mtu")),
+    "storage": ("storage", ("block_devices",)),
+    "kernel_config": ("performance_config", ("cpu_governor", "numa_balancing",
+                                             "transparent_hugepages", "max_map_count")),
 }
 
 
@@ -2795,7 +2789,7 @@ def _discovery_details(disc):
     out = {}
     for name, (section, keys) in _DISCOVERY_DETAILS.items():
         src = disc.get(section) or {}
-        vals = {k: src[k] for k in (keys or src) if k in src}
+        vals = {k: src[k] for k in keys if k in src}
         vals = {k: v for k, v in vals.items() if v not in (None, "", "N/A", "None")}
         if vals:
             out[name] = vals
