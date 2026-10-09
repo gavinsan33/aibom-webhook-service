@@ -760,10 +760,12 @@ def test_compile_aibom_annotation_intent_overrides_detected_model():
 
 def test_compile_aibom_surfaces_extra_discovery_and_vllm_fields():
     discovery = {
-        "system": {"cpu_architecture": "x86_64", "cache_l3": "N/A", "uptime_seconds": "5"},
+        "system": {"cpu_architecture": "x86_64", "cache_l3": "N/A", "cache_l2": "10 MiB", "uptime_seconds": "5"},
         "gpu": {"gpu_memory_per_device_mb": "81920\n81920"},
-        "storage": {"tmpfs_size": "10G", "nvme_count": "0", "io_scheduler": "N/A"},
-        "process_limits": {"cgroup_cpu_quota": "N/A", "max_open_files": "1024"},
+        "network": {"primary_mtu": "1400", "tcp_rmem": "4096", "rdma_devices": "None"},
+        "storage": {"block_devices": "nvme0n1 894G", "tmpfs_size": "10G", "nvme_count": "0"},
+        "performance_config": {"cpu_governor": "performance", "swappiness": "10"},
+        "process_limits": {"max_open_files": "1024"},
         "benchmarks": {"cpu_compute": {"mflops": "100"}},
     }
     detected_model = {"serving_engine": "vllm", "seed": 7, "max_num_seqs": 64, "port": 8000}
@@ -774,14 +776,15 @@ def test_compile_aibom_surfaces_extra_discovery_and_vllm_fields():
     )
 
     env = aibom["environment"]
-    assert env["cpu"] == {"cpu_architecture": "x86_64"}  # N/A dropped
+    assert env["cpu"] == {"cpu_architecture": "x86_64"}  # N/A dropped, L2 not surfaced
     assert env["gpu_memory_mb"] == [81920, 81920]
-    assert env["storage"] == {"tmpfs_size": "10G"}  # nvme_count/io_scheduler not surfaced
-    assert env["process_limits"] == {"max_open_files": "1024"}  # cgroup_* not surfaced
-    assert env["benchmarks"] == {"cpu_compute": {"mflops": "100"}}
+    assert env["network"] == {"primary_mtu": "1400"}  # "None" dropped, TCP tuning not surfaced
+    assert env["storage"] == {"block_devices": "nvme0n1 894G"}
+    assert env["kernel_config"] == {"cpu_governor": "performance"}  # swappiness not surfaced
+    assert "process_limits" not in env and "benchmarks" not in env
     inf = aibom["inference"]
-    assert (inf["seed"], inf["max_num_seqs"], inf["port"]) == (7, 64, 8000)
-    assert inf["enforce_eager"] is None
+    assert (inf["seed"], inf["max_num_seqs"]) == (7, 64)
+    assert inf["enforce_eager"] is None and "port" not in inf
 
 
 def test_compile_aibom_infers_inference_intent_from_vllm_detection():

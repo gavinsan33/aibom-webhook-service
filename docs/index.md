@@ -23,7 +23,6 @@ The webhook always fails open (`failurePolicy: Ignore`): if the service is down,
 **Init container (`aibom-discovery`)**
 
 - Captures CPU model, cores and cache; GPU model, count, VRAM and CUDA version; memory; network (RDMA); storage; kernel config; and cgroup limits.
-- Runs benchmarks: CPU compute, memory bandwidth, disk I/O throughput, and context switch latency.
 - Writes the result into the workload's data ConfigMap, signed with a per-namespace HMAC key that is mounted only into this init container, never into the application container.
 
 **Runtime detector (in each application container)**
