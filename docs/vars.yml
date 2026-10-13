@@ -1,0 +1,5 @@
+# Single source for values repeated across the docs. Pages that use them set
+# `render_macros: true` in their front matter and write {{ name }}.
+# Also read by gavinsan33/project-aibom's mkdocs.yml via the submodule path.
+webhook_namespace: project-aibom
+registry: quay.io/gsanders

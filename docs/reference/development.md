@@ -1,3 +1,7 @@
+---
+render_macros: true
+---
+
 # Development and Publishing
 
 Building from source, alternative deploy recipes, image/chart publishing, and repository layout.
@@ -12,7 +16,7 @@ There are three ways to get images into the cluster — pick whichever fits:
 | No egress to quay.io, or no external registry account | `just deploy-buildconfig` (in-cluster OpenShift BuildConfig) |
 | Iterating locally, don't want to wait on Quay or a git push | `just deploy-local --repo=<repo>` |
 
-If your account doesn't have cluster-scoped permission to create/patch CRDs, pass `--skip-crds` to any of the three; the `aiboms.aibom.io` CRD and `project-aibom` namespace must then already exist (created once via `oc apply -f charts/aibom-webhook/crds/aibom-crd.yaml` and `oc create namespace project-aibom`).
+If your account doesn't have cluster-scoped permission to create/patch CRDs, pass `--skip-crds` to any of the three; the `aiboms.aibom.io` CRD and `{{ webhook_namespace }}` namespace must then already exist (created once via `oc apply -f charts/aibom-webhook/crds/aibom-crd.yaml` and `oc create namespace {{ webhook_namespace }}`).
 
 ```bash
 # Default: pull whatever Quay's build triggers most recently built and pushed
@@ -70,7 +74,7 @@ One-time setup so `helm upgrade --install ... oci://quay.io/<org>/aibom-webhook`
    - `<Chart.yaml version>` (e.g. `0.1.0`) — mutable, overwritten on every `chart-push` (nothing bumps `Chart.yaml`'s `version:` automatically). `helm upgrade --install` with no `--version` resolves here.
    - `<Chart.yaml version>-<git sha>` (e.g. `0.1.0-abc1234`, `-dirty`-suffixed the same way `deploy-local`'s tag is for an uncommitted working tree) — immutable, one per `chart-push`, for pinning/rollback. This uses SemVer *prerelease* syntax (hyphen), which has strictly lower precedence than the plain release per the SemVer spec — that's what makes "no `--version`" reliably resolve to the mutable tag above instead of an unpredictable tie (an earlier version of this used build-metadata syntax, `+<sha>`, which SemVer precedence ignores entirely — the two tags were then equal-precedence and which one `helm` picked with no `--version` was undefined)
 
-   Defaults to pushing under `quay.io/gsanders`; pass a different org as the first argument.
+   Defaults to pushing under `{{ registry }}`; pass a different org as the first argument.
 3. In the Quay web UI, make both chart repos public (or otherwise arrange pull credentials) so `helm upgrade --install` can pull them anonymously
 
 Re-run `just chart-push` any time `charts/aibom-webhook`, `charts/aibom-workload-namespace`, or `scripts/aibom-scripts/*.py` changes.
