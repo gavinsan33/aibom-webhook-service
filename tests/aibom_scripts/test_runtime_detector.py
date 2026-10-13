@@ -255,7 +255,17 @@ def test_find_git_dir_walks_upward(tmp_path):
     git_dir.mkdir(parents=True)
     subdir = tmp_path / "repo" / "sub" / "dir"
     subdir.mkdir(parents=True)
-    assert rd._find_git_dir(str(subdir)) == str(git_dir)
+    assert rd._find_git_dir(str(subdir)) == (str(tmp_path / "repo"), str(git_dir))
+
+
+def test_find_git_dir_follows_gitdir_file(tmp_path):
+    # Linked worktrees and submodules have a `.git` file, not a directory;
+    # the walk must stop there, not report the enclosing repo (#113).
+    (tmp_path / ".git" / "modules" / "sub").mkdir(parents=True)
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / ".git").write_text("gitdir: ../.git/modules/sub\n")
+    assert rd._find_git_dir(str(sub)) == (str(sub), str(tmp_path / ".git" / "modules" / "sub"))
 
 
 def test_find_git_dir_returns_none_when_not_found(tmp_path):
@@ -265,8 +275,8 @@ def test_find_git_dir_returns_none_when_not_found(tmp_path):
 def test_resolve_git_ref_loose_ref_file(tmp_path):
     git_dir = tmp_path / ".git"
     (git_dir / "refs" / "heads").mkdir(parents=True)
-    (git_dir / "refs" / "heads" / "main").write_text("deadbeefcafe0123\n")
-    assert rd._resolve_git_ref(str(git_dir), "ref: refs/heads/main") == "deadbeefcafe0123"
+    (git_dir / "refs" / "heads" / "main").write_text("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n")
+    assert rd._resolve_git_ref(str(git_dir), "ref: refs/heads/main") == "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 
 
 def test_resolve_git_ref_falls_back_to_packed_refs(tmp_path):
@@ -274,14 +284,24 @@ def test_resolve_git_ref_falls_back_to_packed_refs(tmp_path):
     git_dir.mkdir()
     (git_dir / "packed-refs").write_text(
         "# pack-refs with: peeled fully-peeled sorted\n"
-        "cafef00dbeef0123 refs/heads/main\n"
-        "0123456789abcdef refs/heads/other\n"
+        "cafef00dcafef00dcafef00dcafef00dcafef00d refs/heads/main\n"
+        "0123456701234567012345670123456701234567 refs/heads/other\n"
     )
-    assert rd._resolve_git_ref(str(git_dir), "ref: refs/heads/main") == "cafef00dbeef0123"
+    assert rd._resolve_git_ref(str(git_dir), "ref: refs/heads/main") == "cafef00dcafef00dcafef00dcafef00dcafef00d"
 
 
 def test_resolve_git_ref_detached_head_returns_sha_directly(tmp_path):
-    assert rd._resolve_git_ref(str(tmp_path / ".git"), "deadbeefcafe0123") == "deadbeefcafe0123"
+    assert rd._resolve_git_ref(str(tmp_path / ".git"), "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef") == "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+
+
+def test_resolve_git_ref_follows_symref_and_rejects_non_sha(tmp_path):
+    git_dir = tmp_path / ".git"
+    (git_dir / "refs" / "heads").mkdir(parents=True)
+    (git_dir / "refs" / "heads" / "main").write_text("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n")
+    (git_dir / "refs" / "heads" / "alias").write_text("ref: refs/heads/main\n")
+    (git_dir / "refs" / "heads" / "junk").write_text("not-a-sha\n")
+    assert rd._resolve_git_ref(str(git_dir), "ref: refs/heads/alias") == "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+    assert rd._resolve_git_ref(str(git_dir), "ref: refs/heads/junk") is None
 
 
 def test_resolve_git_ref_missing_ref_returns_none(tmp_path):
@@ -337,6 +357,20 @@ def test_git_remote_url_strips_credentials(tmp_path):
     assert rd._git_remote_url(str(git_dir)) == "https://github.com/org/repo.git"
 
 
+@pytest.mark.parametrize("config, expected", [
+    # Exact "origin", not any remote containing the word (#113).
+    ('[remote "fork-origin"]\n\turl = https://h/fork.git\n[remote "origin"]\n\turl = https://h/main.git\n',
+     "https://h/main.git"),
+    # No origin (`clone --origin upstream`): the first remote.
+    ('[remote "upstream"]\n\turl = https://h/up.git\n', "https://h/up.git"),
+])
+def test_git_remote_url_picks_origin_else_first_remote(tmp_path, config, expected):
+    git_dir = tmp_path / ".git"
+    git_dir.mkdir()
+    (git_dir / "config").write_text(config)
+    assert rd._git_remote_url(str(git_dir)) == expected
+
+
 def test_git_remote_url_missing_config_returns_none(tmp_path):
     assert rd._git_remote_url(str(tmp_path / ".git")) is None
 
@@ -376,7 +410,7 @@ def test_git_dirty_false_when_porcelain_output_empty(monkeypatch):
 def _write_fake_repo(root):
     git_dir = root / ".git"
     (git_dir / "refs" / "heads").mkdir(parents=True)
-    (git_dir / "refs" / "heads" / "main").write_text("deadbeefcafe0123\n")
+    (git_dir / "refs" / "heads" / "main").write_text("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n")
     (git_dir / "HEAD").write_text("ref: refs/heads/main\n")
     (git_dir / "config").write_text(
         '[remote "origin"]\n\turl = https://github.com/org/repo.git\n'
@@ -384,26 +418,33 @@ def _write_fake_repo(root):
     return git_dir
 
 
-def test_capture_git_provenance_populates_runtime_info(tmp_path, monkeypatch):
+@pytest.fixture
+def no_script(monkeypatch):
+    """Locate the repo from the CWD only, not from pytest's own script."""
+    monkeypatch.setattr(rd.sys, "argv", ["-c"])
+    monkeypatch.delattr(sys.modules["__main__"], "__file__", raising=False)
+
+
+def test_capture_git_provenance_populates_runtime_info(tmp_path, monkeypatch, no_script):
     _write_fake_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(rd, "_git_dirty", lambda worktree_dir: False)
 
     rd._capture_git_provenance()
 
-    assert rd._runtime_info["git_commit"] == "deadbeefcafe0123"
+    assert rd._runtime_info["git_commit"] == "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
     assert rd._runtime_info["git_branch"] == "main"
     assert rd._runtime_info["git_repository"] == "https://github.com/org/repo.git"
     assert rd._runtime_info["git_dirty"] is False
 
 
-def test_capture_git_provenance_no_git_dir_is_a_noop(tmp_path, monkeypatch):
+def test_capture_git_provenance_no_git_dir_is_a_noop(tmp_path, monkeypatch, no_script):
     monkeypatch.chdir(tmp_path)
     rd._capture_git_provenance()
     assert "git_commit" not in rd._runtime_info
 
 
-def test_capture_git_provenance_omits_dirty_when_undetermined(tmp_path, monkeypatch):
+def test_capture_git_provenance_omits_dirty_when_undetermined(tmp_path, monkeypatch, no_script):
     _write_fake_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(rd, "_git_dirty", lambda worktree_dir: None)
@@ -411,7 +452,72 @@ def test_capture_git_provenance_omits_dirty_when_undetermined(tmp_path, monkeypa
     rd._capture_git_provenance()
 
     assert "git_dirty" not in rd._runtime_info
-    assert rd._runtime_info["git_commit"] == "deadbeefcafe0123"
+    assert rd._runtime_info["git_commit"] == "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+
+
+def test_capture_git_provenance_keeps_slashed_branch(tmp_path, monkeypatch, no_script):
+    git_dir = _write_fake_repo(tmp_path)
+    (git_dir / "refs" / "heads" / "feature").mkdir()
+    (git_dir / "refs" / "heads" / "feature" / "foo").write_text("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n")
+    (git_dir / "HEAD").write_text("ref: refs/heads/feature/foo\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(rd, "_git_dirty", lambda worktree_dir: None)
+
+    rd._capture_git_provenance()
+
+    assert rd._runtime_info["git_branch"] == "feature/foo"
+
+
+def test_capture_git_provenance_linked_worktree(tmp_path, monkeypatch, no_script):
+    # A worktree's git dir has only HEAD; refs and config are in the main
+    # repo's, via commondir (#113).
+    _write_fake_repo(tmp_path / "main")
+    wt_git = tmp_path / "main" / ".git" / "worktrees" / "wt"
+    wt_git.mkdir(parents=True)
+    (wt_git / "HEAD").write_text("ref: refs/heads/main\n")
+    (wt_git / "commondir").write_text("../..\n")
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    (wt / ".git").write_text(f"gitdir: {wt_git}\n")
+    monkeypatch.chdir(wt)
+    seen = []
+    monkeypatch.setattr(rd, "_git_dirty", lambda worktree_dir: seen.append(worktree_dir))
+
+    rd._capture_git_provenance()
+
+    assert rd._runtime_info["git_commit"] == "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+    assert rd._runtime_info["git_repository"] == "https://github.com/org/repo.git"
+    assert seen == [str(wt)]
+
+
+def test_capture_git_provenance_finds_repo_from_script_path(tmp_path, monkeypatch):
+    # `cd / && python /app/repo/train.py`: nothing above the CWD (#113).
+    _write_fake_repo(tmp_path / "repo")
+    script = tmp_path / "repo" / "train.py"
+    script.write_text("")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setattr(rd.sys, "argv", [str(script)])
+    monkeypatch.delattr(sys.modules["__main__"], "__file__", raising=False)
+    monkeypatch.setattr(rd, "_git_dirty", lambda worktree_dir: None)
+
+    rd._capture_git_provenance()
+
+    assert rd._runtime_info["git_commit"] == "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+
+
+def test_git_dirty_ignores_untracked_files(monkeypatch):
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return types.SimpleNamespace(returncode=0, stdout="")
+
+    import subprocess as sp
+    monkeypatch.setattr(sp, "run", fake_run)
+    rd._git_dirty("/some/path")
+    assert "-uno" in calls[0]
 
 
 # ---------------------------------------------------------------------------
