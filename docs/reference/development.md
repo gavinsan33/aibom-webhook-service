@@ -12,7 +12,7 @@ There are three ways to get images into the cluster — pick whichever fits:
 | No egress to quay.io, or no external registry account | `just deploy-buildconfig` (in-cluster OpenShift BuildConfig) |
 | Iterating locally, don't want to wait on Quay or a git push | `just deploy-local --repo=<repo>` |
 
-If your account doesn't have cluster-scoped permission to create/patch CRDs, pass `--skip-crds` to any of the three; the `aiboms.aibom.io` CRD and `aibom-system` namespace must then already exist (created once via `oc apply -f charts/aibom-webhook/crds/aibom-crd.yaml` and `oc create namespace aibom-system`).
+If your account doesn't have cluster-scoped permission to create/patch CRDs, pass `--skip-crds` to any of the three; the `aiboms.aibom.io` CRD and `project-aibom` namespace must then already exist (created once via `oc apply -f charts/aibom-webhook/crds/aibom-crd.yaml` and `oc create namespace project-aibom`).
 
 ```bash
 # Default: pull whatever Quay's build triggers most recently built and pushed
