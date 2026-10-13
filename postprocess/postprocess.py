@@ -1290,6 +1290,20 @@ def detect_dataset_from_command(tokens):
     return result if result.get("dataset_name") else None
 
 
+def _dataset_names_match(detected, declared):
+    """Case-insensitive, and a bare name matches the same name under an org
+    or directory (`imdb` ~ `stanfordnlp/imdb`, `train.json` ~
+    `/data/train.json`), but two different orgs don't."""
+    if not detected or not declared:
+        return False
+    a, b = (str(x).strip().rstrip("/").lower() for x in (detected, declared))
+    if a == b:
+        return True
+    if "/" in a and "/" in b:
+        return False
+    return a.rpartition("/")[2] == b.rpartition("/")[2]
+
+
 def detect_dataset_from_containers(containers):
     for container in containers:
         tokens = _flatten_container_command(container)
@@ -2703,6 +2717,9 @@ def compile_aibom(
         declared_dataset["declared_via"] = "annotation"
     elif cli_ds.get("dataset_name"):
         declared_dataset["declared_via"] = "cli_arg"
+        for src, dst in (("dataset_config", "config_name"), ("dataset_split", "split")):
+            if cli_ds.get(src):
+                declared_dataset[dst] = cli_ds[src]
     has_declared = bool(declared_dataset.get("name"))
     intent = aibom["experiment_intent"]
 
@@ -2721,9 +2738,13 @@ def compile_aibom(
                 if first.get("license"):
                     aibom["dataset"]["declared"]["license"] = first["license"]
 
-            declared_name = aibom["dataset"]["declared"].get("name")
+            # An inferred name was copied from the first entry, so there's
+            # nothing independent to compare against (#114).
+            declared = aibom["dataset"]["declared"]
+            inferred = declared.get("declared_via") == "inferred_from_runtime"
             for entry in detected_datasets:
-                entry["matches_declared"] = entry.get("dataset_name") == declared_name
+                entry["matches_declared"] = None if inferred else _dataset_names_match(
+                    entry.get("dataset_name"), declared.get("name"))
 
     # Training config
     if intent in ("training", "sft"):
