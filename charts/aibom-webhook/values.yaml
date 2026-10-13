@@ -24,10 +24,12 @@ image:
   # GPU pods the NVIDIA Container Toolkit injects them from the node's
   # driver at container start, triggered by the nvidia.com/gpu claim the
   # webhook mirrors onto this init container (see CLAUDE.md); CPU-only pods
-  # simply get "Not available" for the GPU fields. Defaults to a public
-  # image so this works with no extra setup; swap for something already
-  # mirrored in-cluster (e.g. an OpenShift AI runtime ImageStream) to avoid
-  # an external pull per pod.
+  # simply get "Not available" for the GPU fields. Defaults to the OpenShift AI
+  # runtime-pytorch ImageStream, which avoids an external pull per pod but only
+  # exists where OpenShift AI is installed (redhat-ods-applications). Without it
+  # the init container can't pull and instrumented pods fail to start, so set
+  # this to any image with python3 + bash, e.g. repository pytorch/pytorch,
+  # tag 2.2.0-cuda12.1-cudnn8-runtime.
   discovery:
     repository: image-registry.openshift-image-registry.svc:5000/redhat-ods-applications/runtime-pytorch
     tag: pytorch
