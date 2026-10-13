@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -2037,5 +2038,54 @@ func TestMergeDatasets_GitInfoComesFromOnePod(t *testing.T) {
 	}
 	if ri["framework"] != "PyTorch" {
 		t.Errorf("non-git keys still merge across pods, got %v", ri)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Dataset identity and merge order (#114)
+// ---------------------------------------------------------------------------
+
+func TestMergeDatasets_KeepsDifferentFilesAndSplitsApart(t *testing.T) {
+	a := `{"datasets":[{"dataset_name":"json","source":"datasets.load_dataset","data_files":["train.json"]},
+		{"dataset_name":"MNIST","source":"torchvision.datasets.MNIST","split":"train"}]}`
+	b := `{"datasets":[{"dataset_name":"json","source":"datasets.load_dataset","data_files":[ "val.json" ]},
+		{"dataset_name":"MNIST","source":"torchvision.datasets.MNIST","split":"test"},
+		{"source":"datasets.load_dataset","data_files":["train.json"],"dataset_name":"json"}]}`
+	var got struct {
+		Datasets []map[string]interface{} `json:"datasets"`
+	}
+	if err := json.Unmarshal([]byte(mergeDatasets([]string{a, b})), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Datasets) != 4 {
+		t.Errorf("want 4 distinct datasets (last is a repeat), got %d: %v", len(got.Datasets), got.Datasets)
+	}
+}
+
+func TestBuildPostprocessInputs_RankZeroNewestAttemptFirst(t *testing.T) {
+	pod := func(name, index string, age time.Duration) corev1.Pod {
+		p := instrumentedPod("job", "ns")
+		p.Name = name
+		p.CreationTimestamp = metav1.NewTime(time.Now().Add(-age))
+		if index != "" {
+			p.Annotations = map[string]string{"batch.kubernetes.io/job-completion-index": index}
+		}
+		return *p
+	}
+	pods := []corev1.Pod{
+		pod("job-1-a", "1", time.Hour),
+		pod("job-0-old", "0", 2*time.Hour),
+		pod("job-0-new", "0", time.Minute),
+	}
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "cm-name", Namespace: "ns"}, Data: map[string]string{}}
+	for _, p := range pods {
+		cm.Data["dataset-"+p.Name+".json"] = p.Name
+	}
+	w := &Watcher{clientset: fake.NewSimpleClientset(cm)}
+
+	_, datasets, _, _ := w.buildPostprocessInputs(context.Background(), "ns", "cm-name", pods, nil)
+
+	if want := []string{"job-0-new", "job-0-old", "job-1-a"}; !reflect.DeepEqual(datasets, want) {
+		t.Errorf("dataset merge order = %v, want %v", datasets, want)
 	}
 }
