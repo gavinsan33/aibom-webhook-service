@@ -14,6 +14,16 @@ oc create --dry-run=server -o yaml -f <pod.yaml>
 
 The result should carry the `aibom.io/instrumented` label, and a `mutating pod ...` line should appear in the webhook's log.
 
+## Pods stay in `Init:ImagePullBackOff`
+
+The `aibom-discovery` init container can't pull its image. The chart's default is the OpenShift AI `runtime-pytorch` ImageStream in `redhat-ods-applications`, which exists only where OpenShift AI is installed. Check the event:
+
+```bash
+oc describe pod <pod-name> -n <namespace>
+```
+
+Set `image.discovery.repository` and `image.discovery.tag` to an image the cluster can pull, as shown in [Getting Started](getting-started.md#cluster-requirements), and upgrade the webhook chart. Pods already created keep the old image, so recreate them.
+
 ## Pods fail to start in an enabled namespace
 
 A stale `aibom-scripts` ConfigMap can fail pod startup for every instrumented workload in the namespace. The dataset detector hook mounts `runtime_detector.py` from that ConfigMap, and the `aibom-discovery` and `aibom-dataset-sidecar` init containers each run a script from it.

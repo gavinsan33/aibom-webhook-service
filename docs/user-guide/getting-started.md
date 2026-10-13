@@ -15,6 +15,7 @@ render_macros: true
 | Dependency | Needed for | Required? | Without it |
 |------------|-----------|-----------|------------|
 | [cert-manager](https://cert-manager.io/) | Issues and renews the webhook's TLS certificate | Yes | The webhook chart can't issue its certificate, so the API server can't call it. |
+| OpenShift AI (the `runtime-pytorch` ImageStream in `redhat-ods-applications`) | The default `aibom-discovery` init container image | Yes, unless you set `image.discovery` | The init container can't pull its image, so instrumented pods fail to start. Fail-open does not cover this. See below. |
 | Prometheus Operator CRDs (`monitoring.coreos.com/v1` `PodMonitor`) | Scraping vLLM's `/metrics` for inference performance | Yes, unless vLLM metrics are skipped | The namespace chart install fails outright. Skip it with `--skip-vllm-metrics`, or `--set vllmMetrics.enabled=false` with Helm. |
 | OpenShift monitoring (Thanos Querier in `openshift-monitoring`) | All telemetry queries | For telemetry | Telemetry comes back empty. |
 | `cluster-monitoring-view` binding for the postprocess ServiceAccount | Letting postprocess read those metrics | For telemetry | Telemetry comes back empty for that namespace. Skip it with `--skip-monitoring-access`, or `--set monitoringAccess.enabled=false` with Helm, and have a cluster-admin apply the binding once. |
@@ -23,6 +24,15 @@ render_macros: true
 | OpenShift `image.openshift.io` API | Source commit from image labels | No | That source-detection tier is skipped. |
 
 Telemetry is collected only for pods with a detected GPU.
+
+The discovery image needs only `python3` and `bash`. On a cluster without OpenShift AI, point the chart at any image the cluster can pull:
+
+```bash
+helm upgrade --install aibom-webhook oci://{{ registry }}/aibom-webhook \
+  -n {{ webhook_namespace }} --create-namespace --kube-as-user=system:admin \
+  --set image.discovery.repository=pytorch/pytorch \
+  --set image.discovery.tag=2.2.0-cuda12.1-cudnn8-runtime
+```
 
 Supported workload types are Job, JobSet, PyTorchJob and RayJob, plus any pod that requests `nvidia.com/gpu`. The Kubeflow Training Operator (PyTorchJob), JobSet and KubeRay are needed only if you run those kinds.
 
