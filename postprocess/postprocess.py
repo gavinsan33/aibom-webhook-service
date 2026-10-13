@@ -1128,18 +1128,18 @@ def detect_parallelization_from_command(tokens):
     return None
 
 
-def _parallelization_strategy_from_device_map(device_map):
+def _parallelization_strategy_from_device_map(runtime_info):
     """Fallback for in-script sharding with no CLI/launcher/accelerate-config
     signal at all -- e.g. a raw transformers.Trainer or inference script that
-    passes `device_map="auto"` (or another multi-device map) directly to
-    `from_pretrained`, sharding the model across GPUs within a single
-    process. Lowest-priority signal: any explicit launcher/CLI/accelerate
-    detection is more authoritative than this heuristic."""
-    if not device_map:
-        return None
-    if device_map in ("cpu", "cuda", "cuda:0"):
-        return None
-    return "model_parallel"
+    passes `device_map="auto"` directly to `from_pretrained`, sharding the
+    model across GPUs within a single process. Lowest-priority signal: any
+    explicit launcher/CLI/accelerate detection is more authoritative than
+    this heuristic. Uses the number of accelerators the runtime hook saw the
+    map resolve to, so single-device maps (`{"": 0}`, `"cuda:1"`, `"auto"` on
+    one GPU) aren't called model parallel (#109)."""
+    if (runtime_info.get("model_device_count") or 0) > 1:
+        return "model_parallel"
+    return None
 
 
 _HF_URI_RE = re.compile(r"^([^/@:]+(?:/[^/@:]+)?)(?:[@:]([^/]+))?(?:/.*)?$")
@@ -2509,13 +2509,16 @@ def compile_aibom(
         aibom["model"]["name_declared_via"] = (
             "annotation" if annotations.get("model-name") else dm["model_name_declared_via"]
         )
-    for src, dst in (
-        ("model_revision", "revision"),
-        ("base_model", "base_model"),
-        ("model_size_bytes", "size_bytes"),
-    ):
-        if dm.get(src):
-            aibom["model"][dst] = dm[src]
+    # Those details describe the detected model; an annotation naming a
+    # different one makes them someone else's (#109).
+    if annotations.get("model-name") in (None, "", dm.get("model_name")):
+        for src, dst in (
+            ("model_revision", "revision"),
+            ("base_model", "base_model"),
+            ("model_size_bytes", "size_bytes"),
+        ):
+            if dm.get(src):
+                aibom["model"][dst] = dm[src]
 
     # Dataset section
     cli_ds = cli_dataset or {}
@@ -2556,40 +2559,48 @@ def compile_aibom(
         aibom["training"] = {
             "optimizer": annotations.get("optimizer") or runtime_info.get("optimizer"),
             "learning_rate": _first_not_none(
+                _try_float(annotations.get("learning-rate")),
                 runtime_info.get("learning_rate"),
                 dm.get("learning_rate"),
-                _try_float(annotations.get("learning-rate")),
             ),
             "batch_size": _first_not_none(
+                _try_int(annotations.get("batch-size")),
                 runtime_info.get("batch_size"),
                 dm.get("batch_size"),
-                _try_int(annotations.get("batch-size")),
             ),
             "epochs": _first_not_none(
+                _try_int(annotations.get("epochs")),
                 runtime_info.get("epochs"),
                 dm.get("epochs"),
-                _try_int(annotations.get("epochs")),
             ),
             "random_seed": _first_not_none(
+                _try_int(annotations.get("random-seed")),
                 runtime_info.get("random_seed"),
                 dm.get("random_seed"),
-                _try_int(annotations.get("random-seed")),
             ),
+            "mixed_precision": runtime_info.get("mixed_precision"),
             "parallelization_strategy": (
                 annotations.get("parallelization-strategy")
                 or runtime_info.get("parallelization_strategy")
                 or dm.get("parallelization_strategy")
-                or _parallelization_strategy_from_device_map(runtime_info.get("model_device_map"))
+                or _parallelization_strategy_from_device_map(runtime_info)
             ),
         }
 
     # Fine-tuning config
     if intent == "sft":
+        runtime_adaptation = runtime_info.get("adaptation_method")
+        # The peft hook can't tell lora from qlora itself: the LoraConfig is
+        # often built before the quantized model loads (#109).
+        if runtime_adaptation == "lora" and (
+            runtime_info.get("quantization_method") or runtime_info.get("quantization_bits")
+        ):
+            runtime_adaptation = "qlora"
         aibom["fine_tuning"] = {
             "adaptation_method": (
                 annotations.get("adaptation-method")
                 or dm.get("adaptation_method")
-                or runtime_info.get("adaptation_method")
+                or runtime_adaptation
             ),
             "lora_rank": (
                 _try_int(annotations.get("lora-rank")) or dm.get("lora_rank") or runtime_info.get("lora_rank")

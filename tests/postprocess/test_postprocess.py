@@ -297,16 +297,20 @@ def test_detect_parallelization_single_gpu_returns_none():
     assert pp.detect_parallelization_from_command(tokens) is None
 
 
-def test_parallelization_strategy_from_device_map_auto():
-    assert pp._parallelization_strategy_from_device_map("auto") == "model_parallel"
+def test_parallelization_strategy_from_device_map_multi_device():
+    assert pp._parallelization_strategy_from_device_map({"model_device_count": 2}) == "model_parallel"
 
 
 def test_parallelization_strategy_from_device_map_single_device_returns_none():
-    assert pp._parallelization_strategy_from_device_map("cuda:0") is None
+    # {"": 0}, "cuda:1", "auto" on one GPU all resolve to one device (#109).
+    assert pp._parallelization_strategy_from_device_map(
+        {"model_device_map": "{'': 0}", "model_device_count": 1}
+    ) is None
 
 
 def test_parallelization_strategy_from_device_map_none_returns_none():
-    assert pp._parallelization_strategy_from_device_map(None) is None
+    assert pp._parallelization_strategy_from_device_map({"model_device_map": "auto"}) is None
+    assert pp._parallelization_strategy_from_device_map({}) is None
 
 
 def test_detect_parallelization_no_signal_returns_none():
@@ -1515,8 +1519,63 @@ def test_compile_aibom_uses_runtime_info_for_training_and_fine_tuning():
     assert aibom["fine_tuning"]["lora_alpha"] == 32
 
 
+def test_compile_aibom_annotations_override_training_fields():
+    # README: annotations always override (#109).
+    runtime_info = {"learning_rate": 1e-4, "batch_size": 4, "epochs": 3, "random_seed": 1}
+    detected_model = {"learning_rate": 2e-4, "batch_size": 8, "epochs": 2, "random_seed": 2}
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info=runtime_info,
+        annotations={
+            "experiment-intent": "training", "learning-rate": "5e-5", "batch-size": "16",
+            "epochs": "1", "random-seed": "99",
+        },
+        telemetry=None, detected_model=detected_model,
+    )
+    t = aibom["training"]
+    assert (t["learning_rate"], t["batch_size"], t["epochs"], t["random_seed"]) == (5e-5, 16, 1, 99)
+
+
+def test_compile_aibom_reports_mixed_precision_separately_from_dtype():
+    runtime_info = {"dtype": "float32", "mixed_precision": "bf16"}
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info=runtime_info,
+        annotations={"experiment-intent": "training"}, telemetry=None,
+    )
+    assert aibom["model"]["dtype"] == "float32"
+    assert aibom["training"]["mixed_precision"] == "bf16"
+
+
+def test_compile_aibom_runtime_lora_on_quantized_base_is_qlora():
+    # Independent of whether LoraConfig or the quantized load came first (#109).
+    runtime_info = {"adaptation_method": "lora", "quantization_method": "bitsandbytes"}
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info=runtime_info,
+        annotations={"experiment-intent": "sft"}, telemetry=None,
+    )
+    assert aibom["fine_tuning"]["adaptation_method"] == "qlora"
+
+
+def test_compile_aibom_model_name_annotation_drops_storage_details():
+    # Storage-derived revision/base_model/size describe the detected model,
+    # not whichever one the annotation names (#109).
+    detected_model = {
+        "model_name": "Qwen/Qwen2.5-32B-Instruct",
+        "model_name_declared_via": "model_files_readme",
+        "model_revision": "5ede1c9", "base_model": "Qwen/Qwen2.5-32B", "model_size_bytes": 1,
+    }
+    for name, kept in (("other/model", False), ("Qwen/Qwen2.5-32B-Instruct", True)):
+        aibom = pp.compile_aibom(
+            discoveries=[], detected_datasets=[], runtime_info={},
+            annotations={"experiment-intent": "inference", "model-name": name},
+            telemetry=None, detected_model=detected_model,
+        )
+        assert ("revision" in aibom["model"]) is kept
+        assert ("base_model" in aibom["model"]) is kept
+        assert ("size_bytes" in aibom["model"]) is kept
+
+
 def test_compile_aibom_falls_back_to_device_map_for_parallelization_strategy():
-    runtime_info = {"model_device_map": "auto"}
+    runtime_info = {"model_device_map": "auto", "model_device_count": 2}
     aibom = pp.compile_aibom(
         discoveries=[], detected_datasets=[], runtime_info=runtime_info,
         annotations={"experiment-intent": "training"}, telemetry=None,
@@ -1525,7 +1584,7 @@ def test_compile_aibom_falls_back_to_device_map_for_parallelization_strategy():
 
 
 def test_compile_aibom_cli_detected_strategy_overrides_device_map_fallback():
-    runtime_info = {"model_device_map": "auto"}
+    runtime_info = {"model_device_map": "auto", "model_device_count": 2}
     detected_model = {"parallelization_strategy": "data_parallel"}
     aibom = pp.compile_aibom(
         discoveries=[], detected_datasets=[], runtime_info=runtime_info,
