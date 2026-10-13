@@ -132,6 +132,24 @@ def test_merge_dedupes_datasets_by_name_and_source():
     assert [(d["dataset_name"], d["source"]) for d in merged["datasets"]] == [("a", "x"), ("a", "y")]
 
 
+def test_merge_updates_entry_already_flushed():
+    """A batch_size/seen_via added after the first flush used to be dropped,
+    since the entry's key was already in the file."""
+    existing = {"datasets": [{"dataset_name": "a", "source": "x", "seen_via": ["y"]}]}
+    merged = rd._merge_output(
+        existing, [{"dataset_name": "a", "source": "x", "batch_size": 8, "seen_via": ["z"]}], {}
+    )
+    assert merged["datasets"] == [{"dataset_name": "a", "source": "x", "batch_size": 8, "seen_via": ["y", "z"]}]
+
+
+def test_merge_keeps_splits_apart():
+    merged = rd._merge_output(
+        {}, [{"dataset_name": "MNIST", "source": "s", "split": "train"},
+             {"dataset_name": "MNIST", "source": "s", "split": "test"}], {}
+    )
+    assert len(merged["datasets"]) == 2
+
+
 def test_process_with_nothing_detected_writes_nothing_and_skips_git(out_path, monkeypatch):
     def boom(check_dirty=True):
         raise AssertionError("git provenance must not be captured by a process that detected nothing")
