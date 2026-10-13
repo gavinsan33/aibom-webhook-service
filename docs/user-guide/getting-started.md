@@ -3,7 +3,7 @@
 ## Prerequisites
 
 - An OpenShift cluster, and `helm` 3.x.
-- A cluster-admin account (see [Install the webhook](#install-the-webhook)).
+- A cluster-admin account. Both charts install cluster-scoped RBAC, and the workload-namespace chart creates a ClusterRoleBinding (see [Install the webhook](#install-the-webhook)).
 - To work from source: Go 1.22+, [`just`](https://github.com/casey/just) (run `make install-just` if you don't have it), and `openssl` for local TLS certificates.
 
 ### Cluster requirements
@@ -31,13 +31,13 @@ helm upgrade --install aibom-webhook oci://quay.io/gsanders/aibom-webhook \
   -n project-aibom --create-namespace --kube-as-user=system:admin
 ```
 
-`--kube-as-user=system:admin` is required because the chart installs cluster-scoped RBAC, which a namespace-scoped admin cannot grant themselves.
+The chart installs cluster-scoped RBAC, which a namespace-scoped admin cannot grant themselves, so run it as a cluster-admin. The commands here use `--kube-as-user=system:admin` to do that by impersonation, which needs impersonation rights and so won't work on managed clusters such as ROSA or ARO. There, log in as a cluster-admin user and drop `--kube-as-user=system:admin` from the `helm` commands and `--as=system:admin` from the `oc` commands.
 
 Without `--version`, Helm resolves to the most recently published mutable tag. To pin an exact commit, pass `--version=<version>-<git-sha>` (for example `--version=0.1.0-abc1234`).
 
 ## Enable a workload namespace
 
-Each namespace that runs instrumented workloads needs the `aibom.io/enabled` label, image pull access to `aibom-system`, the `aibom-scripts` ConfigMap, and RBAC that lets workload pods and the postprocess Job write their data through the Kubernetes API. The namespace must already exist.
+Each namespace that runs instrumented workloads needs the `aibom.io/enabled` label, image pull access to the webhook's namespace (`project-aibom`), the `aibom-scripts` ConfigMap, and RBAC that lets workload pods and the postprocess Job write their data through the Kubernetes API. The namespace must already exist.
 
 ```bash
 oc label namespace <namespace> aibom.io/enabled=true --overwrite
