@@ -8,7 +8,7 @@ Three components do detection, in this order in the pipeline:
 2. **Runtime hooks** (`runtime_detector.py`, mounted as `sitecustomize.py`) — dataset/model/training objects observed live inside the app container's own Python process.
 3. **Postprocess Job** (`postprocess.py`) — parses container CLI args, reconciles/merges everything above, resolves git provenance, and queries Prometheus for telemetry.
 
-Any field can also be set directly via an `aibom.io/*` annotation, which overrides auto-detected values for nearly every field — see the [annotation table](https://github.com/gavinsan33/aibom-webhook-service/blob/main/README.md#aibom-annotations) in the README. The exception is `training.learning_rate`/`batch_size`/`epochs`/`random_seed`: for these the runtime hook wins, then the CLI arg, and the annotation is used only when neither produced a value (#109).
+Any field can also be set directly via an `aibom.io/*` annotation, which overrides auto-detected values for nearly every field — see the [annotation table](https://github.com/gavinsan33/aibom-webhook-service/blob/main/README.md#aibom-annotations) in the README. Setting `aibom.io/model-name` to a name other than the detected one also drops the storage-derived `model.revision`/`base_model`/`size_bytes`, since those describe the detected model.
 
 ---
 
@@ -116,9 +116,9 @@ Every `dataset.auto_detected[]` entry gets `matches_declared` — whether its na
 
 | Hook | Captures |
 |---|---|
-| `transformers.TrainingArguments.__init__` | learning rate, batch size, epochs, optimizer, random seed, dtype (`bf16`/`fp16` flags) |
-| `transformers.PreTrainedModel.from_pretrained` | model name, `device_map`, architecture (`config.architectures[0]`), dtype, quantization method (bitsandbytes/GPTQ/AWQ/HQQ/AQLM class-name or flag detection), quantization bit width |
-| `peft.LoraConfig.__init__` | LoRA rank, LoRA alpha, adaptation method (`dora`/`rslora`/`qlora`/`lora`, from `use_dora`/`use_rslora`/quantization presence) |
+| `transformers.TrainingArguments.__post_init__` | learning rate, batch size, epochs, optimizer, random seed, `training.mixed_precision` (`bf16`/`fp16` flags; not the weights' dtype) |
+| `transformers.PreTrainedModel.from_pretrained` | model name, `device_map` and how many accelerators it resolved to, architecture (`config.architectures[0]`), dtype, quantization method (bitsandbytes/GPTQ/AWQ/HQQ/AQLM class-name or flag detection), quantization bit width. Only the process's **first** model load is recorded, so a DPO reference, reward or teacher model loaded afterwards doesn't replace the trained model; one loaded *before* it still would |
+| `peft.LoraConfig.__init__` | LoRA rank, LoRA alpha, adaptation method (`dora`/`rslora`/`lora`; `lora` becomes `qlora` when the runtime hooks also saw a quantized base model, in either order) |
 
 **CLI-arg detection** (`postprocess.py`) — parses each container's command/args, including through `sh -c "... && cmd"` wrapper-script flattening:
 
@@ -175,7 +175,7 @@ Identification only — nothing verifies the weights. A renamed/generic path is 
 - bare `--fsdp` flag → `fsdp`
 - `trl ... --num_processes N>1` (accelerate-launch args passed straight to a CLI that spawns `accelerate launch` internally) → `data_parallel`
 - `trl ... --accelerate_config <path>` → read from the file's own `distributed_type` (`FSDP`→`fsdp`, `DEEPSPEED`→`deepspeed`, `MULTI_GPU`/`MULTI_CPU`→`data_parallel`); falls back to guessing from the filename against known presets (`fsdp1`/`fsdp2`/`zero1`/`zero2`/`zero3`/`multi_gpu`/`single_gpu`) if PyYAML is unavailable or `distributed_type` isn't recognized
-- Lowest-priority fallback: `device_map` captured by the `from_pretrained` runtime hook → `model_parallel` for any value other than `cpu`, `cuda` or `cuda:0`, only if nothing above already produced a strategy. Single-device maps such as `{"": 0}`, `0` or `cuda:1` are therefore also reported as `model_parallel` (#109)
+- Lowest-priority fallback: `device_map` captured by the `from_pretrained` runtime hook → `model_parallel` when the model's resolved placement (`model.hf_device_map`) spans more than one accelerator, only if nothing above already produced a strategy. Single-device maps (`{"": 0}`, `0`, `cuda:1`, `auto` on one GPU) and cpu/disk offload don't count
 
 ---
 
