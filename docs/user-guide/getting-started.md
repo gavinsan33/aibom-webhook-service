@@ -2,10 +2,25 @@
 
 ## Prerequisites
 
-- An OpenShift cluster.
-- `helm` 3.x.
-- [cert-manager](https://cert-manager.io/) installed in the cluster. It issues and renews the webhook's TLS certificate.
+- An OpenShift cluster, and `helm` 3.x.
+- A cluster-admin account (see [Install the webhook](#install-the-webhook)).
 - To work from source: Go 1.22+, [`just`](https://github.com/casey/just) (run `make install-just` if you don't have it), and `openssl` for local TLS certificates.
+
+### Cluster requirements
+
+| Dependency | Needed for | Required? | Without it |
+|------------|-----------|-----------|------------|
+| [cert-manager](https://cert-manager.io/) | Issues and renews the webhook's TLS certificate | Yes | The webhook chart can't issue its certificate, so the API server can't call it. |
+| Prometheus Operator CRDs (`monitoring.coreos.com/v1` `PodMonitor`) | Scraping vLLM's `/metrics` for inference performance | Yes, unless vLLM metrics are skipped | The namespace chart install fails outright. Skip it with `--skip-vllm-metrics`, or `--set vllmMetrics.enabled=false` with Helm. |
+| OpenShift monitoring (Thanos Querier in `openshift-monitoring`) | All telemetry queries | For telemetry | Telemetry comes back empty. |
+| `cluster-monitoring-view` binding for the postprocess ServiceAccount | Letting postprocess read those metrics | For telemetry | Telemetry comes back empty for that namespace. Skip it with `--skip-monitoring-access`, or `--set monitoringAccess.enabled=false` with Helm, and have a cluster-admin apply the binding once. |
+| NVIDIA GPU Operator with dcgm-exporter, pod mapping enabled | GPU utilization, memory and power series | For GPU telemetry | GPU metrics are missing. Without pod mapping the `exported_pod` label doesn't exist and the metrics are simply absent. |
+| NVIDIA Container Toolkit and driver on GPU nodes | `nvidia-smi` in the `aibom-discovery` init container | For GPU hardware fields | GPU fields read "Not available". |
+| OpenShift `image.openshift.io` API | Source commit from image labels | No | That source-detection tier is skipped. |
+
+Telemetry is collected only for pods with a detected GPU.
+
+Supported workload types are Job, JobSet, PyTorchJob and RayJob, plus any pod that requests `nvidia.com/gpu`. The Kubeflow Training Operator (PyTorchJob), JobSet and KubeRay are needed only if you run those kinds.
 
 ## Install the webhook
 
