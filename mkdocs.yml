@@ -36,5 +36,6 @@ nav:
   - Reference:
       - Detected Fields: CAPABILITIES.md
       - AIBOM Schema: reference/schema.md
+      - Signing Keys: reference/signing.md
       - Configuration: reference/configuration.md
       - Development: reference/development.md
