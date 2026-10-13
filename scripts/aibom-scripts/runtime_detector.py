@@ -102,6 +102,9 @@ _dataset_registry = weakref.WeakKeyDictionary()
 # re-fetching a split from a DatasetDict) before handing it to a DataLoader --
 # each of those returns a *new* Dataset object, but builder_name/config_name
 # survive the transform, so this catches it as the same underlying dataset.
+# The split is part of the key, so a train DataLoader isn't attached to a
+# later test load (#114). A key two different loads share maps to None and
+# matches nothing.
 _hf_dataset_key_registry = {}
 
 
@@ -110,7 +113,21 @@ def _hf_dataset_key(dataset):
     builder_name = getattr(info, "builder_name", None) if info else None
     if not builder_name:
         return None
-    return (builder_name, getattr(info, "config_name", None))
+    split = getattr(dataset, "split", None)
+    return (builder_name, getattr(info, "config_name", None), str(split) if split is not None else None)
+
+
+def _register_hf_dataset(dataset, entry):
+    """Caller holds _lock."""
+    try:
+        _dataset_registry[dataset] = entry
+    except TypeError:
+        _dbg("HF datasets hook: dataset object doesn't support weak references, skipping registry")
+    key = _hf_dataset_key(dataset)
+    if key is not None:
+        if _hf_dataset_key_registry.get(key, entry) is not entry:
+            entry = None
+        _hf_dataset_key_registry[key] = entry
 
 
 def _record(entry):
@@ -562,20 +579,41 @@ def _output_lock(path, timeout_s):
         yield
 
 
+# Fields that tell two loads apart: the same builder with different files,
+# splits or configs is a different dataset (#114).
+_DATASET_IDENTITY_KEYS = (
+    "dataset_name", "source", "config_name", "split", "revision",
+    "data_files", "data_dir", "root", "path",
+)
+
+
+def _dataset_identity(entry):
+    return json.dumps([entry.get(k) for k in _DATASET_IDENTITY_KEYS], sort_keys=True, default=str)
+
+
 def _merge_output(existing, data, info):
     """Fold this process's detections into what other processes already
-    wrote. Datasets are deduped by (name, source). runtime_info is
+    wrote. Datasets are deduped by _dataset_identity; a repeat updates the
+    stored entry, so a batch_size or seen_via added after an earlier flush
+    isn't lost. runtime_info is
     last-writer-wins per key, except the git_* keys, which are one
     observation of one checkout: a process that captured any replaces the
     whole group, so a commit from one working tree is never labelled with the
     branch (or dirty flag) of another (#107)."""
     existing_ds = existing.get("datasets", [])
-    seen = {(e.get("dataset_name", ""), e.get("source", "")) for e in existing_ds}
+    by_key = {_dataset_identity(e): e for e in existing_ds}
     for entry in data:
-        key = (entry.get("dataset_name", ""), entry.get("source", ""))
-        if key not in seen:
+        key = _dataset_identity(entry)
+        old = by_key.get(key)
+        if old is None:
             existing_ds.append(entry)
-            seen.add(key)
+            by_key[key] = entry
+            continue
+        seen_via = old.get("seen_via", [])
+        seen_via = seen_via + [v for v in entry.get("seen_via", []) if v not in seen_via]
+        old.update(entry)
+        if seen_via:
+            old["seen_via"] = seen_via
 
     output = {"datasets": existing_ds}
     merged_info = existing.get("runtime_info", {})
@@ -687,7 +725,10 @@ def _install_dataloader_hook():
                         existing = _hf_dataset_key_registry.get(key)
             if existing is not None:
                 _dbg(f"DataLoader hook: dataset already recorded via {existing.get('source', '?')}, merging")
-                if batch_size is not None:
+                # An eval loader on the same dataset (a DatasetDict entry
+                # covers every split) must not replace the train batch size.
+                is_train = str(getattr(dataset, "split", "")).startswith("train") or getattr(dataset, "train", None) is True
+                if batch_size is not None and ("batch_size" not in existing or is_train):
                     existing["batch_size"] = batch_size
                 seen_via = existing.setdefault("seen_via", [])
                 if "torch.utils.data.DataLoader" not in seen_via:
@@ -747,6 +788,24 @@ def _inspect_torch_dataset(dataset):
 
 # ── HuggingFace datasets.load_dataset hook ───────────────────────────────────
 
+# datasets' packaged builders that read files named by data_files/data_dir.
+_FILE_BUILDERS = {
+    "json", "csv", "parquet", "text", "arrow", "pandas", "xml",
+    "imagefolder", "audiofolder", "videofolder", "webdataset",
+}
+
+
+def _data_files_name(entry):
+    """Their common directory, the single file, or the files joined."""
+    files = entry.get("data_files")
+    if isinstance(files, dict):
+        files = [f for v in files.values() for f in (v if isinstance(v, list) else [v])]
+    if not files:
+        return entry.get("data_dir")
+    if len(files) == 1:
+        return files[0]
+    return os.path.commonprefix(files).rpartition("/")[0] or ", ".join(files)
+
 def _install_hf_datasets_hook():
     try:
         import datasets
@@ -796,10 +855,19 @@ def _install_hf_datasets_hook():
                         for k, v in data_files.items()
                     }
 
+            # load_dataset("json", data_files=...) is named after its files,
+            # not the builder, so two local loads don't share a name (#114).
+            if entry["dataset_name"] in _FILE_BUILDERS:
+                files_name = _data_files_name(entry)
+                if files_name:
+                    entry["builder"] = entry["dataset_name"]
+                    entry["dataset_name"] = files_name
+
             ds = result
+            parts = [result]
             if isinstance(result, dict) and result:
-                first_split = next(iter(result.values()))
-                ds = first_split
+                parts = list(result.values())
+                ds = parts[0]
                 entry["splits"] = list(result.keys())
                 _dbg(f"HF datasets hook: result is DatasetDict with splits {entry['splits']}, using first for metadata")
 
@@ -821,15 +889,10 @@ def _install_hf_datasets_hook():
                     entry["description"] = info.description[:200]
 
             _record(entry)
-            try:
-                with _lock:
-                    _dataset_registry[ds] = entry
-            except TypeError:
-                _dbg("HF datasets hook: dataset object doesn't support weak references, skipping registry")
-            key = _hf_dataset_key(ds)
-            if key is not None:
-                with _lock:
-                    _hf_dataset_key_registry[key] = entry
+            # Every split of a DatasetDict belongs to this entry.
+            with _lock:
+                for part in parts:
+                    _register_hf_dataset(part, entry)
         except Exception:
             _dbg_exc("HF datasets._patched_load")
         return result
@@ -863,16 +926,23 @@ def _install_torchvision_hook():
     _hooks_installed["torchvision"] = True
     _dbg("torchvision hook: installed")
 
+    patched = set()
     for name in _TORCHVISION_DATASETS:
         cls = getattr(tvd, name, None)
         if cls is None:
             continue
+        patched.add(cls)
 
         _orig = cls.__init__
 
-        def _make_patched(original, dataset_name):
+        def _make_patched(original, dataset_name, owner):
             def _patched(self, *args, **kwargs):
                 original(self, *args, **kwargs)
+                # A subclass runs its parent's patched __init__ too (CIFAR100
+                # inherits CIFAR10's, EMNIST calls MNIST's): only the
+                # most-derived patched class records (#114).
+                if next((c for c in type(self).__mro__ if c in patched), None) is not owner:
+                    return
                 try:
                     entry = {
                         "source": f"torchvision.datasets.{dataset_name}",
@@ -901,12 +971,16 @@ def _install_torchvision_hook():
                             entry["fingerprint"] = fp
 
                     _record(entry)
+                    # So a DataLoader over it merges in instead of adding a
+                    # second entry.
+                    with _lock:
+                        _dataset_registry[self] = entry
                 except Exception:
                     _dbg_exc(f"torchvision._patched({dataset_name})")
 
             return _patched
 
-        cls.__init__ = _make_patched(_orig, name)
+        cls.__init__ = _make_patched(_orig, name, cls)
 
 
 # ── webdataset hook ──────────────────────────────────────────────────────────
