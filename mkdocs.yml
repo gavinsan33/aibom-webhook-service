@@ -38,4 +38,5 @@ nav:
       - AIBOM Schema: reference/schema.md
       - Signing Keys: reference/signing.md
       - Configuration: reference/configuration.md
+      - Upgrading: reference/upgrading.md
       - Development: reference/development.md
