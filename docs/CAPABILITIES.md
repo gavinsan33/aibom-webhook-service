@@ -92,13 +92,13 @@ The discovery init container's own `nvidia.com/gpu` claim — what makes `nvidia
 | Hook | Fires on | Captures |
 |---|---|---|
 | `torch.utils.data.DataLoader.__init__` | DataLoader construction | dataset class, root/path, split, transform name, dataset name, URLs, content fingerprint (hash of file names/sizes/mtimes), batch size |
-| `datasets.load_dataset` (HuggingFace) | call time | dataset name, config name, split(s), revision, `data_dir`/`data_files`, fingerprint, version, license, description |
-| torchvision datasets (19 known classes: MNIST family, CIFAR, ImageNet, ImageFolder, CelebA, LSUN, STL10, SVHN, VOC*, Coco*, Flickr*, Places365) | construction | dataset name, root, split, download flag, fingerprint |
+| `datasets.load_dataset` (HuggingFace) | call time | dataset name (for file builders like `json`/`csv`/`parquet`, the `data_files` or `data_dir`, with the builder in `builder`), config name, split(s), revision, `data_dir`/`data_files`, fingerprint, version, license, description |
+| torchvision datasets (19 known classes: MNIST family, CIFAR, ImageNet, ImageFolder, CelebA, LSUN, STL10, SVHN, VOC*, Coco*, Flickr*, Places365) | construction | dataset name (the most-derived known class: CIFAR100, not also CIFAR10), root, split, download flag, fingerprint |
 | `webdataset.WebDataset.__init__` | construction | dataset name, URL list |
 
-Dataset entries referring to the same underlying object are correlated (not double-recorded) first by **object identity**, then by **`(builder_name, config_name)`** for the common case of a transformed dataset (`.map`/`.filter`/`.select`/`.shuffle`, or a `DatasetDict` split pull) wrapped in a fresh `DataLoader`. Each merged entry tracks a `seen_via` list of every hook that touched it.
+Dataset entries referring to the same underlying object are correlated (not double-recorded) first by **object identity**, then by **`(builder_name, config_name, split)`** for the common case of a transformed dataset (`.map`/`.filter`/`.select`/`.shuffle`, or a `DatasetDict` split pull) wrapped in a fresh `DataLoader`. If two loads share that key, a loader over a transformed copy gets its own entry rather than a guessed one. Each merged entry tracks a `seen_via` list of every hook that touched it. Entries from different processes and pods are deduped on name, source, config, split, revision, `data_files`, `data_dir` and root/path, so two local files or a train and test split stay separate.
 
-**CLI-arg detection** (`postprocess.py`, from container command/args): `--dataset_name`. `--dataset_config_name` and `--dataset_train_split` are parsed too, but neither value currently reaches `dataset.declared` (#114).
+**CLI-arg detection** (`postprocess.py`, from container command/args): `--dataset_name`, `--dataset_config_name` and `--dataset_train_split` (→ `dataset.declared.config_name`/`split`). A trl `--config` YAML isn't read; the runtime hook sees the load it causes.
 
 **Reconciliation** (`postprocess.py`, `dataset.declared`) — precedence order:
 
@@ -106,7 +106,7 @@ Dataset entries referring to the same underlying object are correlated (not doub
 2. CLI args above → `declared_via: cli_arg`
 3. First runtime-detected entry → `declared_via: inferred_from_runtime`
 
-Every `dataset.auto_detected[]` entry gets `matches_declared` — whether its name matches whichever source won above.
+Every `dataset.auto_detected[]` entry gets `matches_declared` — whether its name matches whichever source won above, ignoring case and a leading org or directory (`imdb` matches `stanfordnlp/imdb`). It's `null` when the declared name was inferred from runtime, since there's no declaration to check against.
 
 ---
 
