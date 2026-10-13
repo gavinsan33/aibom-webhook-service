@@ -45,6 +45,8 @@ oc get pod <pod-name> -n <namespace> -o jsonpath='{.spec.initContainers[*].name}
 # Should output: aibom-discovery
 ```
 
+These steps need a cluster-admin. `--kube-as-user=system:admin` impersonates one; where impersonation isn't available (ROSA, ARO), log in as a cluster-admin and drop it.
+
 Re-run step 2 whenever the scripts change; a stale `aibom-scripts` ConfigMap can fail pod startup in the namespace. After a workload completes:
 
 Preferred: the `oc aibom` plugin (install [`oc-aibom`](https://github.com/gavinsan33/oc-aibom) first; `aibom` is a plugin subcommand, not a built-in `oc` one), or the console plugin in the web UI:
