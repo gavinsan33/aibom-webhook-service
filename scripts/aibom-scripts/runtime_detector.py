@@ -910,6 +910,25 @@ _QUANT_CLASS_NAME_HINTS = (
 )
 
 
+def _gpu_device_count(device_map):
+    """How many accelerators a device_map places the model on, or None if it
+    can't be told (an unresolved "auto"/"balanced" string). cpu/disk/meta
+    offload doesn't count: "auto" on one GPU with cpu offload is 1 (#109)."""
+    if not isinstance(device_map, dict):
+        device_map = {"": device_map}
+    devices = set()
+    for v in device_map.values():
+        d = str(v)
+        if d in ("cpu", "disk", "meta"):
+            continue
+        if d in ("auto", "balanced", "balanced_low_0", "sequential"):
+            return None
+        if d.startswith("cuda:"):
+            d = d[len("cuda:"):]
+        devices.add("0" if d == "cuda" else d)
+    return len(devices)
+
+
 def _install_transformers_hook():
     try:
         import transformers
@@ -949,10 +968,12 @@ def _install_transformers_hook():
                 info["optimizer"] = getattr(self.optim, "value", None) or str(self.optim)
             if getattr(self, "seed", None) is not None:
                 info["random_seed"] = self.seed
+            # Mixed precision is the compute dtype, not the weights' dtype
+            # (from_pretrained's), so it's kept under its own key (#109).
             if getattr(self, "bf16", False):
-                info["dtype"] = "bfloat16"
+                info["mixed_precision"] = "bf16"
             elif getattr(self, "fp16", False):
-                info["dtype"] = "float16"
+                info["mixed_precision"] = "fp16"
             with _lock:
                 _runtime_info.update(info)
             _dbg(f"transformers hook: captured TrainingArguments {info}")
@@ -961,14 +982,35 @@ def _install_transformers_hook():
 
     transformers.TrainingArguments.__post_init__ = _patched_ta_post_init
 
+    # Only the process's first model load is recorded: a DPO reference model,
+    # reward model or distillation teacher loaded afterwards would otherwise
+    # replace the model being trained (#109). Claimed on entry, so a load
+    # nested inside another's from_pretrained doesn't win over its caller.
+    # ponytail: assumes the trained model loads first; a teacher/reward model
+    # loaded before it is still misreported (recording every load with a
+    # role would fix that).
+    claimed = [False]
+
     def _patched_from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
-        model = _orig_from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs)
+        primary = not claimed[0]
+        claimed[0] = True
+        try:
+            model = _orig_from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs)
+        except BaseException:
+            if primary:
+                claimed[0] = False
+            raise
+        if not primary:
+            return model
         try:
             info = {"model_name": str(pretrained_model_name_or_path)}
 
             device_map = kwargs.get("device_map")
             if device_map is not None:
                 info["model_device_map"] = str(device_map)
+                count = _gpu_device_count(getattr(model, "hf_device_map", None) or device_map)
+                if count is not None:
+                    info["model_device_count"] = count
 
             config = getattr(model, "config", None)
             architectures = getattr(config, "architectures", None) if config else None
@@ -982,7 +1024,9 @@ def _install_transformers_hook():
             quant_config = getattr(config, "quantization_config", None) if config else None
             if quant_config is not None:
                 method = getattr(quant_config, "quant_method", None)
-                method = str(method) if method else None
+                # transformers' QuantizationMethod is a (str, Enum), whose
+                # str() is "QuantizationMethod.BITS_AND_BYTES" (#109).
+                method = (getattr(method, "value", None) or str(method)) if method else None
                 if not method and (
                     getattr(quant_config, "load_in_4bit", False)
                     or getattr(quant_config, "load_in_8bit", False)
@@ -1039,18 +1083,15 @@ def _install_peft_hook():
             if getattr(self, "lora_alpha", None) is not None:
                 info["lora_alpha"] = self.lora_alpha
 
+            # "lora" on a quantized base becomes "qlora" in postprocess.py,
+            # since the LoraConfig is often built before the model loads (#109).
+            if getattr(self, "use_dora", False):
+                info["adaptation_method"] = "dora"
+            elif getattr(self, "use_rslora", False):
+                info["adaptation_method"] = "rslora"
+            else:
+                info["adaptation_method"] = "lora"
             with _lock:
-                already_quantized = bool(
-                    _runtime_info.get("quantization_method") or _runtime_info.get("quantization_bits")
-                )
-                if getattr(self, "use_dora", False):
-                    info["adaptation_method"] = "dora"
-                elif getattr(self, "use_rslora", False):
-                    info["adaptation_method"] = "rslora"
-                elif already_quantized:
-                    info["adaptation_method"] = "qlora"
-                else:
-                    info["adaptation_method"] = "lora"
                 _runtime_info.update(info)
             _dbg(f"peft hook: captured LoraConfig {info}")
         except Exception:

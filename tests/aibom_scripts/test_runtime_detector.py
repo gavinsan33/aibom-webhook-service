@@ -493,7 +493,9 @@ def test_transformers_hook_captures_training_arguments(fake_transformers_module)
     assert rd._runtime_info["epochs"] == 3
     assert rd._runtime_info["optimizer"] == "adamw_bnb_8bit"
     assert rd._runtime_info["random_seed"] == 1234
-    assert rd._runtime_info["dtype"] == "bfloat16"
+    assert rd._runtime_info["mixed_precision"] == "bf16"
+    # Mixed precision isn't the weights' dtype (#109).
+    assert "dtype" not in rd._runtime_info
 
 
 def test_transformers_hook_prefers_fp16_when_bf16_not_set(fake_transformers_module):
@@ -502,7 +504,7 @@ def test_transformers_hook_prefers_fp16_when_bf16_not_set(fake_transformers_modu
 
     transformers.TrainingArguments(fp16=True)
 
-    assert rd._runtime_info["dtype"] == "float16"
+    assert rd._runtime_info["mixed_precision"] == "fp16"
 
 
 def test_transformers_hook_captures_model_identity_from_from_pretrained(fake_transformers_module):
@@ -536,6 +538,89 @@ def test_transformers_hook_uses_explicit_quant_method_when_present(fake_transfor
 
     assert rd._runtime_info["quantization_method"] == "gptq"
     assert rd._runtime_info["quantization_bits"] == 4
+
+
+def test_transformers_hook_unwraps_quant_method_enum(fake_transformers_module):
+    # transformers' QuantizationMethod is a (str, Enum) like OptimizerNames (#109).
+    import enum
+
+    class QuantizationMethod(str, enum.Enum):
+        BITS_AND_BYTES = "bitsandbytes"
+
+    rd.install_hooks()
+    import transformers
+
+    config = FakeModelConfig(
+        quantization_config=FakeQuantizationConfig(quant_method=QuantizationMethod.BITS_AND_BYTES)
+    )
+    transformers.PreTrainedModel.from_pretrained("some-model", config=config)
+
+    assert rd._runtime_info["quantization_method"] == "bitsandbytes"
+
+
+def test_transformers_hook_keeps_first_model_load(fake_transformers_module):
+    # A DPO reference / reward / teacher model loaded later isn't the model
+    # being trained (#109).
+    rd.install_hooks()
+    import transformers
+
+    transformers.PreTrainedModel.from_pretrained(
+        "policy", config=FakeModelConfig(architectures=["LlamaForCausalLM"]), torch_dtype="bfloat16"
+    )
+    transformers.PreTrainedModel.from_pretrained(
+        "reward",
+        config=FakeModelConfig(
+            architectures=["LlamaForSequenceClassification"],
+            quantization_config=FakeQuantizationConfig(load_in_4bit=True),
+        ),
+        device_map="auto",
+    )
+
+    assert rd._runtime_info["model_name"] == "policy"
+    assert rd._runtime_info["model_architecture"] == "LlamaForCausalLM"
+    assert rd._runtime_info["dtype"] == "bfloat16"
+    assert "quantization_method" not in rd._runtime_info
+    assert "model_device_map" not in rd._runtime_info
+
+
+def test_transformers_hook_failed_first_load_doesnt_claim(fake_transformers_module, monkeypatch):
+    rd.install_hooks()
+    import transformers
+
+    def _missing(self, *args, **kwargs):
+        raise OSError("bad is not a valid model identifier")
+
+    orig_init = transformers.PreTrainedModel.__init__
+    monkeypatch.setattr(transformers.PreTrainedModel, "__init__", _missing)
+    with pytest.raises(OSError):
+        transformers.PreTrainedModel.from_pretrained("bad", config=FakeModelConfig())
+    monkeypatch.setattr(transformers.PreTrainedModel, "__init__", orig_init)
+    transformers.PreTrainedModel.from_pretrained("good", config=FakeModelConfig())
+
+    assert rd._runtime_info["model_name"] == "good"
+
+
+@pytest.mark.parametrize("device_map, count", [
+    ({"": 0}, 1),
+    (0, 1),
+    ("cuda:1", 1),
+    ({"a": 0, "b": "cuda:0", "c": "cpu", "d": "disk"}, 1),
+    ({"a": 0, "b": 1}, 2),
+    ("auto", None),
+])
+def test_gpu_device_count(device_map, count):
+    assert rd._gpu_device_count(device_map) == count
+
+
+def test_transformers_hook_counts_resolved_hf_device_map(fake_transformers_module, monkeypatch):
+    # "auto" resolves to the real placement on model.hf_device_map.
+    rd.install_hooks()
+    import transformers
+
+    monkeypatch.setattr(transformers.PreTrainedModel, "hf_device_map", {"a": 0, "b": 1}, raising=False)
+    transformers.PreTrainedModel.from_pretrained("some-model", config=FakeModelConfig(), device_map="auto")
+
+    assert rd._runtime_info["model_device_count"] == 2
 
 
 def test_transformers_hook_no_quantization_config_leaves_fields_unset(fake_transformers_module):
@@ -602,18 +687,19 @@ def test_peft_hook_detects_rslora(fake_peft_module):
     assert rd._runtime_info["adaptation_method"] == "rslora"
 
 
-def test_peft_hook_detects_qlora_when_base_model_already_quantized(
-    fake_transformers_module, fake_peft_module
-):
+def test_peft_hook_leaves_qlora_to_postprocess(fake_transformers_module, fake_peft_module):
+    # LoraConfig built before the quantized model loads: the hook records
+    # "lora" plus the quantization, and postprocess combines them (#109).
     rd.install_hooks()
     import peft
     import transformers
 
+    peft.LoraConfig(r=16, lora_alpha=32)
     config = FakeModelConfig(quantization_config=FakeQuantizationConfig(load_in_4bit=True))
     transformers.PreTrainedModel.from_pretrained("some-model", config=config)
-    peft.LoraConfig(r=16, lora_alpha=32)
 
-    assert rd._runtime_info["adaptation_method"] == "qlora"
+    assert rd._runtime_info["adaptation_method"] == "lora"
+    assert rd._runtime_info["quantization_bits"] == 4
 
 
 # ---------------------------------------------------------------------------
