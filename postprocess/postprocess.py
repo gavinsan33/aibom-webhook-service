@@ -75,6 +75,11 @@ TELEMETRY_RETRY_DELAY_S = int(os.environ.get("AIBOM_TELEMETRY_RETRY_DELAY_S", "4
 # query telemetry for every pod regardless of detected GPU count.
 DEBUG_TELEMETRY_ALL_PODS = os.environ.get("AIBOM_DEBUG_TELEMETRY_ALL_PODS", "").lower() == "true"
 
+# Read image labels from the image's own registry when the cluster has no
+# Image object for it (any non-OpenShift cluster, or an image OpenShift never
+# imported). Anonymous pulls only; off with AIBOM_REGISTRY_LABEL_LOOKUP=false.
+REGISTRY_LABEL_LOOKUP = os.environ.get("AIBOM_REGISTRY_LABEL_LOOKUP", "true").lower() != "false"
+
 # Prometheus' scrape interval (OpenShift's default is 30s). The summary stats
 # trim this much off the start of each pod's window as cold start, and the
 # time-series step is floored at it (see SERIES_SCRAPE_INTERVAL_S below).
@@ -1634,6 +1639,131 @@ def _image_labels(digest, follow_manifest_list=True):
     return {}
 
 
+_REGISTRY_TIMEOUT_S = 10
+_REGISTRY_MAX_BYTES = 4 * 1024 * 1024
+_REGISTRY_MANIFEST_ACCEPT = ", ".join((
+    "application/vnd.oci.image.index.v1+json",
+    "application/vnd.oci.image.manifest.v1+json",
+    "application/vnd.docker.distribution.manifest.list.v2+json",
+    "application/vnd.docker.distribution.manifest.v2+json",
+))
+
+
+def _parse_image_ref(ref):
+    """(registry host, repository) of an image reference, filling in Docker
+    Hub's implicit host and `library/` prefix. None for a bare digest."""
+    name = re.sub(r"^[a-z-]+://", "", ref or "").split("@", 1)[0]  # docker-pullable://
+    if ":" in name.rsplit("/", 1)[-1]:
+        name = name.rsplit(":", 1)[0]
+    if not name or name.startswith("sha256"):
+        return None
+    first, _, rest = name.partition("/")
+    if rest and ("." in first or ":" in first or first == "localhost"):
+        host, repo = first, rest
+    else:
+        host, repo = "docker.io", name
+    if host in ("docker.io", "index.docker.io"):
+        host = "registry-1.docker.io"
+        if "/" not in repo:
+            repo = "library/" + repo
+    return host, repo
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+# Redirects are followed by hand so the bearer token isn't forwarded to the
+# blob storage a registry redirects to.
+_registry_opener = urllib.request.build_opener(_NoRedirect)
+
+
+def _registry_get(url, accept=None, token=None, hops=0):
+    if urllib.parse.urlsplit(url).scheme != "https":
+        raise ValueError(f"refusing non-https registry URL {url}")
+    headers = {"Accept": accept} if accept else {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    try:
+        with _registry_opener.open(urllib.request.Request(url, headers=headers), timeout=_REGISTRY_TIMEOUT_S) as r:
+            body = r.read(_REGISTRY_MAX_BYTES + 1)
+    except urllib.error.HTTPError as e:
+        location = e.headers.get("Location") if e.headers else None
+        if e.code in (301, 302, 303, 307, 308) and location and hops < 3:
+            target = urllib.parse.urljoin(url, location)
+            same_host = urllib.parse.urlsplit(target).netloc == urllib.parse.urlsplit(url).netloc
+            return _registry_get(target, accept, token if same_host else None, hops + 1)
+        raise
+    if len(body) > _REGISTRY_MAX_BYTES:
+        raise ValueError(f"registry response from {url} exceeds {_REGISTRY_MAX_BYTES} bytes")
+    return body
+
+
+def _registry_token(challenge, repo):
+    """Anonymous bearer token for a `WWW-Authenticate: Bearer realm=...`
+    challenge, or None if the registry wants some other scheme."""
+    if not challenge.lower().startswith("bearer "):
+        return None
+    params = dict(re.findall(r'(\w+)="([^"]*)"', challenge))
+    realm = params.pop("realm", None)
+    if not realm:
+        return None
+    params.setdefault("scope", f"repository:{repo}:pull")
+    query = urllib.parse.urlencode({k: v for k, v in params.items() if k in ("service", "scope")})
+    data = json.loads(_registry_get(f"{realm}{'&' if '?' in realm else '?'}{query}"))
+    return data.get("token") or data.get("access_token")
+
+
+def _registry_blob(host, repo, kind, digest, auth):
+    """A manifest or blob by digest, checked against that digest. `auth`
+    caches the token across calls for one image."""
+    url = f"https://{host}/v2/{repo}/{kind}/{digest}"
+    accept = _REGISTRY_MANIFEST_ACCEPT if kind == "manifests" else None
+    try:
+        body = _registry_get(url, accept, auth.get("token"))
+    except urllib.error.HTTPError as e:
+        if e.code != 401 or "token" in auth:
+            raise
+        auth["token"] = _registry_token(e.headers.get("WWW-Authenticate", ""), repo)
+        if not auth["token"]:
+            raise
+        body = _registry_get(url, accept, auth["token"])
+    actual = "sha256:" + hashlib.sha256(body).hexdigest()
+    if actual != digest:
+        raise ValueError(f"{url} returned content with digest {actual}")
+    return json.loads(body)
+
+
+def _registry_image_labels(image_ref):
+    """Config labels of a digest-pinned image, read from its registry. An
+    index's per-platform images come from the same build, so the first one
+    that isn't an attestation stands in for all of them."""
+    if not REGISTRY_LABEL_LOOKUP:
+        return {}
+    parsed = _parse_image_ref(image_ref)
+    digest = _image_digest(image_ref)
+    if not parsed or not digest:
+        return {}
+    host, repo = parsed
+    auth = {}
+    try:
+        manifest = _registry_blob(host, repo, "manifests", digest, auth)
+        if "manifests" in manifest:
+            children = [m for m in manifest["manifests"] if (m.get("platform") or {}).get("os") != "unknown"]
+            if not children:
+                return {}
+            manifest = _registry_blob(host, repo, "manifests", children[0]["digest"], auth)
+        config_digest = safe_get(manifest, "config", "digest")
+        if not config_digest:
+            return {}
+        config = _registry_blob(host, repo, "blobs", config_digest, auth)
+    except Exception as e:
+        print(f"  WARNING: could not read labels for {host}/{repo}@{digest} from its registry: {e}", file=sys.stderr)
+        return {}
+    return safe_get(config, "config", "Labels") or {}
+
+
 def detect_git_provenance_from_containers(containers):
     """Best-effort git provenance from commit labels baked onto a
     container's image at build time. Only resolves anything if the image was
@@ -1643,7 +1773,8 @@ def detect_git_provenance_from_containers(containers):
     cluster-scoped Image object, so a re-tagged image can't spoof the labels.
     See CLAUDE.md's git provenance section for why this is identification,
     not an authorization/trust guarantee: it reports what the build
-    controller recorded, not whether the source was vetted.
+    controller recorded, not whether the source was vetted. Without an Image
+    object, the labels are read from the image's registry instead.
     """
     for container in containers:
         # Sidecars (service mesh, KServe, ours) aren't the workload's code.
@@ -1652,10 +1783,11 @@ def detect_git_provenance_from_containers(containers):
         # A bare `sha256:` image_id (some runtimes) is the config digest, not
         # the manifest digest Image objects are named by; a digest-pinned
         # spec image still identifies it (#113).
-        digest = _image_digest(container.get("image_id")) or _image_digest(container.get("image"))
-        if not digest:
+        ref = next((r for r in (container.get("image_id"), container.get("image")) if _image_digest(r)), None)
+        if not ref:
             continue
-        labels = _image_labels(digest)
+        digest = _image_digest(ref)
+        labels = _image_labels(digest) or _registry_image_labels(ref)
 
         commit = labels.get(_BUILD_LABEL_COMMIT)
         oci_commit = labels.get(_OCI_LABEL_REVISION)
