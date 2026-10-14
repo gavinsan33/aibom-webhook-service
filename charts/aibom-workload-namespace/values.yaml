@@ -3,6 +3,11 @@
 # granted from the image's own namespace, not the consuming namespace).
 aibomSystemNamespace: project-aibom
 
+# auto, openshift or kubernetes, as in the aibom-webhook chart. On OpenShift
+# this chart adds the service-ca ConfigMap, the image-puller RoleBinding and
+# the image-label git provenance binding, and binds cluster-monitoring-view.
+platform: auto
+
 # Grants the aibom-postprocess ServiceAccount a ClusterRoleBinding to
 # cluster-monitoring-view, letting it query OpenShift's Prometheus/Thanos
 # Querier directly for telemetry (see templates/monitoring.yaml). Unlike every
@@ -11,8 +16,13 @@ aibomSystemNamespace: project-aibom
 # collection then just comes back empty for this namespace instead of the
 # install failing) and have a cluster-admin apply that ClusterRoleBinding
 # directly, once, instead.
+#
+# clusterRole is the ClusterRole bound. Empty means cluster-monitoring-view on
+# OpenShift and no binding elsewhere; set it if your Prometheus enforces RBAC
+# on the postprocess ServiceAccount's bearer token.
 monitoringAccess:
   enabled: true
+  clusterRole: ""
 
 # Adds a PodMonitor that scrapes vLLM's own /metrics endpoint (TTFT, ITL,
 # queue depth, KV-cache usage) on port 8000 for every aibom.io/instrumented
