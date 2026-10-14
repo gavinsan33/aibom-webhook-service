@@ -1,0 +1,54 @@
+# Everything the aibom-webhook ServiceAccount (running in
+# .Values.aibomSystemNamespace) writes in an opted-in namespace: the per-job
+# workload identity, the data ConfigMap, the postprocess Job and the
+# finalizer patches. Namespaced rather than part of the webhook's
+# ClusterRole, so a compromise of the webhook pod can't create Jobs, mint
+# tokens or edit RBAC in namespaces that never installed this chart (#148).
+# The ClusterRole keeps only the list/watch the informers need.
+#
+# configmaps covers the per-job Role's get/patch grant: Kubernetes refuses to
+# let an identity create a Role granting a verb it doesn't hold itself, and
+# internal/webhook/identity_test.go fails if the two drift. secrets has no
+# get/update: the per-job token Secret is create-only (see ensureTokenSecret),
+# and signing-key reads go through the resourceNames Roles in signing.yaml.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: aibom-webhook
+  namespace: {{ .Release.Namespace }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["patch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["create", "delete"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    verbs: ["create"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["create", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: aibom-webhook
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: aibom-webhook
+subjects:
+  - kind: ServiceAccount
+    name: aibom-webhook
+    namespace: {{ .Values.aibomSystemNamespace }}
