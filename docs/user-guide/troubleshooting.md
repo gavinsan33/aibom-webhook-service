@@ -49,6 +49,6 @@ Outside OpenShift, `prometheus.url` has no default, so telemetry is off until yo
 oc get deployment aibom-webhook -n project-aibom -o jsonpath='{.spec.template.spec.containers[0].args}'
 ```
 
-On OpenShift, reading platform metrics from Thanos Querier requires a `cluster-monitoring-view` ClusterRoleBinding, which `just setup-namespace` creates per namespace by default and which needs cluster-admin permission.
+On OpenShift, reading platform metrics from Thanos Querier requires a `cluster-monitoring-view` ClusterRoleBinding, which the webhook chart creates once, for the `aibom-postprocess` ServiceAccount in its own namespace, and which needs cluster-admin permission.
 
-If your account doesn't have it, pass `--skip-monitoring-access` and have a cluster-admin apply the `ClusterRoleBinding` in `charts/aibom-workload-namespace/templates/monitoring.yaml` once. Telemetry comes back empty for that namespace until then; the install itself does not fail.
+If your account doesn't have it, install the webhook chart with `--set monitoringAccess.enabled=false` and have a cluster-admin apply the `ClusterRoleBinding` in `charts/aibom-webhook/templates/postprocess.yaml` once. Telemetry comes back empty until then; the install itself does not fail.
