@@ -37,22 +37,22 @@ Set chart values with `--set key=value` or `-f values.yaml` on `helm upgrade --i
 
 | Value | Default | Description |
 |-------|---------|-------------|
+| `monitoringAccess.enabled` | `true` | Binds the `aibom-postprocess` ServiceAccount, in this chart's namespace, to `cluster-monitoring-view` on OpenShift so it can read Prometheus. Needs cluster-scoped permission. When `false`, the install succeeds but telemetry is empty until a cluster-admin applies the binding. |
 | `watcher.enabled` | `true` | Runs the Job and pod completion watcher. Without it no AIBOMs are compiled. |
 | `prometheus.url` | unset | Where the postprocess Job queries telemetry. Unset, it is `https://thanos-querier.openshift-monitoring.svc:9091` on OpenShift and empty elsewhere. Empty disables telemetry. Authentication uses the Job's ServiceAccount token. |
 | `gitProvenance.registryLookup` | `true` | When a workload's image has no `image.openshift.io` `Image` object, which is always the case outside OpenShift, the postprocess Job reads its labels from the image's registry for git provenance. Pulls are anonymous, so private images are skipped. Needs egress from workload namespaces to the registry. Set `false` to stop these requests. |
 | `build.enabled` | `false` | Builds the webhook and postprocess images in-cluster from source with an OpenShift BuildConfig, for clusters with no route to Quay. `just deploy-buildconfig` sets it. Rendering fails when it is set on a cluster other than OpenShift. |
 | `build.gitRepo` / `build.gitRef` | `https://github.com/gavinsan33/aibom-webhook-service.git` / `main` | What the in-cluster build clones. |
-| `debug.keepPostprocessJobs` | `false` | Keeps finished postprocess Jobs and their data ConfigMaps for inspection. Leaves one of each per workload indefinitely. Not for production. |
+| `debug.keepPostprocessJobs` | `false` | Keeps finished postprocess Jobs and their input ConfigMaps, in the webhook's namespace, for inspection. Leaves one of each per workload indefinitely. Not for production. |
 | `debug.telemetryAllPods` | `false` | Queries telemetry for every pod even with no detected GPU, for testing on clusters without GPUs. Not for production. |
 
 ## `aibom-workload-namespace` chart
 
 | Value | Default | Description |
 |-------|---------|-------------|
-| `platform` | `auto` | As in the webhook chart. On OpenShift this chart also creates the service-ca ConfigMap, the image-puller RoleBinding and the `Image` read binding. |
-| `aibomSystemNamespace` | `project-aibom` | The namespace the webhook chart was installed into. The signing-key Roles grant its watcher access, and on OpenShift the image-puller RoleBinding is created there. |
-| `monitoringAccess.enabled` | `true` | On OpenShift, binds the `aibom-postprocess` ServiceAccount to `cluster-monitoring-view` so it can read Prometheus. Needs cluster-scoped permission. When `false`, the install succeeds but telemetry is empty until a cluster-admin applies the binding. |
-| `vllmMetrics.enabled` | `true` | Adds a `PodMonitor` scraping vLLM's `/metrics` on port 8000 for instrumented pods. Needs the Prometheus Operator CRDs, or the install fails. Set `false` without them. Inference metrics also need `monitoringAccess.enabled`. |
+| `platform` | `auto` | As in the webhook chart. On OpenShift this chart also creates the image-puller RoleBinding. |
+| `aibomSystemNamespace` | `project-aibom` | The namespace the webhook chart was installed into. The Roles that let its watcher and the `aibom-postprocess` ServiceAccount act in this namespace are bound to ServiceAccounts there, and on OpenShift the image-puller RoleBinding is created there. |
+| `vllmMetrics.enabled` | `true` | Adds a `PodMonitor` scraping vLLM's `/metrics` on port 8000 for instrumented pods. Needs the Prometheus Operator CRDs, or the install fails. Set `false` without them. Inference metrics also need the webhook chart's `monitoringAccess.enabled`. |
 | `scripts.generateSnapshot`, `.runtimeDetector`, `.k8sApi`, `.datasetSidecar` | `""` | Only for installing from a checkout, where `--set-file` reads the scripts from `scripts/aibom-scripts/`. Leave unset for an OCI install, which embeds them. |
 
 ## Server flags
