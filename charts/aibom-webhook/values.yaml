@@ -108,6 +108,14 @@ finalizerCleanup:
 prometheus:
   url: null
 
+# Git provenance from image labels: when the cluster has no image.openshift.io
+# Image object for a workload's image (any non-OpenShift cluster, or an image
+# OpenShift never imported), the postprocess Job reads the labels from the
+# image's registry instead. Anonymous pulls only, so private images are skipped.
+# Needs egress from workload namespaces to the registries. Set false to disable.
+gitProvenance:
+  registryLookup: true
+
 # Optional, purely for a clickable Grafana Explore deep link in the AIBOM
 # (resource_utilization.grafana_links) — actual telemetry queries always go
 # straight to prometheus.url above, never through Grafana. datasourceUid is
