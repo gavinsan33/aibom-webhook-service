@@ -2,10 +2,14 @@ package watcher
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"log"
 	"math"
@@ -30,6 +34,7 @@ const (
 	LabelEnabled                 = "aibom.io/enabled"
 	LabelInstrumented            = "aibom.io/instrumented"
 	LabelPostprocessFor          = aibomdata.LabelPostprocessFor
+	LabelPostprocessNamespace    = aibomdata.LabelPostprocessNamespace
 	AnnotationPostprocess        = "aibom.io/postprocess-job"
 	AnnotationAIBOMCollected     = "aibom.io/aibom-collected"
 	AnnotationPostprocessRetries = "aibom.io/postprocess-retries"
@@ -56,8 +61,8 @@ const (
 	postprocessContainerName      = "aibom-postprocess"
 	postprocessServiceAccountName = aibomdata.PostprocessServiceAccountName
 
-	// serviceCAConfigMapName is created per workload namespace by the
-	// aibom-workload-namespace chart (service.beta.openshift.io/inject-cabundle
+	// serviceCAConfigMapName is created in the webhook's namespace by the
+	// aibom-webhook chart (service.beta.openshift.io/inject-cabundle
 	// annotation), the same way gpu-quota-operator's service-ca ConfigMap works.
 	// Mounted as optional: on a cluster/chart version where it doesn't exist yet
 	// (or a plain-HTTP dev Prometheus that doesn't need it), the mount resolves to
@@ -67,9 +72,9 @@ const (
 	serviceCAVolumeName    = "service-ca"
 	serviceCAMountPath     = "/etc/aibom-postprocess/service-ca"
 
-	// Mounted as optional for the same reason as the service-ca ConfigMap above:
-	// a namespace whose aibom-workload-namespace chart install predates this
-	// Secret's addition just gets an unsigned AIBOM rather than a blocked pod.
+	// Mounted as optional: if the key couldn't be created (see
+	// ensureCompiledSigningKey) the AIBOM is created unsigned rather than the
+	// Job being blocked.
 	compiledSigningVolumeName = "compiled-signing-key"
 	compiledSigningMountPath  = "/etc/aibom-postprocess/compiled-signing"
 
@@ -88,6 +93,10 @@ const (
 // rather than same-typed positional arguments in New(), which would otherwise be
 // easy to transpose by accident with no compiler error to catch it.
 type Config struct {
+	// Namespace is the namespace this process runs in. Postprocess Jobs, their
+	// input ConfigMaps and the compiled-AIBOM signing keys all live here, so
+	// none of them are reachable from a pod in a workload namespace (#149).
+	Namespace        string
 	PostprocessImage string
 	PrometheusURL    string
 	// DebugKeepPostprocessJobs skips the usual cleanup of a succeeded postprocess
@@ -109,6 +118,7 @@ type Config struct {
 
 type Watcher struct {
 	clientset                kubernetes.Interface
+	namespace                string
 	postprocessImage         string
 	prometheusURL            string
 	debugKeepPostprocessJobs bool
@@ -127,6 +137,7 @@ type Watcher struct {
 func New(clientset kubernetes.Interface, cfg Config) *Watcher {
 	w := &Watcher{
 		clientset:                clientset,
+		namespace:                cfg.Namespace,
 		postprocessImage:         cfg.PostprocessImage,
 		prometheusURL:            cfg.PrometheusURL,
 		debugKeepPostprocessJobs: cfg.DebugKeepPostprocessJobs,
@@ -196,6 +207,19 @@ func (w *Watcher) onJobEvent(obj interface{}) {
 		}
 	}
 
+	// Postprocess Jobs live in our own namespace, which is never opted in, so
+	// they're handled before the namespace checks below. Any other Job claiming
+	// the label is a workload's own and is never postprocessed.
+	if job.Labels[LabelPostprocessFor] != "" {
+		if job.Namespace == w.namespace {
+			alreadyCollected := job.Annotations != nil && job.Annotations[AnnotationAIBOMCollected] != ""
+			if w.isJobFinished(job) && !alreadyCollected {
+				w.collectAIBOM(context.TODO(), job)
+			}
+		}
+		return
+	}
+
 	// A namespace that opted out after this Job got our finalizer would
 	// otherwise keep it forever: the early return below means nothing else
 	// ever reaches a removal path, leaving the Job Terminating (and the
@@ -209,14 +233,6 @@ func (w *Watcher) onJobEvent(obj interface{}) {
 	}
 
 	if !w.isNamespaceEnabled(job.Namespace) {
-		return
-	}
-
-	if job.Labels[LabelPostprocessFor] != "" {
-		alreadyCollected := job.Annotations != nil && job.Annotations[AnnotationAIBOMCollected] != ""
-		if w.isJobFinished(job) && !alreadyCollected {
-			w.collectAIBOM(context.TODO(), job)
-		}
 		return
 	}
 
@@ -1009,15 +1025,24 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 // the trigger resource — callers must do that themselves, since the trigger's kind
 // (Job vs Pod) determines which client to patch with.
 func (w *Watcher) createPostprocessJobCore(ctx context.Context, namespace, triggerName string, pods []corev1.Pod, annotations map[string]string, jobResults map[string]string) (string, error) {
-	postprocessName := postprocessJobName(triggerName)
+	postprocessName := postprocessJobName(namespace, triggerName)
+	// configMapName is the workload's own data ConfigMap, in its namespace,
+	// that its pods wrote into. inputsName is the merged copy the postprocess
+	// Job mounts, in our namespace.
 	configMapName := aibomdata.ConfigMapName(triggerName)
+	inputsName := aibomdata.PostprocessInputsConfigMapName(postprocessName)
 
-	w.removeStaleFailedPostprocessJob(ctx, namespace, triggerName, postprocessName, configMapName)
+	w.removeStaleFailedPostprocessJob(ctx, namespace, triggerName, postprocessName, inputsName)
 
 	discoveries, datasets, containersJSON, storageJSON := w.buildPostprocessInputs(ctx, namespace, configMapName, pods, jobResults)
 
-	if err := w.createDataConfigMap(ctx, namespace, configMapName, triggerName, discoveries, datasets, annotations, containersJSON, storageJSON); err != nil {
-		log.Printf("warning: could not create data configmap for %s/%s: %v", namespace, triggerName, err)
+	if err := w.createDataConfigMap(ctx, w.namespace, inputsName, triggerName, discoveries, datasets, annotations, containersJSON, storageJSON); err != nil {
+		log.Printf("warning: could not create postprocess inputs configmap for %s/%s: %v", namespace, triggerName, err)
+	}
+
+	signingKeySecret := aibomdata.CompiledSigningKeySecretName(namespace)
+	if err := w.ensureCompiledSigningKey(ctx, signingKeySecret); err != nil {
+		log.Printf("warning: no compiled-AIBOM signing key for namespace %s, its AIBOM will be unsigned: %v", namespace, err)
 	}
 
 	backoffLimit := int32(3)
@@ -1030,9 +1055,10 @@ func (w *Watcher) createPostprocessJobCore(ctx context.Context, namespace, trigg
 	postprocessJob := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      postprocessName,
-			Namespace: namespace,
+			Namespace: w.namespace,
 			Labels: map[string]string{
-				LabelPostprocessFor: triggerName,
+				LabelPostprocessFor:       triggerName,
+				LabelPostprocessNamespace: namespace,
 			},
 		},
 		Spec: batchv1.JobSpec{
@@ -1043,7 +1069,8 @@ func (w *Watcher) createPostprocessJobCore(ctx context.Context, namespace, trigg
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
-						LabelPostprocessFor: triggerName,
+						LabelPostprocessFor:       triggerName,
+						LabelPostprocessNamespace: namespace,
 					},
 				},
 				Spec: corev1.PodSpec{
@@ -1110,7 +1137,7 @@ func (w *Watcher) createPostprocessJobCore(ctx context.Context, namespace, trigg
 							Name: "aibom-input",
 							VolumeSource: corev1.VolumeSource{
 								ConfigMap: &corev1.ConfigMapVolumeSource{
-									LocalObjectReference: corev1.LocalObjectReference{Name: configMapName},
+									LocalObjectReference: corev1.LocalObjectReference{Name: inputsName},
 								},
 							},
 						},
@@ -1127,7 +1154,7 @@ func (w *Watcher) createPostprocessJobCore(ctx context.Context, namespace, trigg
 							Name: compiledSigningVolumeName,
 							VolumeSource: corev1.VolumeSource{
 								Secret: &corev1.SecretVolumeSource{
-									SecretName: aibomdata.CompiledSigningKeySecretName,
+									SecretName: signingKeySecret,
 									Optional:   &optional,
 								},
 							},
@@ -1138,15 +1165,15 @@ func (w *Watcher) createPostprocessJobCore(ctx context.Context, namespace, trigg
 		},
 	}
 
-	created, err := w.clientset.BatchV1().Jobs(namespace).Create(ctx, postprocessJob, metav1.CreateOptions{})
+	created, err := w.clientset.BatchV1().Jobs(w.namespace).Create(ctx, postprocessJob, metav1.CreateOptions{})
 	if err != nil && !errors.IsAlreadyExists(err) {
 		return "", fmt.Errorf("create postprocess job: %w", err)
 	}
 	if err == nil {
-		w.ownDataConfigMap(ctx, created, configMapName)
+		w.ownDataConfigMap(ctx, created, inputsName)
 	}
 
-	log.Printf("created postprocess job %s/%s for %s", namespace, postprocessName, triggerName)
+	log.Printf("created postprocess job %s/%s for %s/%s", w.namespace, postprocessName, namespace, triggerName)
 	return postprocessName, nil
 }
 
@@ -1178,9 +1205,9 @@ func (w *Watcher) ownDataConfigMap(ctx context.Context, owner *batchv1.Job, conf
 // would hit AlreadyExists and be silently skipped, so a rerun inside the
 // retention window would never get an AIBOM. Only a Job that finished Failed
 // is touched; one still running is left alone.
-func (w *Watcher) removeStaleFailedPostprocessJob(ctx context.Context, namespace, triggerName, postprocessName, configMapName string) {
-	existing, err := w.clientset.BatchV1().Jobs(namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: fmt.Sprintf("%s=%s", LabelPostprocessFor, triggerName),
+func (w *Watcher) removeStaleFailedPostprocessJob(ctx context.Context, namespace, triggerName, postprocessName, inputsName string) {
+	existing, err := w.clientset.BatchV1().Jobs(w.namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("%s=%s,%s=%s", LabelPostprocessFor, triggerName, LabelPostprocessNamespace, namespace),
 	})
 	if err != nil {
 		log.Printf("warning: could not check for a stale postprocess job for %s/%s: %v", namespace, triggerName, err)
@@ -1191,13 +1218,13 @@ func (w *Watcher) removeStaleFailedPostprocessJob(ctx context.Context, namespace
 		if old.Name != postprocessName || jobResult(old) != string(batchv1.JobFailed) {
 			continue
 		}
-		log.Printf("removing failed postprocess job %s/%s left from an earlier run before recreating it", namespace, old.Name)
+		log.Printf("removing failed postprocess job %s/%s left from an earlier run before recreating it", w.namespace, old.Name)
 		background := metav1.DeletePropagationBackground
-		if err := w.clientset.BatchV1().Jobs(namespace).Delete(ctx, old.Name, metav1.DeleteOptions{PropagationPolicy: &background}); err != nil && !errors.IsNotFound(err) {
-			log.Printf("warning: could not delete stale postprocess job %s/%s: %v", namespace, old.Name, err)
+		if err := w.clientset.BatchV1().Jobs(w.namespace).Delete(ctx, old.Name, metav1.DeleteOptions{PropagationPolicy: &background}); err != nil && !errors.IsNotFound(err) {
+			log.Printf("warning: could not delete stale postprocess job %s/%s: %v", w.namespace, old.Name, err)
 		}
-		if err := w.clientset.CoreV1().ConfigMaps(namespace).Delete(ctx, configMapName, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
-			log.Printf("warning: could not delete stale postprocess data configmap %s/%s: %v", namespace, configMapName, err)
+		if err := w.clientset.CoreV1().ConfigMaps(w.namespace).Delete(ctx, inputsName, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+			log.Printf("warning: could not delete stale postprocess inputs configmap %s/%s: %v", w.namespace, inputsName, err)
 		}
 	}
 }
@@ -1285,21 +1312,25 @@ func (w *Watcher) createPostprocessJobForPod(ctx context.Context, pod *corev1.Po
 	return nil
 }
 
-func postprocessJobName(jobName string) string {
-	return aibomdata.PostprocessJobName(jobName)
+func postprocessJobName(namespace, jobName string) string {
+	return aibomdata.PostprocessJobName(namespace, jobName)
 }
 
 // collectAIBOM runs once a postprocess Job finishes — succeeded or failed (see
-// isJobFinished). The AIBOM custom resource itself is created directly by
-// postprocess.py via the Kubernetes API, so on success that create call has
-// already gone through; either way all that's left is bookkeeping: mark the
-// Job as collected and clean up the Job/ConfigMap so a same-named rerun of
-// the original workload doesn't collide with leftovers. A failed Job is the
-// exception: it and its data ConfigMap are kept until the Job's TTL expires,
-// so the failure can be inspected (#112).
+// isJobFinished). The Job lives in our own namespace; the workload it was made
+// for is named by its LabelPostprocessFor/LabelPostprocessNamespace labels. The
+// AIBOM custom resource itself is created directly by postprocess.py via the
+// Kubernetes API, so on success that create call has already gone through;
+// either way all that's left is bookkeeping: mark the Job as collected and
+// clean up the Job and ConfigMaps so a same-named rerun of the original
+// workload doesn't collide with leftovers. A failed Job is the exception: it
+// and its inputs ConfigMap are kept until the Job's TTL expires, so the failure
+// can be inspected (#112) -- by someone with access to our namespace, so a
+// Warning Event is also posted in the workload's namespace.
 func (w *Watcher) collectAIBOM(ctx context.Context, job *batchv1.Job) {
 	originalJobName := job.Labels[LabelPostprocessFor]
-	if originalJobName == "" {
+	workloadNamespace := job.Labels[LabelPostprocessNamespace]
+	if originalJobName == "" || workloadNamespace == "" {
 		return
 	}
 
@@ -1309,19 +1340,23 @@ func (w *Watcher) collectAIBOM(ctx context.Context, job *batchv1.Job) {
 	}
 
 	if w.debugKeepPostprocessJobs {
-		log.Printf("debug-keep-postprocess-jobs set: leaving postprocess job %s/%s and its data configmap in place", job.Namespace, job.Name)
+		log.Printf("debug-keep-postprocess-jobs set: leaving postprocess job %s/%s and its data configmaps in place", job.Namespace, job.Name)
 		return
 	}
 
+	// The workload's own data ConfigMap has been merged into the inputs
+	// ConfigMap by now, so it's done either way.
+	w.deleteWorkloadDataConfigMap(ctx, workloadNamespace, originalJobName)
+	w.deleteWorkloadIdentity(ctx, workloadNamespace, originalJobName)
+
 	// A failed postprocess Job is the only record of why no AIBOM was made: its
-	// pod logs and its data ConfigMap are what you'd inspect or retry from, so
+	// pod logs and its inputs ConfigMap are what you'd inspect or retry from, so
 	// deleting them here left nothing to look at (#112). Keep both; the Job's
-	// TTL (failedPostprocessTTLSeconds) removes them later, and the workload
-	// identity below isn't needed either way.
+	// TTL (failedPostprocessTTLSeconds) removes them later.
 	if jobResult(job) == string(batchv1.JobFailed) {
-		log.Printf("postprocess job %s/%s for %s FAILED, no AIBOM was created; keeping it and its data configmap for %s: oc logs -n %s job/%s",
-			job.Namespace, job.Name, originalJobName, time.Duration(failedPostprocessTTLSeconds)*time.Second, job.Namespace, job.Name)
-		w.deleteWorkloadIdentity(ctx, job.Namespace, originalJobName)
+		log.Printf("postprocess job %s/%s for %s/%s FAILED, no AIBOM was created; keeping it and its inputs configmap for %s: oc logs -n %s job/%s",
+			job.Namespace, job.Name, workloadNamespace, originalJobName, time.Duration(failedPostprocessTTLSeconds)*time.Second, job.Namespace, job.Name)
+		w.postprocessFailedEvent(ctx, workloadNamespace, originalJobName, job)
 		return
 	}
 
@@ -1329,12 +1364,73 @@ func (w *Watcher) collectAIBOM(ctx context.Context, job *batchv1.Job) {
 	if err := w.clientset.BatchV1().Jobs(job.Namespace).Delete(ctx, job.Name, metav1.DeleteOptions{PropagationPolicy: &background}); err != nil && !errors.IsNotFound(err) {
 		log.Printf("warning: could not delete postprocess job %s/%s: %v", job.Namespace, job.Name, err)
 	}
-	configMapName := job.Name + configMapSuffix
+	configMapName := aibomdata.PostprocessInputsConfigMapName(job.Name)
 	if err := w.clientset.CoreV1().ConfigMaps(job.Namespace).Delete(ctx, configMapName, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
-		log.Printf("warning: could not delete postprocess data configmap %s/%s: %v", job.Namespace, configMapName, err)
+		log.Printf("warning: could not delete postprocess inputs configmap %s/%s: %v", job.Namespace, configMapName, err)
 	}
+}
 
-	w.deleteWorkloadIdentity(ctx, job.Namespace, originalJobName)
+func (w *Watcher) deleteWorkloadDataConfigMap(ctx context.Context, namespace, triggerName string) {
+	name := aibomdata.ConfigMapName(triggerName)
+	if err := w.clientset.CoreV1().ConfigMaps(namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+		log.Printf("warning: could not delete workload data configmap %s/%s: %v", namespace, name, err)
+	}
+}
+
+// postprocessFailedEvent tells the workload's owner that no AIBOM was made.
+// The failed Job itself is in our namespace, which they can't read. Best
+// effort: the Event is for visibility, not state.
+func (w *Watcher) postprocessFailedEvent(ctx context.Context, namespace, triggerName string, job *batchv1.Job) {
+	now := metav1.Now()
+	ev := &corev1.Event{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: aibomdata.PostprocessJobName(namespace, triggerName) + "-", Namespace: namespace},
+		InvolvedObject: corev1.ObjectReference{
+			APIVersion: "batch/v1", Kind: "Job", Namespace: namespace, Name: triggerName,
+		},
+		Type:           corev1.EventTypeWarning,
+		Reason:         "AIBOMPostprocessFailed",
+		Message:        fmt.Sprintf("AIBOM postprocessing failed; ask a cluster admin to check the logs of job/%s in namespace %s", job.Name, job.Namespace),
+		Source:         corev1.EventSource{Component: "aibom-webhook"},
+		FirstTimestamp: now,
+		LastTimestamp:  now,
+		Count:          1,
+	}
+	if _, err := w.clientset.CoreV1().Events(namespace).Create(ctx, ev, metav1.CreateOptions{}); err != nil {
+		log.Printf("warning: could not post postprocess failure event for %s/%s: %v", namespace, triggerName, err)
+	}
+}
+
+// ensureCompiledSigningKey creates the Ed25519 key a namespace's AIBOMs are
+// signed with, once, in our own namespace. It's generated here rather than by
+// the workload-namespace chart so the private key never exists anywhere a
+// workload pod can mount it (#149). An existing Secret is left alone.
+func (w *Watcher) ensureCompiledSigningKey(ctx context.Context, name string) error {
+	_, err := w.clientset.CoreV1().Secrets(w.namespace).Get(ctx, name, metav1.GetOptions{})
+	if err == nil {
+		return nil
+	}
+	if !errors.IsNotFound(err) {
+		return err
+	}
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return err
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		return err
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: w.namespace},
+		Type:       corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			aibomdata.CompiledSigningKeyDataKey: pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}),
+		},
+	}
+	if _, err := w.clientset.CoreV1().Secrets(w.namespace).Create(ctx, secret, metav1.CreateOptions{}); err != nil && !errors.IsAlreadyExists(err) {
+		return err
+	}
+	return nil
 }
 
 // deleteWorkloadIdentity removes the per-job ServiceAccount, Role,
