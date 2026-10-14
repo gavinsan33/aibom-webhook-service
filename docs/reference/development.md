@@ -143,10 +143,11 @@ charts/
       build.yaml                    # OpenShift BuildConfig + ImageStream
   aibom-workload-namespace/         # Per-namespace install: RBAC + scripts ConfigMap (just setup-namespace)
     templates/
-      serviceaccount.yaml
       rbac.yaml
+      signing.yaml                   # HMAC keys + the watcher's read access to them
+      webhook-access.yaml            # the webhook's writes in this namespace
       scripts-configmap.yaml
-      monitoring.yaml                # service-ca ConfigMap + cluster-monitoring-view ClusterRoleBinding
+      monitoring.yaml                # vLLM PodMonitor
 scripts/
   generate-certs.sh                 # Self-signed TLS cert generation for local dev only (cluster deploy uses cert-manager)
   remote-build-sha.sh                # Resolves the short SHA `just deploy`'s --version defaults to (justfile helper)
