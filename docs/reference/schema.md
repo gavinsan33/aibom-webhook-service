@@ -38,7 +38,7 @@ oc get aibom <name> -n <namespace> -o yaml
 
 ## Telemetry
 
-The postprocess Job queries Prometheus (Thanos Querier) directly for the AIBOM's summary stats. It authenticates with its own ServiceAccount token and trusts the cluster's service-ca bundle. Set the endpoint with the chart's `prometheus.url` value, which defaults to OpenShift's `https://thanos-querier.openshift-monitoring.svc:9091`. Leave it empty to disable telemetry collection.
+The postprocess Job queries Prometheus directly for the AIBOM's summary stats. It authenticates with its own ServiceAccount token and trusts the cluster's service-ca bundle on OpenShift, or the system trust store elsewhere. Set the endpoint with the chart's `prometheus.url` value, which defaults to OpenShift's Thanos Querier (`https://thanos-querier.openshift-monitoring.svc:9091`) on OpenShift and has no default elsewhere. Leave it empty to disable telemetry collection.
 
 ### Stored time series
 

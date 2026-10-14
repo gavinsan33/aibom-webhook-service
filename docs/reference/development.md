@@ -12,6 +12,8 @@ There are three ways to get images into the cluster — pick whichever fits:
 | No egress to quay.io, or no external registry account | `just deploy-buildconfig` (in-cluster OpenShift BuildConfig) |
 | Iterating locally, don't want to wait on Quay or a git push | `just deploy-local --repo=<repo>` |
 
+The recipes target OpenShift: they call `oc` and impersonate `system:admin`. Set `AIBOM_PLATFORM=kubernetes` to use `kubectl` with your own credentials instead, or override either alone with `AIBOM_KUBECTL` and `AIBOM_ADMIN_AS` (empty disables impersonation). `just deploy-buildconfig` works only on OpenShift.
+
 If your account doesn't have cluster-scoped permission to create/patch CRDs, pass `--skip-crds` to any of the three; the `aiboms.aibom.io` CRD and `project-aibom` namespace must then already exist (created once via `oc apply -f charts/aibom-webhook/crds/aibom-crd.yaml` and `oc create namespace project-aibom`).
 
 ```bash
