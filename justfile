@@ -499,29 +499,20 @@ kind-undeploy:
 # call), so a caller without cluster-admin impersonation rights needs someone else to have
 # already labeled it (--skip-label) before this can run at all.
 #
-# --skip-monitoring-access is for accounts without cluster-scoped create/patch
-# permission on ClusterRoleBindings — same problem as `deploy --skip-crds`, different
-# resource. It skips the cluster-monitoring-view ClusterRoleBinding that lets the
-# postprocess Job query Prometheus/Thanos Querier directly; a cluster-admin can apply
-# charts/aibom-workload-namespace/templates/monitoring.yaml's ClusterRoleBinding once
-# instead. Telemetry collection just comes back empty for this namespace until then,
-# rather than the install failing.
-# Usage: just setup-namespace --namespace=<ns> [--skip-label] [--skip-monitoring-access] [--skip-vllm-metrics]
+# Usage: just setup-namespace --namespace=<ns> [--skip-label] [--skip-vllm-metrics]
 [group('deploy')]
 setup-namespace *args: _check-auth
     #!/usr/bin/env bash
     set -euo pipefail
     namespace=""
     skip_label=false
-    skip_monitoring_access=false
     skip_vllm_metrics=false
     for arg in {{ args }}; do
         case "$arg" in
             --namespace=*) namespace="${arg#--namespace=}" ;;
             --skip-label) skip_label=true ;;
-            --skip-monitoring-access) skip_monitoring_access=true ;;
             --skip-vllm-metrics) skip_vllm_metrics=true ;;
-            *) echo "error: unknown argument '$arg' (expected --namespace=<ns>, --skip-label, --skip-monitoring-access, or --skip-vllm-metrics)" >&2; exit 1 ;;
+            *) echo "error: unknown argument '$arg' (expected --namespace=<ns>, --skip-label, or --skip-vllm-metrics)" >&2; exit 1 ;;
         esac
     done
     [[ -n "$namespace" ]] || { echo "error: --namespace=<ns> is required" >&2; exit 1; }
@@ -530,25 +521,23 @@ setup-namespace *args: _check-auth
         {{ kubectl }} label namespace "$namespace" aibom.io/enabled=true --overwrite --as={{ admin_as }}
         kube_as_user_args=(--kube-as-user={{ admin_as }})
     fi
-    monitoring_args=()
-    [ "$skip_monitoring_access" = true ] && monitoring_args=(--set monitoringAccess.enabled=false)
+    helm_args=()
     # vLLM metrics default on (values.yaml), but a PodMonitor CRD that doesn't
     # exist on this cluster (no Prometheus Operator) fails the whole install
-    # outright, unlike monitoringAccess' soft RBAC-permission fallback --
-    # --skip-vllm-metrics is the escape hatch for that.
-    [ "$skip_vllm_metrics" = true ] && monitoring_args+=(--set vllmMetrics.enabled=false)
+    # outright -- --skip-vllm-metrics is the escape hatch for that.
+    [ "$skip_vllm_metrics" = true ] && helm_args+=(--set vllmMetrics.enabled=false)
     helm upgrade --install "aibom-ns-$namespace" charts/aibom-workload-namespace -n "$namespace" \
         "${kube_as_user_args[@]}" \
-        "${monitoring_args[@]}" \
+        "${helm_args[@]}" \
         --set-file scripts.generateSnapshot=scripts/aibom-scripts/generate_snapshot.py \
         --set-file scripts.runtimeDetector=scripts/aibom-scripts/runtime_detector.py \
         --set-file scripts.k8sApi=scripts/aibom-scripts/k8s_api.py \
         --set-file scripts.datasetSidecar=scripts/aibom-scripts/dataset_sidecar.py
 
 # Reverses `just setup-namespace`: uninstalls the aibom-ns-<namespace> release
-# (removing the image-puller RoleBinding, aibom-scripts ConfigMap, aibom-postprocess
-# ServiceAccount/RBAC, aibom-workload-data/aibom-workload-inferenceservices RBAC, the
-# discovery-HMAC Secret, and the cluster-scoped ClusterRoleBinding it created) and
+# (removing the image-puller RoleBinding, aibom-scripts ConfigMap, the aibom-postprocess
+# and webhook Roles, aibom-workload-data/aibom-workload-inferenceservices RBAC, and the
+# HMAC Secrets) and
 # removes the aibom.io/enabled label. Needs the same cluster-admin impersonation as
 # setup-namespace and for the same reason — the ClusterRoleBinding/cross-namespace
 # RoleBinding this release owns aren't things a namespace-scoped admin can delete
