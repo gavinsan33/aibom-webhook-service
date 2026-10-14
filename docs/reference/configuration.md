@@ -39,7 +39,6 @@ Set chart values with `--set key=value` or `-f values.yaml` on `helm upgrade --i
 |-------|---------|-------------|
 | `watcher.enabled` | `true` | Runs the Job and pod completion watcher. Without it no AIBOMs are compiled. |
 | `prometheus.url` | unset | Where the postprocess Job queries telemetry. Unset, it is `https://thanos-querier.openshift-monitoring.svc:9091` on OpenShift and empty elsewhere. Empty disables telemetry. Authentication uses the Job's ServiceAccount token. |
-| `grafana.url` / `grafana.datasourceUid` | `""` / `""` | Optional. Together they add a Grafana Explore link to each AIBOM. Telemetry itself never goes through Grafana. Leave both empty to omit the link. |
 | `gitProvenance.registryLookup` | `true` | When a workload's image has no `image.openshift.io` `Image` object, which is always the case outside OpenShift, the postprocess Job reads its labels from the image's registry for git provenance. Pulls are anonymous, so private images are skipped. Needs egress from workload namespaces to the registry. Set `false` to stop these requests. |
 | `build.enabled` | `false` | Builds the webhook and postprocess images in-cluster from source with an OpenShift BuildConfig, for clusters with no route to Quay. `just deploy-buildconfig` sets it. Rendering fails when it is set on a cluster other than OpenShift. |
 | `build.gitRepo` / `build.gitRef` | `https://github.com/gavinsan33/aibom-webhook-service.git` / `main` | What the in-cluster build clones. |
@@ -74,7 +73,6 @@ The webhook binary takes these flags. The chart sets them from the values above,
 | `--trusted-watcher-identity` | empty | The webhook's own ServiceAccount username, used to check that a Job claiming to be a postprocess Job was created by the watcher. The chart sets it. When empty the check is off and a warning is logged. |
 | `--trusted-job-controller-identity` | empty | See `webhook.trustedJobControllerIdentity`. |
 | `--prometheus-url` | `https://thanos-querier.openshift-monitoring.svc:9091` | See `prometheus.url`. |
-| `--grafana-url`, `--grafana-datasource-uid` | empty | See `grafana.*`. |
 | `--debug-keep-postprocess-jobs`, `--debug-telemetry-all-pods` | `false` | See `debug.*`. |
 | `--registry-label-lookup` | `true` | See `gitProvenance.registryLookup`. |
 | `--strip-finalizers` | `false` | Removes this project's `aibom.io/log-extraction` and `aibom.io/log-extraction-pod` finalizers from every Job and Pod in the cluster, then exits. The chart's post-delete hook runs it. |

@@ -84,19 +84,12 @@ const (
 	failedPostprocessTTLSeconds = int32(24 * 60 * 60)
 )
 
-// Config bundles the watcher's telemetry-related settings — grouped into a struct
-// rather than four same-typed positional strings in New(), which would otherwise be
-// easy to transpose by accident (e.g. swapping prometheusURL and grafanaURL) with no
-// compiler error to catch it.
+// Config bundles the watcher's postprocess-related settings — grouped into a struct
+// rather than same-typed positional arguments in New(), which would otherwise be
+// easy to transpose by accident with no compiler error to catch it.
 type Config struct {
 	PostprocessImage string
 	PrometheusURL    string
-	// GrafanaURL and GrafanaDatasourceUID are only used to build a clickable Grafana
-	// Explore deep link into resource_utilization.grafana_links — actual telemetry
-	// queries always go straight to PrometheusURL (see postprocess.py). Either being
-	// empty just omits the link for that pod's telemetry rather than erroring.
-	GrafanaURL           string
-	GrafanaDatasourceUID string
 	// DebugKeepPostprocessJobs skips the usual cleanup of a succeeded postprocess
 	// Job/data ConfigMap (see collectAIBOM) — for inspecting postprocess pod
 	// logs/exit state or the data ConfigMap's contents after the fact. Leaks one
@@ -118,8 +111,6 @@ type Watcher struct {
 	clientset                kubernetes.Interface
 	postprocessImage         string
 	prometheusURL            string
-	grafanaURL               string
-	grafanaDatasourceUID     string
 	debugKeepPostprocessJobs bool
 	debugTelemetryAllPods    bool
 	registryLabelLookup      bool
@@ -138,8 +129,6 @@ func New(clientset kubernetes.Interface, cfg Config) *Watcher {
 		clientset:                clientset,
 		postprocessImage:         cfg.PostprocessImage,
 		prometheusURL:            cfg.PrometheusURL,
-		grafanaURL:               cfg.GrafanaURL,
-		grafanaDatasourceUID:     cfg.GrafanaDatasourceUID,
 		debugKeepPostprocessJobs: cfg.DebugKeepPostprocessJobs,
 		debugTelemetryAllPods:    cfg.DebugTelemetryAllPods,
 		registryLabelLookup:      cfg.RegistryLabelLookup,
@@ -1093,8 +1082,6 @@ func (w *Watcher) createPostprocessJobCore(ctx context.Context, namespace, trigg
 								{Name: "AIBOM_JOB_NAMESPACE", Value: namespace},
 								{Name: "AIBOM_INPUT_DIR", Value: "/data/input"},
 								{Name: "PROMETHEUS_URL", Value: w.prometheusURL},
-								{Name: "GRAFANA_URL", Value: w.grafanaURL},
-								{Name: "GRAFANA_DATASOURCE_UID", Value: w.grafanaDatasourceUID},
 								{Name: "AIBOM_DEBUG_TELEMETRY_ALL_PODS", Value: strconv.FormatBool(w.debugTelemetryAllPods)},
 								{Name: "AIBOM_REGISTRY_LABEL_LOOKUP", Value: strconv.FormatBool(w.registryLabelLookup)},
 								{Name: "AIBOM_SIGNING_KEY_PATH", Value: compiledSigningMountPath + "/" + aibomdata.CompiledSigningKeyDataKey},
