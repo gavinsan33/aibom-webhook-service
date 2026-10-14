@@ -34,12 +34,6 @@ JOB_NAME = os.environ.get("AIBOM_JOB_NAME", "")
 JOB_NAMESPACE = os.environ.get("AIBOM_JOB_NAMESPACE", "")
 PROMETHEUS_URL = os.environ.get("PROMETHEUS_URL", "")
 
-# Used only to build a clickable Grafana Explore deep link into
-# resource_utilization.grafana_links — actual telemetry queries always go straight to
-# PROMETHEUS_URL above, never through Grafana. Either being empty just omits the link.
-GRAFANA_URL = os.environ.get("GRAFANA_URL", "")
-GRAFANA_DATASOURCE_UID = os.environ.get("GRAFANA_DATASOURCE_UID", "")
-
 # Auth is always automatic, never configured per-query: the postprocess Job's own
 # ServiceAccount token (Kubernetes auto-mounts and rotates this in place, roughly
 # hourly) is read fresh on every request and sent as a Bearer token; the cluster's
@@ -1872,33 +1866,6 @@ def query_prometheus_instant(promql, time_ms):
     )
 
 
-def build_grafana_explore_url(grafana_url, datasource_uid, named_queries, start_ms, end_ms):
-    # Purely presentational: builds a link into whatever Grafana instance you point it
-    # at (via GRAFANA_URL/GRAFANA_DATASOURCE_UID), independent of the actual telemetry
-    # queries above, which always go straight to PROMETHEUS_URL.
-    end_ms_padded = end_ms + RATE_WINDOW_MS  # pad to capture the final rate window
-    # Metrics span wildly different scales (%, MiB, watts, cores, bytes), so
-    # plotting all of them by default produces an unreadable graph. Only the
-    # first metric starts visible; the rest are hidden but still present as
-    # toggleable query rows (Grafana persists a query's "hide" state in the
-    # URL itself, so this stays shareable/bookmarkable).
-    queries = [
-        {
-            "refId": chr(65 + i),
-            "expr": promql,
-            "datasource": {"uid": datasource_uid},
-            "hide": i != 0,
-        }
-        for i, (_, promql) in enumerate(named_queries)
-    ]
-    explore_state = {
-        "datasource": datasource_uid,
-        "queries": queries,
-        "range": {"from": str(start_ms), "to": str(end_ms_padded)},
-    }
-    return f"{grafana_url}/explore?left={urllib.parse.quote(json.dumps(explore_state))}"
-
-
 def parse_range_response(response):
     if not response or response.get("status") != "success":
         return []
@@ -2111,10 +2078,6 @@ def collect_telemetry(discoveries, containers=None):
             "metrics": {},
             "includes_cold_start": includes_cold_start,
         }
-        if GRAFANA_URL and GRAFANA_DATASOURCE_UID:
-            pod_telemetry["grafana_explore_url"] = build_grafana_explore_url(
-                GRAFANA_URL, GRAFANA_DATASOURCE_UID, list(metrics.items()), start_ms, end_ms
-            )
 
         pod_telemetry["metrics"] = _collect_metrics_with_retry(
             TELEMETRY_QUERIES, metrics, stats_start_ms, end_ms
@@ -3047,14 +3010,6 @@ def compile_aibom(
                 metric_details[metric_name]["limit"] = limit
 
         utilization["metrics"] = metric_details
-
-        grafana_links = [
-            {"pod_name": p["pod_name"], "explore_url": p["grafana_explore_url"]}
-            for p in telemetry["pods"]
-            if p.get("grafana_explore_url")
-        ]
-        if grafana_links:
-            utilization["grafana_links"] = grafana_links
 
         # True if any pod's run was too short to exclude the cold-start
         # window, meaning the stats above may include a period of
