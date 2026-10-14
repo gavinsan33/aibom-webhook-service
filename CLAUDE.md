@@ -270,18 +270,16 @@ Whichever source wins is recorded in `source_code.declared_via` (`"annotation"`,
 
 ## Prometheus Telemetry
 
-`postprocess.py` queries Prometheus/Thanos Querier directly (`PROMETHEUS_URL`, defaulting on OpenShift to `https://thanos-querier.openshift-monitoring.svc:9091` and to empty, i.e. telemetry off, elsewhere — see `charts/aibom-webhook/values.yaml`'s `prometheus.url`) rather than going through Grafana. There's no datasource to discover and no separate credential to provision: auth and TLS trust are both automatic, mirroring gpu-quota-operator's `metrics.Client` (`metrics/prometheus.go`) exactly —
+`postprocess.py` queries Prometheus/Thanos Querier directly (`PROMETHEUS_URL`, defaulting on OpenShift to `https://thanos-querier.openshift-monitoring.svc:9091` and to empty, i.e. telemetry off, elsewhere — see `charts/aibom-webhook/values.yaml`'s `prometheus.url`). There's no separate credential to provision: auth and TLS trust are both automatic, mirroring gpu-quota-operator's `metrics.Client` (`metrics/prometheus.go`) exactly —
 
 - **Auth**: the postprocess Job's own ServiceAccount token (`/var/run/secrets/kubernetes.io/serviceaccount/token`, auto-mounted and rotated in place by Kubernetes) is read fresh on every request and sent as a Bearer token. Authorization on the Thanos Querier side comes from a `cluster-monitoring-view` ClusterRoleBinding that `charts/aibom-workload-namespace/templates/monitoring.yaml` creates per opted-in namespace (`monitoringAccess.enabled`, default `true` — see `just setup-namespace`'s `skip_monitoring_access` flag for accounts without cluster-scoped RBAC permission).
 - **TLS**: the cluster's service-serving CA bundle is injected into the `aibom-service-ca` ConfigMap (`service.beta.openshift.io/inject-cabundle` annotation, same chart) and mounted into the postprocess Job as *optional* — on a cluster with no service-ca operator, or a plain-HTTP dev Prometheus that doesn't need TLS at all (e.g. `mock-openshift-cluster`'s), the mount resolves to an empty directory and the client falls back to the system trust store rather than erroring.
 
 Neither file being present is a hard requirement in either direction — a missing token means requests just go out unauthenticated, and a missing CA bundle means the system trust store is used instead. Both fall back gracefully rather than failing the Job.
 
-**Grafana Explore links** (`resource_utilization.grafana_links`) are preserved as a purely presentational, optional add-on — independent of the actual telemetry queries above, which always go straight to `PROMETHEUS_URL`. Set `grafana.url`/`grafana.datasourceUid` (chart values, `GRAFANA_URL`/`GRAFANA_DATASOURCE_UID` env vars on the postprocess Job) to point at a Grafana instance with a Prometheus datasource for `PROMETHEUS_URL`; `build_grafana_explore_url` in `postprocess.py` builds a shareable deep link into it per pod. Leaving either unset just omits the link for that pod's telemetry — there's no auto-discovery of the datasource UID anymore (that required a Grafana API token, which direct Prometheus querying no longer needs).
-
 ## Telemetry Retries
 
-`postprocess.py` queries Prometheus immediately after the workload's pod completes. On some observability backends (e.g. a federated/multi-tenant Prometheus setup) there's a delay between a metric being scraped and it becoming queryable, so a query fired this soon can race that delay and come back empty even though the identical query succeeds moments later — this shows up as `resource_utilization` metrics being present on some AIBOMs and missing on others for no apparent reason, even though the Grafana Explore link (built from the same time range) always shows the underlying data once it lands.
+`postprocess.py` queries Prometheus immediately after the workload's pod completes. On some observability backends (e.g. a federated/multi-tenant Prometheus setup) there's a delay between a metric being scraped and it becoming queryable, so a query fired this soon can race that delay and come back empty even though the identical query succeeds moments later — this shows up as `resource_utilization` metrics being present on some AIBOMs and missing on others for no apparent reason, even though the same query run moments later returns the data.
 
 To absorb this, metrics with no data points are retried with a delay (`AIBOM_TELEMETRY_RETRY_ATTEMPTS`, default `3`; `AIBOM_TELEMETRY_RETRY_DELAY_S`, default `45` seconds between attempts) before being recorded as unavailable — only the metrics still missing on a given attempt are re-queried, not the whole batch.
 
@@ -299,7 +297,7 @@ This lands in `resource_utilization` as a single `resource_utilization.metrics.<
 
 This is deliberately paired with [Pod Termination Status](#pod-termination-status) rather than replacing it: `status: "OOMKilled"` tells you a container was killed; `metrics.memory_usage.limit` tells you what it was killed *against*. Neither alone answers "how close did this get" as well as both together — a `memory_usage.max` sitting near (or exactly at) `.limit` on a `Completed` pod is itself a useful near-miss signal that no explicit status field would ever surface.
 
-Full-resolution time-series data is deliberately not stored anywhere in the AIBOM — the Grafana Explore link remains the escape hatch for that level of detail.
+Full-resolution time-series data is deliberately not stored anywhere in the AIBOM; the downsampled `AIBOMTelemetry` series (see Telemetry Time Series) is the closest thing, and live Prometheus has the rest while it's retained.
 
 A pod with no detected GPU (`gpu_count` 0 or missing in its discovery data, e.g. `nvidia-smi` found no hardware) is skipped for telemetry entirely — there's no GPU utilization to query, so it's omitted rather than querying anyway. On a mock cluster (e.g. kind) with no real GPU hardware, `nvidia-smi` always reports zero GPUs, so every pod gets skipped and telemetry collection never runs at all. `--debug-telemetry-all-pods` (`debug.telemetryAllPods` chart value, plumbed to the postprocess Job as `AIBOM_DEBUG_TELEMETRY_ALL_PODS`) bypasses this check so telemetry is queried for every pod regardless of detected GPU count — for local testing only, not routine production use.
 
@@ -381,7 +379,7 @@ Both charts have a `platform` value (`auto`/`openshift`/`kubernetes`); `auto` ch
 - OpenShift-only objects aren't rendered elsewhere: the service-ca ConfigMap (the watcher's mount of it is already optional), the `system:image-puller` RoleBinding, and the `Image` ClusterRole and its bindings. `cluster-monitoring-view` is bound only on OpenShift, or whatever `monitoringAccess.clusterRole` names. `build.enabled` fails the render.
 - The justfile's `AIBOM_PLATFORM=kubernetes` swaps `oc` for `kubectl` and empties the `system:admin` impersonation (`--as=`/`--kube-as-user=` with an empty value is the flags' own default, i.e. no impersonation); `AIBOM_KUBECTL`/`AIBOM_ADMIN_AS` override each.
 
-The deploy recipes, `kind-deploy` aside, otherwise assumed `oc` throughout. Separately, the chart had silently stopped passing `--prometheus-url`, `--grafana-*` and `--debug-*` after 54a3890, so those values did nothing (including `kind-deploy`'s Prometheus override) until this was restored.
+The deploy recipes, `kind-deploy` aside, otherwise assumed `oc` throughout. Separately, the chart had silently stopped passing `--prometheus-url` and `--debug-*` (and the since-removed `--grafana-*`) after 54a3890, so those values did nothing (including `kind-deploy`'s Prometheus override) until this was restored.
 
 ## Deploy Versioning (`--version`)
 
