@@ -1,0 +1,93 @@
+# Everything the postprocess Jobs need, in this namespace. They run here, not in
+# the workload's namespace, so the compiled-AIBOM signing key and this
+# ServiceAccount's grants never exist where users create pods (#149). The
+# per-workload-namespace grants (creating the AIBOM, publishing the public key)
+# come from aibom-workload-namespace's rbac.yaml.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aibom-postprocess
+  namespace: {{ include "aibom-webhook.namespace" . }}
+---
+# What the watcher does in its own namespace: create and clean up postprocess
+# Jobs and their input ConfigMaps, and generate each workload namespace's
+# signing key on first use (get-then-create, so no update).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: aibom-webhook
+  namespace: {{ include "aibom-webhook.namespace" . }}
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: aibom-webhook
+  namespace: {{ include "aibom-webhook.namespace" . }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: aibom-webhook
+subjects:
+  - kind: ServiceAccount
+    name: aibom-webhook
+    namespace: {{ include "aibom-webhook.namespace" . }}
+{{- if include "aibom-webhook.openshift" . }}
+---
+# The service-ca operator injects the cluster's service-serving CA bundle into
+# any ConfigMap annotated like this (a "service-ca.crt" key). watcher.go mounts
+# it into the postprocess Job as optional, so postprocess.py can trust the
+# in-cluster Thanos Querier's certificate; elsewhere the mount is an empty
+# directory and it falls back to the system trust store.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aibom-service-ca
+  namespace: {{ include "aibom-webhook.namespace" . }}
+  annotations:
+    service.beta.openshift.io/inject-cabundle: "true"
+---
+# Read access to OpenShift's cluster-scoped Image objects, for the
+# io.openshift.build.commit.* git-provenance labels (see
+# postprocess-clusterrole.yaml).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: aibom-postprocess-images
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: aibom-postprocess-images
+subjects:
+  - kind: ServiceAccount
+    name: aibom-postprocess
+    namespace: {{ include "aibom-webhook.namespace" . }}
+{{- end }}
+{{- if and .Values.monitoringAccess.enabled (include "aibom-webhook.openshift" .) }}
+---
+# Read access to the platform Prometheus/Thanos Querier. cluster-monitoring-view
+# ships with OpenShift's monitoring operator, so other clusters get no binding.
+# Bound to this one ServiceAccount, since cluster-wide metrics read is broader
+# than anything else here needs.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: aibom-postprocess-monitoring-view
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-monitoring-view
+subjects:
+  - kind: ServiceAccount
+    name: aibom-postprocess
+    namespace: {{ include "aibom-webhook.namespace" . }}
+{{- end }}
