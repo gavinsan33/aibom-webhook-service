@@ -1,3 +1,4 @@
+{{- if include "aibom-webhook.openshift" . }}
 # Cluster-scoped: OpenShift's image.openshift.io/v1 Image object has no
 # namespace, so it can't be granted via a namespaced Role (see
 # aibom-workload-namespace's rbac.yaml, which binds this from each workload
@@ -16,3 +17,4 @@ rules:
   - apiGroups: ["image.openshift.io"]
     resources: ["images"]
     verbs: ["get"]
+{{- end }}
