@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -68,6 +69,7 @@ func main() {
 	}
 
 	handler := webhook.NewHandler(mutator, cfg.TrustedWatcherIdentity)
+	handler.SystemNamespace = ownNamespace()
 
 	mux := http.NewServeMux()
 	mux.Handle("/mutate", handler)
@@ -95,6 +97,7 @@ func main() {
 
 	if cfg.EnableWatcher && clientset != nil {
 		w := watcher.New(clientset, watcher.Config{
+			Namespace:                ownNamespace(),
 			PostprocessImage:         cfg.PostprocessImage,
 			PrometheusURL:            cfg.PrometheusURL,
 			DebugKeepPostprocessJobs: cfg.DebugKeepPostprocessJobs,
@@ -162,4 +165,16 @@ func buildRestConfig() (*rest.Config, error) {
 		}
 	}
 	return cfg, nil
+}
+
+// ownNamespace is the namespace this pod runs in. Postprocess Jobs and their
+// signing keys live here, and it's the one identity the public-key ConfigMap
+// guard trusts.
+func ownNamespace() string {
+	b, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
+	if err != nil {
+		log.Printf("WARNING: cannot read own namespace, postprocess Jobs and the public-key guard won't work: %v", err)
+		return ""
+	}
+	return strings.TrimSpace(string(b))
 }
