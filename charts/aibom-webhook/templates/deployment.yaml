@@ -48,6 +48,7 @@ spec:
             - --grafana-datasource-uid={{ .Values.grafana.datasourceUid }}
             - --debug-keep-postprocess-jobs={{ .Values.debug.keepPostprocessJobs }}
             - --debug-telemetry-all-pods={{ .Values.debug.telemetryAllPods }}
+            - --registry-label-lookup={{ .Values.gitProvenance.registryLookup }}
             # Matches this Deployment's own serviceAccountName above -- the
             # watcher (running in this same binary) creates postprocess Jobs
             # as this identity, so the webhook can verify a Job claiming

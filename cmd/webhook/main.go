@@ -37,6 +37,7 @@ func main() {
 	flag.StringVar(&cfg.GrafanaDatasourceUID, "grafana-datasource-uid", "", "UID of the Grafana datasource pointing at prometheus-url, needed to build the Explore link above")
 	flag.BoolVar(&cfg.DebugKeepPostprocessJobs, "debug-keep-postprocess-jobs", false, "skip deleting succeeded postprocess Jobs/data ConfigMaps, for inspecting their logs/state after the fact (leaks one of each per completed workload — not for routine production use)")
 	flag.BoolVar(&cfg.DebugTelemetryAllPods, "debug-telemetry-all-pods", false, "postprocess Jobs query Prometheus telemetry for every pod regardless of detected GPU count (for local testing on clusters with no real GPU hardware, e.g. kind — not for routine production use)")
+	flag.BoolVar(&cfg.RegistryLabelLookup, "registry-label-lookup", true, "postprocess Jobs read image labels for git provenance from the image's registry (anonymously) when the cluster has no Image object for it")
 	flag.StringVar(&cfg.DatasetSidecarImage, "dataset-sidecar-image", "python:3.12-slim", "image for the dataset-signing sidecar container")
 	stripFinalizers := flag.Bool("strip-finalizers", false, "remove this project's aibom.io/log-extraction and aibom.io/log-extraction-pod finalizers from every Job and Pod in the cluster, then exit (run by the chart's post-delete hook)")
 	flag.Parse()
@@ -102,6 +103,7 @@ func main() {
 			GrafanaDatasourceUID:     cfg.GrafanaDatasourceUID,
 			DebugKeepPostprocessJobs: cfg.DebugKeepPostprocessJobs,
 			DebugTelemetryAllPods:    cfg.DebugTelemetryAllPods,
+			RegistryLabelLookup:      cfg.RegistryLabelLookup,
 		})
 		go func() {
 			if err := w.Start(ctx); err != nil {
