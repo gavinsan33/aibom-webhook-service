@@ -29,6 +29,18 @@ rules:
   - apiGroups: ["aibom.io"]
     resources: ["aiboms/finalizers"]
     verbs: ["update"]
+  # Publishing the compiled-AIBOM public key (k8s_api.patch_configmap patches,
+  # and creates on the first run). Create can't be limited by resourceNames,
+  # but the webhook's admission guard (configmapguard.go) only lets this
+  # ServiceAccount write that ConfigMap at all. This ServiceAccount lives in the
+  # webhook's namespace, so it isn't covered by aibom-workload-data below.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["patch"]
+    resourceNames: [aibom-compiled-signing-public-key]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -42,7 +54,7 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: aibom-postprocess
-    namespace: {{ .Release.Namespace }}
+    namespace: {{ .Values.aibomSystemNamespace }}
 ---
 #
 # aibom-workload-data grants every ServiceAccount in the namespace broad
@@ -131,26 +143,6 @@ subjects:
     apiGroup: rbac.authorization.k8s.io
     name: system:serviceaccounts:{{ .Release.Namespace }}
 {{- if include "aibom-workload-namespace.openshift" . }}
----
-# Binds this namespace's aibom-postprocess ServiceAccount to the
-# cluster-scoped aibom-postprocess-images ClusterRole (installed once by the
-# aibom-webhook chart -- see its postprocess-clusterrole.yaml), giving the
-# postprocess Job read access to OpenShift's cluster-scoped Image objects for
-# git-provenance detection. Named per-namespace, like the image-puller
-# RoleBinding below, since ClusterRoleBindings are themselves cluster-scoped
-# and each namespace needs its own.
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: aibom-postprocess-images-{{ .Release.Namespace }}
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: aibom-postprocess-images
-subjects:
-  - kind: ServiceAccount
-    name: aibom-postprocess
-    namespace: {{ .Release.Namespace }}
 ---
 # Grants pods in this namespace pull access to images in the aibom-system
 # namespace. OpenShift's system:image-puller role must be bound from the
