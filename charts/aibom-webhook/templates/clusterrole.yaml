@@ -2,78 +2,28 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: aibom-webhook
+# Read-only, for the cluster-wide informers. Everything the webhook writes
+# (Jobs, ConfigMaps, the per-job ServiceAccount/Role/RoleBinding/token Secret,
+# pod and Job finalizer patches) is granted per namespace by
+# aibom-workload-namespace's webhook-access.yaml, so it only exists in
+# namespaces that installed that chart (#148). Signing-key reads are granted
+# the same way, by name, in signing.yaml.
+#
+# namespaces: the only read is Lister().Get(), which hits the informer's cache,
+# so "get" isn't needed.
+#
+# No serving.kserve.io permission here deliberately: resolving an
+# InferenceService's storage.path/storageUri for model identity is done by
+# the aibom-discovery init container itself, using the workload's own
+# namespace-scoped RBAC (see aibom-workload-namespace's rbac.yaml) — not by
+# this always-on, cluster-wide identity. That also avoids the alternative
+# (a live Get from the watcher at pod-deletion time) racing against
+# Kubernetes' garbage collector, which removes a deleted InferenceService
+# from etcd immediately, well before cascading the delete down to its Pod.
 rules:
-  # pods: list/watch back the cluster-wide Pod informer; patch is used to add/remove
-  # the aibom.io/instrumented label and finalizer. No direct Get/Update call exists.
   - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["list", "watch", "patch"]
-  # namespaces: list/watch back the Namespace informer (used to check the
-  # aibom.io/enabled label). The only read is Lister().Get(), which hits the
-  # informer's local cache, not the API server, so the "get" verb isn't needed.
-  - apiGroups: [""]
-    resources: ["namespaces"]
+    resources: ["pods", "namespaces"]
     verbs: ["list", "watch"]
-  # "patch" is needed even though this process only ever does Get+Update on
-  # ConfigMaps itself (see watcher.go) -- ensureWorkloadIdentity grants
-  # "patch" to each per-job Role (matching what k8s_api.py's workloads
-  # actually call), and Kubernetes' RBAC escalation check refuses to let an
-  # identity grant a verb it doesn't itself hold, even on a Role it's about
-  # to scope down via resourceNames.
-  - apiGroups: [""]
-    resources: ["configmaps"]
-    verbs: ["get", "create", "update", "patch", "delete"]
-  # jobs: list/watch back the Job informer; create/patch/delete are used directly
-  # for postprocess Job lifecycle and finalizer management. No direct Get/Update call exists.
   - apiGroups: ["batch"]
     resources: ["jobs"]
-    verbs: ["list", "watch", "create", "patch", "delete"]
-  # serviceaccounts, roles, rolebindings: the webhook provisions (Mutate)
-  # and the watcher tears down (collectAIBOM) a per-job ServiceAccount/
-  # Role/RoleBinding scoped via resourceNames to exactly one job's own data
-  # ConfigMap (see internal/webhook/identity.go's ensureWorkloadIdentity),
-  # closing the cross-job ConfigMap access #43 describes. This is a real
-  # privilege increase over the read-only/narrowly-scoped grants elsewhere
-  # in this ClusterRole: an identity that can create Roles can in principle
-  # create one for itself with broader rights than this ClusterRole itself
-  # holds (Kubernetes' RBAC escalation check only prevents *binding*
-  # privileges the creator doesn't already have, not creating the Role
-  # object itself with excess rules it never binds). No get/update verb is
-  # needed on roles/rolebindings: both are created once per job and never
-  # read back or modified in place, only deleted at cleanup.
-  - apiGroups: [""]
-    resources: ["serviceaccounts"]
-    verbs: ["create", "delete"]
-  - apiGroups: ["rbac.authorization.k8s.io"]
-    resources: ["roles", "rolebindings"]
-    verbs: ["create", "delete"]
-  # secrets: create/get/update/delete is for the per-job identity token
-  # Secret ensureWorkloadIdentity provisions and collectAIBOM tears down
-  # (get is needed to check for an already-minted, still-valid token before
-  # requesting a new one). Read access to a namespace's discovery signing
-  # key (aibom-discovery-hmac-key) is granted separately, per-namespace, via
-  # a namespaced Role/RoleBinding created by aibom-workload-namespace's
-  # signing.yaml -- not by this cluster-wide ClusterRole -- so that
-  # specific key's blast radius stays limited to namespaces that actually
-  # installed that chart, not every namespace on the cluster. The grant
-  # here, by contrast, is unavoidably cluster-wide like the configmaps/jobs
-  # grants above, since this ClusterRole is bound once via a
-  # ClusterRoleBinding rather than per-namespace.
-  - apiGroups: [""]
-    resources: ["secrets"]
-    verbs: ["get", "create", "update", "delete"]
-  # serviceaccounts/token: TokenRequest subresource used to mint the
-  # per-job identity's token (see requestServiceAccountToken). Distinct
-  # verb/resource from the "serviceaccounts" create/delete grant above --
-  # RBAC treats subresources as separate resources entirely.
-  - apiGroups: [""]
-    resources: ["serviceaccounts/token"]
-    verbs: ["create"]
-  # No serving.kserve.io permission here deliberately: resolving an
-  # InferenceService's storage.path/storageUri for model identity is done by
-  # the aibom-discovery init container itself, using the workload's own
-  # namespace-scoped RBAC (see aibom-workload-namespace's rbac.yaml) — not by
-  # this always-on, cluster-wide identity. That also avoids the alternative
-  # (a live Get from the watcher at pod-deletion time) racing against
-  # Kubernetes' garbage collector, which removes a deleted InferenceService
-  # from etcd immediately, well before cascading the delete down to its Pod.
+    verbs: ["list", "watch"]
