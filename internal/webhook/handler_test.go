@@ -1232,7 +1232,8 @@ func TestHandleAdmission_DeniesForgedSigningPublicKeyConfigMap(t *testing.T) {
 
 func TestHandleAdmission_AllowsTrustedPostprocessSigningPublicKeyWrite(t *testing.T) {
 	h := NewHandler(newTestMutator(), "")
-	review := buildConfigMapAdmissionReview(signingPublicKeyConfigMap("ml-team"), "system:serviceaccount:ml-team:aibom-postprocess")
+	h.SystemNamespace = "aibom-system"
+	review := buildConfigMapAdmissionReview(signingPublicKeyConfigMap("ml-team"), "system:serviceaccount:aibom-system:aibom-postprocess")
 
 	body, _ := json.Marshal(review)
 	req := httptest.NewRequest(http.MethodPost, "/mutate", bytes.NewReader(body))
