@@ -1,5 +1,5 @@
 # Lets the aibom-postprocess Job query Prometheus/Thanos Querier directly
-# (see postprocess.py) instead of going through Grafana. Mirrors
+# (see postprocess.py). Mirrors
 # gpu-quota-operator's manager/deploy/service-ca-configmap.yaml and
 # manager/bootstrap/monitoring_rolebinding.yaml.
 #

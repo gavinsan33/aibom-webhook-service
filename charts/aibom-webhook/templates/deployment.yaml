@@ -44,8 +44,6 @@ spec:
             - --discovery-image={{ include "aibom-webhook.discoveryImage" . }}
             - --enable-watcher={{ .Values.watcher.enabled }}
             - --prometheus-url={{ include "aibom-webhook.prometheusURL" . }}
-            - --grafana-url={{ .Values.grafana.url }}
-            - --grafana-datasource-uid={{ .Values.grafana.datasourceUid }}
             - --debug-keep-postprocess-jobs={{ .Values.debug.keepPostprocessJobs }}
             - --debug-telemetry-all-pods={{ .Values.debug.telemetryAllPods }}
             - --registry-label-lookup={{ .Values.gitProvenance.registryLookup }}
