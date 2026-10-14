@@ -3,7 +3,7 @@
 ## Prerequisites
 
 - OpenShift 4.16 or later, or Kubernetes 1.29 or later (see [Kubernetes without OpenShift](#kubernetes-without-openshift)), and `helm` 3.x.
-- A cluster-admin account. Both charts install cluster-scoped RBAC, and the workload-namespace chart creates a ClusterRoleBinding (see [Install the webhook](#install-the-webhook)).
+- A cluster-admin account. The webhook chart installs cluster-scoped RBAC, including ClusterRoleBindings for the `aibom-postprocess` ServiceAccount (see [Install the webhook](#install-the-webhook)). The workload-namespace chart creates only namespaced RBAC, plus a RoleBinding in the webhook's namespace.
 - To work from source: Go 1.22+, [`just`](https://github.com/casey/just) (run `make install-just` if you don't have it), and `openssl` for local TLS certificates.
 
 ### Cluster requirements
