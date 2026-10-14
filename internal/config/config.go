@@ -23,6 +23,9 @@ type Config struct {
 	// for local testing against a mock cluster (e.g. kind) with no real GPU
 	// hardware, where nvidia-smi always reports zero GPUs.
 	DebugTelemetryAllPods bool
+	// RegistryLabelLookup lets the postprocess Job read image labels from the
+	// image's registry when the cluster has no Image object for it.
+	RegistryLabelLookup bool
 
 	// TrustedWatcherIdentity is the full Kubernetes username (e.g.
 	// "system:serviceaccount:aibom-system:aibom-webhook") of the
