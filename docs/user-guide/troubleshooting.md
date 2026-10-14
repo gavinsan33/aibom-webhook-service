@@ -16,7 +16,7 @@ The result should carry the `aibom.io/instrumented` label, and a `mutating pod .
 
 ## Pods stay in `Init:ImagePullBackOff`
 
-The `aibom-discovery` init container can't pull its image. The chart's default is the OpenShift AI `runtime-pytorch` ImageStream in `redhat-ods-applications`, which exists only where OpenShift AI is installed. Check the event:
+The `aibom-discovery` init container can't pull its image. Unless `image.discovery` is set, it is the OpenShift AI `runtime-pytorch` ImageStream where OpenShift AI is installed and `pytorch/pytorch` from Docker Hub elsewhere, which needs egress and can hit Docker Hub's pull rate limit. Check the event:
 
 ```bash
 oc describe pod <pod-name> -n <namespace>
@@ -43,6 +43,12 @@ oc delete aibomtel <name> -n <namespace>
 
 ## Telemetry is empty
 
-Reading platform metrics from Thanos Querier requires a `cluster-monitoring-view` ClusterRoleBinding, which `just setup-namespace` creates per namespace by default and which needs cluster-admin permission.
+Outside OpenShift, `prometheus.url` has no default, so telemetry is off until you set it. Check what the webhook was given:
+
+```bash
+oc get deployment aibom-webhook -n project-aibom -o jsonpath='{.spec.template.spec.containers[0].args}'
+```
+
+On OpenShift, reading platform metrics from Thanos Querier requires a `cluster-monitoring-view` ClusterRoleBinding, which `just setup-namespace` creates per namespace by default and which needs cluster-admin permission.
 
 If your account doesn't have it, pass `--skip-monitoring-access` and have a cluster-admin apply the `ClusterRoleBinding` in `charts/aibom-workload-namespace/templates/monitoring.yaml` once. Telemetry comes back empty for that namespace until then; the install itself does not fail.
