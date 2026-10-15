@@ -37,7 +37,7 @@ test target="all":
     esac
 
 _test-go:
-    go test ./internal/... -v -count=1
+    go test ./... -v -count=1
 
 _test-python:
     python3 -m venv .venv-test
