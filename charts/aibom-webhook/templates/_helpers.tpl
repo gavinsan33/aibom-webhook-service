@@ -56,3 +56,15 @@ Prometheus URL. Unset, it's OpenShift's Thanos Querier on OpenShift and empty
 https://thanos-querier.openshift-monitoring.svc:9091
 {{- end -}}
 {{- end -}}
+
+{{/*
+Image tags default to the chart's appVersion, so a released chart runs the
+images built for that release. A checkout's Chart.yaml has appVersion "latest".
+*/}}
+{{- define "aibom-webhook.webhookTag" -}}
+{{- .Values.image.webhook.tag | default .Chart.AppVersion -}}
+{{- end -}}
+
+{{- define "aibom-webhook.postprocessTag" -}}
+{{- .Values.image.postprocess.tag | default .Chart.AppVersion -}}
+{{- end -}}
