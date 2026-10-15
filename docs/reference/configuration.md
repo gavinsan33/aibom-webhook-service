@@ -14,10 +14,10 @@ Set chart values with `--set key=value` or `-f values.yaml` on `helm upgrade --i
 
 | Value | Default | Description |
 |-------|---------|-------------|
-| `image.webhook.repository` / `.tag` | `quay.io/gsanders/aibom-webhook-service` / `latest` | The webhook and watcher image. |
-| `image.postprocess.repository` / `.tag` | `quay.io/gsanders/aibom-postprocess` / `latest` | The image the postprocess Job runs. |
+| `image.webhook.repository` / `.tag` | `quay.io/gsanders/aibom-webhook-service` / `""` | The webhook and watcher image. An empty tag means the chart's `appVersion`: the release version in a published chart, `latest` from a checkout. |
+| `image.postprocess.repository` / `.tag` | `quay.io/gsanders/aibom-postprocess` / `""` | The image the postprocess Job runs. The tag defaults the same way. |
 | `image.discovery.repository` / `.tag` | `""` / `""` | The `aibom-discovery` init container's image. It needs only `python3` and `bash`. `nvidia-smi` is injected at runtime by the NVIDIA Container Toolkit on GPU pods. When empty, it is OpenShift AI's `image-registry.openshift-image-registry.svc:5000/redhat-ods-applications/runtime-pytorch:pytorch` where the OpenShift AI API (`datasciencecluster.opendatahub.io/v1`) exists, and `pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime` otherwise. Setting `repository` requires `tag`. |
-| `image.pullPolicy` | `Always` | Pull policy for the webhook and postprocess images. |
+| `image.pullPolicy` | `""` | Pull policy for the webhook image. Empty leaves it to Kubernetes: `IfNotPresent` for a release tag, `Always` for `latest`. |
 
 ### Webhook and admission
 

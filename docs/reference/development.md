@@ -63,21 +63,13 @@ One-time setup, done in the Quay web UI (not scriptable — it requires a GitHub
 
 Once set up, every push to `main` produces new `latest` and `<sha>` tags automatically — `just deploy` (no arguments) always deploys whatever was built most recently.
 
-## Setting Up Chart Publishing
+## Releases and chart publishing
 
-One-time setup so `helm upgrade --install ... oci://quay.io/<org>/aibom-webhook` (and `.../aibom-workload-namespace`) work for anyone, without a checked-out copy of this repo:
+**Releases.** Push a `vX.Y.Z` tag. `.github/workflows/release.yml` builds both images as `quay.io/gsanders/aibom-webhook-service:X.Y.Z` and `.../aibom-postprocess:X.Y.Z`, then runs `just chart-release --version=X.Y.Z`, which packages both charts with `version` and `appVersion` set to `X.Y.Z` (embedding `scripts/aibom-scripts/*.py` into the workload-namespace chart so it doesn't need `--set-file`) and pushes them to `oci://quay.io/gsanders`. The workflow fails before pushing anything if an image tag already exists, and `chart-release` refuses a chart version that's already published, so a release is only ever pushed once. After tagging, bump `version` in both `Chart.yaml` files to the next planned release, so dev builds sort after it.
 
-1. `helm registry login quay.io` with an account (or robot account) that has push access under your Quay org
-2. `just chart-push` — packages both charts (embedding `scripts/aibom-scripts/*.py` into the workload-namespace chart so it doesn't need `--set-file`) and pushes each one to `oci://quay.io/<org>/aibom-webhook` / `.../aibom-workload-namespace` under two tags, mirroring `just deploy`'s mutable `latest`/immutable `<sha>` split for images:
-   - `<Chart.yaml version>` (e.g. `0.1.0`) — mutable, overwritten on every `chart-push` (nothing bumps `Chart.yaml`'s `version:` automatically). `helm upgrade --install` with no `--version` resolves here.
-   - `<Chart.yaml version>-<git sha>` (e.g. `0.1.0-abc1234`, `-dirty`-suffixed the same way `deploy-local`'s tag is for an uncommitted working tree) — immutable, one per `chart-push`, for pinning/rollback. This uses SemVer *prerelease* syntax (hyphen), which has strictly lower precedence than the plain release per the SemVer spec — that's what makes "no `--version`" reliably resolve to the mutable tag above instead of an unpredictable tie (an earlier version of this used build-metadata syntax, `+<sha>`, which SemVer precedence ignores entirely — the two tags were then equal-precedence and which one `helm` picked with no `--version` was undefined)
+**Dev builds.** `.github/workflows/chart-publish.yml` runs `just chart-push` on every push to `main` that touches `charts/aibom-webhook/**`, `charts/aibom-workload-namespace/**` or `scripts/aibom-scripts/**`. It publishes `<Chart.yaml version>-<git sha>` (e.g. `0.1.0-abc1234`, `-dirty`-suffixed for an uncommitted tree), whose images are `latest`, built by Quay's build triggers. The hyphen makes it a SemVer prerelease, so `helm install` with no `--version` skips it. Run `just chart-push` by hand the same way, after `helm registry login quay.io`.
 
-   Defaults to pushing under `quay.io/gsanders`; pass a different org as the first argument.
-3. In the Quay web UI, make both chart repos public (or otherwise arrange pull credentials) so `helm upgrade --install` can pull them anonymously
-
-Re-run `just chart-push` any time `charts/aibom-webhook`, `charts/aibom-workload-namespace`, or `scripts/aibom-scripts/*.py` changes.
-
-**Automating it**: unlike the images, Quay's own GitHub build trigger can't drive this (it only knows how to run a `docker build`), so `.github/workflows/chart-publish.yml` runs `just chart-push` in GitHub Actions instead — triggered only on a push to `main` (i.e. a merge, not every feature-branch commit) that touches `charts/aibom-webhook/**`, `charts/aibom-workload-namespace/**`, or `scripts/aibom-scripts/**`. One-time setup: create a Quay **robot account** scoped to push access on the `aibom-webhook`/`aibom-workload-namespace` repos, then add its username/token as the `QUAY_ROBOT_USERNAME`/`QUAY_ROBOT_TOKEN` repo secrets (Settings → Secrets and variables → Actions).
+**One-time setup.** Create a Quay robot account with push access to the two image repos and the two chart repos, and add its username and token as the `QUAY_ROBOT_USERNAME`/`QUAY_ROBOT_TOKEN` repo secrets (Settings → Secrets and variables → Actions). Make all four repos public, or arrange pull credentials, so installs can pull anonymously.
 
 ## Local testing (without a cluster)
 

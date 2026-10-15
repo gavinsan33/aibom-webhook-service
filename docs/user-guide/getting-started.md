@@ -45,7 +45,7 @@ helm upgrade --install aibom-webhook oci://quay.io/gsanders/aibom-webhook \
 
 The chart installs cluster-scoped RBAC, which a namespace-scoped admin cannot grant themselves, so run it as a cluster-admin. The commands here use `--kube-as-user=system:admin` to do that by impersonation, which needs impersonation rights and so won't work on managed clusters such as ROSA or ARO. There, log in as a cluster-admin user and drop `--kube-as-user=system:admin` from the `helm` commands and `--as=system:admin` from the `oc` commands.
 
-Without `--version`, Helm resolves to the most recently published mutable tag. To pin an exact commit, pass `--version=<version>-<git-sha>` (for example `--version=0.1.0-abc1234`).
+Without `--version`, Helm installs the newest release. Pass `--version=X.Y.Z` to pin one, or `--version=<version>-<git-sha>` for a dev build from `main` (see [Upgrading](../reference/upgrading.md#versions)).
 
 ## Kubernetes without OpenShift
 
