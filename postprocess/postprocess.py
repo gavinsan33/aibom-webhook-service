@@ -600,12 +600,6 @@ _PACKAGE_MANAGERS = {
     "pip", "pip3", "conda", "mamba", "micromamba", "apt", "apt-get", "apk",
     "yum", "dnf", "poetry",
 }
-# Commands whose arguments are never a training/serving invocation, so a flag
-# that happens to look like one (`echo --fsdp`) is ignored.
-_NON_TRAINING_COMMANDS = {
-    "echo", "cd", "export", "mkdir", "cp", "mv", "ln", "rm", "ls", "cat",
-    "chmod", "tar", "unzip", "git", "curl", "wget", "printf", "sleep",
-}
 _BOOL_WORDS = {"true", "false", "1", "0", "yes", "no"}
 
 
@@ -782,15 +776,10 @@ def _is_package_install(segment):
 
 
 def _invocation_segments(tokens):
-    """Segments that might run a workload: not package installs, not file
-    shuffling."""
+    """Segments that might run a workload: not package installs."""
     for seg in _split_segments(tokens or []):
-        if _is_package_install(seg):
-            continue
-        start = _command_start(seg)
-        if start < len(seg) and os.path.basename(seg[start]) in _NON_TRAINING_COMMANDS:
-            continue
-        yield seg
+        if not _is_package_install(seg):
+            yield seg
 
 
 # ---------------------------------------------------------------------------
