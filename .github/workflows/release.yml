@@ -7,12 +7,20 @@ name: Release
 #
 # The Quay robot needs push access to the three image repos as well as the two
 # chart repos.
+#
+# The charts are also added to a classic Helm repository (index.yaml) on the
+# gh-pages branch, served by GitHub Pages at HELM_REPO_URL, since OpenShift's
+# HelmChartRepository only documents plain HTTP repositories, not OCI.
 on:
   push:
     tags: ["v*.*.*"]
 
 env:
   REGISTRY: quay.io/project-aibom
+  HELM_REPO_URL: https://gavinsan33.github.io/aibom-webhook-service
+
+permissions:
+  contents: write
 
 jobs:
   release:
@@ -75,4 +83,22 @@ jobs:
             --password "${{ secrets.QUAY_ROBOT_TOKEN }}"
 
       - name: Publish charts
-        run: just chart-push --version=${{ steps.version.outputs.version }} --repo=$REGISTRY
+        run: just chart-push --version=${{ steps.version.outputs.version }} --repo=$REGISTRY --out=dist
+
+      - name: Add the charts to the Helm repository on gh-pages
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git fetch origin gh-pages; then
+            git worktree add pages origin/gh-pages
+            git -C pages switch -c gh-pages
+          else
+            git worktree add --orphan -b gh-pages pages
+          fi
+          cp dist/*.tgz pages/
+          merge=()
+          [[ -f pages/index.yaml ]] && merge=(--merge pages/index.yaml)
+          helm repo index pages --url "$HELM_REPO_URL" "${merge[@]}"
+          git -C pages add .
+          git -C pages commit -m "Release ${{ steps.version.outputs.version }}"
+          git -C pages push origin gh-pages
