@@ -75,4 +75,3 @@ Without a published chart, `just deploy`, `just deploy-buildconfig`, and `just s
 - [AIBOM Schema](docs/reference/schema.md): how AIBOMs are stored
 - [Configuration](docs/reference/configuration.md): webhook flags and chart values
 - [Development](docs/reference/development.md): building, `just` recipes, publishing, repo layout
-- [`CLAUDE.md`](CLAUDE.md): implementation rationale and trust model

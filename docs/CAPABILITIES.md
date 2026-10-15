@@ -1,6 +1,6 @@
 # Detected Fields Reference
 
-Every field the AIBOM pipeline can populate, how it's detected, and where the detection happens. This is the field-level companion to `CLAUDE.md` (which covers precedence rules and edge cases in more depth) — read that first for the "why," this is the "what."
+Every field the AIBOM pipeline can fill in, how each one is detected, and where that detection runs. Where a field has more than one possible source, they are listed in the order they win.
 
 Three components do detection, in this order in the pipeline:
 
@@ -14,7 +14,7 @@ Any field can also be set directly via an `aibom.io/*` annotation, which overrid
 
 ## Hardware & System (`generate_snapshot.py`)
 
-Captured once per pod by the discovery init container into `discovery-<pod>.json`, HMAC-signed (see `CLAUDE.md`).
+Captured once per pod by the discovery init container into `discovery-<pod>.json`, HMAC-signed with a per-namespace key (see [Signing Keys](reference/signing.md)).
 
 **Surfacing note**: `postprocess.py` copies only the rows marked ✅ *surfaced* into `environment.*`. Rows marked ⚠️ *captured only* are still written to `discovery-<pod>.json` but never reach the final `AIBOM`: that file lives in the per-workload data ConfigMap, which is deleted once the postprocess Job succeeds. They're left out because they are node-level tuning, point-in-time readings, or wrong from inside a container. Values of `N/A`/empty are omitted from the AIBOM.
 
@@ -45,7 +45,7 @@ Captured once per pod by the discovery init container into `discovery-<pod>.json
 | GPU driver version | `nvidia-smi --query-gpu=driver_version` | ✅ `environment.driver_version` |
 | CUDA version | `nvidia-smi` (`CUDA Version` line) | ✅ `environment.cuda_version` |
 
-The discovery init container's own `nvidia.com/gpu` claim — what makes `nvidia-smi` work in it at all, since the NVIDIA Container Toolkit injects the binary and NVML driver library from the node's driver only when the claim is present (see `CLAUDE.md`) — is not detected independently but copied from the pod's **total** `nvidia.com/gpu` allocation (the sum of each container's effective claim), so `nvidia-smi` sees every GPU the pod is scheduled with, not just the first container's.
+The discovery init container's own `nvidia.com/gpu` claim — what makes `nvidia-smi` work in it at all, since the NVIDIA Container Toolkit injects the binary and NVML driver library from the node's driver only when the claim is present — is not detected independently but copied from the pod's **total** `nvidia.com/gpu` allocation (the sum of each container's effective claim), so `nvidia-smi` sees every GPU the pod is scheduled with, not just the first container's.
 
 **Network**
 
@@ -191,13 +191,13 @@ Covers both code baked into the image and code cloned at runtime, in precedence 
 | OpenShift BuildConfig image labels | `image.openshift.io` `Image` object (looked up by image **digest**, not tag) — `io.openshift.build.commit.id`/`.ref`/`.source-location`; ignored if it disagrees with the OCI revision label | `openshift_build_label` |
 | OCI-standard image labels | same `Image` object — `org.opencontainers.image.revision`/`.source` (no branch equivalent) | `oci_image_label` |
 
-A source missing a field (a `.git` with no remote) is filled from the next one down, and annotations are filled from detection, only when the two don't name a different commit or repository; any `aibom.io/git-*` annotation makes `declared_via` `annotation`. `source_code.dirty` is surfaced when the `.git`-directory tier's checkout is the one reported. This is identification, not tamper-evident provenance — see `CLAUDE.md` for the full caveats.
+A source missing a field (a `.git` with no remote) is filled from the next one down, and annotations are filled from detection, only when the two don't name a different commit or repository; any `aibom.io/git-*` annotation makes `declared_via` `annotation`. `source_code.dirty` is surfaced when the `.git`-directory tier's checkout is the one reported. This is identification, not tamper-evident provenance: the image-label tiers record what the build controller believed it cloned, the command tier what the command says it will clone, and the `.git` read only the checkout at the moment the process exits.
 
 ---
 
 ## Performance / Telemetry Metrics (Prometheus)
 
-Queried directly against Prometheus/Thanos Querier (`PROMETHEUS_URL`) once the workload's pods complete, only for pods with a detected GPU (unless `AIBOM_DEBUG_TELEMETRY_ALL_PODS=true`). Missing metrics are retried (`AIBOM_TELEMETRY_RETRY_ATTEMPTS`, default `3`; `AIBOM_TELEMETRY_RETRY_DELAY_S`, default `45`s) to absorb scrape-to-queryable delay — see `CLAUDE.md`.
+Queried directly against Prometheus/Thanos Querier (`PROMETHEUS_URL`) once the workload's pods complete, only for pods with a detected GPU (unless `AIBOM_DEBUG_TELEMETRY_ALL_PODS=true`). Missing metrics are retried (`AIBOM_TELEMETRY_RETRY_ATTEMPTS`, default `3`; `AIBOM_TELEMETRY_RETRY_DELAY_S`, default `45`s) to absorb scrape-to-queryable delay.
 
 | Metric | Source | Unit |
 |---|---|---|
@@ -219,7 +219,7 @@ Each metric is recorded as summary statistics only (`resource_utilization.metric
 
 ## What's Not Detected
 
-Per `CLAUDE.md`, these are explicit non-goals, not gaps waiting to close:
+These are explicit non-goals, not gaps waiting to close:
 
 - Per-request sampling params (e.g. a benchmark client's temperature) set after a vLLM server is already running.
 - Other serving engines (TGI, SGLang, TensorRT-LLM) or fine-tuning tools (Axolotl, LLaMA-Factory).
