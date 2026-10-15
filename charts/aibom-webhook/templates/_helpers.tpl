@@ -75,3 +75,14 @@ images built for that release. A checkout's Chart.yaml has appVersion "latest".
 {{- define "aibom-webhook.postprocessTag" -}}
 {{- .Values.image.postprocess.tag | default .Chart.AppVersion -}}
 {{- end -}}
+
+{{/*
+Who issues the webhook's TLS certificate: "service-ca" (OpenShift's built-in
+service CA) or "cert-manager". tls.provider=auto picks service-ca on OpenShift.
+*/}}
+{{- define "aibom-webhook.tlsProvider" -}}
+{{- $p := toString .Values.tls.provider -}}
+{{- if eq $p "auto" -}}{{ if include "aibom-webhook.openshift" . }}service-ca{{ else }}cert-manager{{ end }}
+{{- else -}}{{ $p }}
+{{- end -}}
+{{- end -}}

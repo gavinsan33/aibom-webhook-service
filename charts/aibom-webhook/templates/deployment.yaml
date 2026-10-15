@@ -99,6 +99,12 @@ kind: Service
 metadata:
   name: aibom-webhook
   namespace: {{ include "aibom-webhook.namespace" . }}
+  {{- if eq (include "aibom-webhook.tlsProvider" .) "service-ca" }}
+  annotations:
+    # The service-ca operator issues a certificate for this Service's DNS name
+    # into this Secret, which the Deployment mounts, and rotates it.
+    service.beta.openshift.io/serving-cert-secret-name: aibom-webhook-certs
+  {{- end }}
 spec:
   selector:
     app: aibom-webhook
