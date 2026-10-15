@@ -122,7 +122,7 @@ charts/
       serviceaccount.yaml
       clusterrole.yaml
       clusterrolebinding.yaml
-      certificates.yaml             # cert-manager Issuer + Certificate
+      certificates.yaml             # cert-manager Issuer + Certificate (off OpenShift; service-ca on it)
       deployment.yaml                # Deployment + Service
       webhook-configuration.yaml
       build.yaml                    # OpenShift BuildConfig + ImageStream
@@ -134,7 +134,7 @@ charts/
       scripts-configmap.yaml
       monitoring.yaml                # vLLM PodMonitor
 scripts/
-  generate-certs.sh                 # Self-signed TLS cert generation for local dev only (cluster deploy uses cert-manager)
+  generate-certs.sh                 # Self-signed TLS cert generation for local dev only (cluster deploy uses service-ca or cert-manager)
   remote-build-sha.sh                # Resolves the short SHA `just deploy`'s --version defaults to (justfile helper)
   aibom-scripts/
     generate_snapshot.py             # Hardware discovery script (from coldpress)

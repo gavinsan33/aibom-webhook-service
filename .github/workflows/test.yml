@@ -1,7 +1,7 @@
 name: Test
 
-# Runs the same `just test all` a contributor would run locally (internal/...
-# Go tests, then the postprocess/aibom-scripts Python suite) on every push and
+# Runs the same `just test all` a contributor would run locally (all Go
+# tests, then the postprocess/aibom-scripts Python suite) on every push and
 # PR, so a regression like a stale test asserting a since-removed AIBOM field
 # gets caught here instead of only being noticed by whoever happens to run
 # the suite locally next.
