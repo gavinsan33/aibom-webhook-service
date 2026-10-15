@@ -508,15 +508,7 @@ func (w *Watcher) isNamespaceEnabled(namespace string) bool {
 // succeeded or failed — since both should trigger finalizer removal and
 // cleanup the same way a bare completion would.
 func (w *Watcher) isJobFinished(job *batchv1.Job) bool {
-	for _, c := range job.Status.Conditions {
-		if c.Status != corev1.ConditionTrue {
-			continue
-		}
-		if c.Type == batchv1.JobComplete || c.Type == batchv1.JobFailed {
-			return true
-		}
-	}
-	return false
+	return jobResult(job) != ""
 }
 
 // jobResult returns the Job's terminal condition ("Complete" or "Failed"), or
