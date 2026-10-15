@@ -47,6 +47,23 @@ The chart installs cluster-scoped RBAC, which a namespace-scoped admin cannot gr
 
 Without `--version`, Helm installs the newest release. Pass `--version=X.Y.Z` to pin one, or `--version=<version>-<git-sha>` for a dev build from `main` (see [Upgrading](../reference/upgrading.md#versions)).
 
+## Install from the OpenShift console
+
+To install from the console's Developer Catalog (Helm Charts) instead of the command line, a cluster-admin adds the project's Helm repository once:
+
+```yaml
+apiVersion: helm.openshift.io/v1beta1
+kind: HelmChartRepository
+metadata:
+  name: project-aibom
+spec:
+  name: Project AIBOM
+  connectionConfig:
+    url: https://gavinsan33.github.io/aibom-webhook-service
+```
+
+Both charts then appear in the catalog, with a form built from their values. Install the webhook chart once, as a cluster-admin, then the namespace chart in each namespace that runs workloads, still after labeling the namespace with `oc label`. Upgrades are not automatic: the Helm release's Upgrade action installs a newer version, and the CRDs still need the separate apply described in [Upgrading](../reference/upgrading.md).
+
 ## Kubernetes without OpenShift
 
 The commands on this page use `oc`. `kubectl` takes the same arguments. Other differences:
