@@ -51,8 +51,7 @@ Set chart values with `--set key=value` or `-f values.yaml` on `helm upgrade --i
 |-------|---------|-------------|
 | `platform` | `auto` | As in the webhook chart. On OpenShift this chart also creates the service-ca ConfigMap, the image-puller RoleBinding and the `Image` read binding. |
 | `aibomSystemNamespace` | `project-aibom` | The namespace the webhook chart was installed into. The signing-key Roles grant its watcher access, and on OpenShift the image-puller RoleBinding is created there. |
-| `monitoringAccess.enabled` | `true` | Binds the `aibom-postprocess` ServiceAccount to the ClusterRole below so it can read Prometheus. Needs cluster-scoped permission. When `false`, the install succeeds but telemetry is empty until a cluster-admin applies the binding. |
-| `monitoringAccess.clusterRole` | `""` | The ClusterRole to bind. Empty means `cluster-monitoring-view` on OpenShift and no binding elsewhere. Set it if your Prometheus checks the bearer token. |
+| `monitoringAccess.enabled` | `true` | On OpenShift, binds the `aibom-postprocess` ServiceAccount to `cluster-monitoring-view` so it can read Prometheus. Needs cluster-scoped permission. When `false`, the install succeeds but telemetry is empty until a cluster-admin applies the binding. |
 | `vllmMetrics.enabled` | `true` | Adds a `PodMonitor` scraping vLLM's `/metrics` on port 8000 for instrumented pods. Needs the Prometheus Operator CRDs, or the install fails. Set `false` without them. Inference metrics also need `monitoringAccess.enabled`. |
 | `scripts.generateSnapshot`, `.runtimeDetector`, `.k8sApi`, `.datasetSidecar` | `""` | Only for installing from a checkout, where `--set-file` reads the scripts from `scripts/aibom-scripts/`. Leave unset for an OCI install, which embeds them. |
 
