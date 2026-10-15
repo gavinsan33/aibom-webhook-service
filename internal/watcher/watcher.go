@@ -1,7 +1,6 @@
 package watcher
 
 import (
-	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -755,22 +754,19 @@ var datasetIdentityKeys = []string{
 	"data_files", "data_dir", "root", "path",
 }
 
-// datasetIdentity is entry's datasetIdentityKeys values, compacted so pods'
-// formatting differences don't matter.
+// datasetIdentity is entry's datasetIdentityKeys values re-encoded as JSON,
+// so pods' formatting differences don't matter and a missing key equals null.
 func datasetIdentity(entry json.RawMessage) (string, bool) {
-	var fields map[string]json.RawMessage
+	var fields map[string]any
 	if err := json.Unmarshal(entry, &fields); err != nil {
 		return "", false
 	}
-	var key strings.Builder
-	for _, k := range datasetIdentityKeys {
-		var buf bytes.Buffer
-		if v, ok := fields[k]; ok && json.Compact(&buf, v) == nil {
-			key.Write(buf.Bytes())
-		}
-		key.WriteByte(0)
+	vals := make([]any, len(datasetIdentityKeys))
+	for i, k := range datasetIdentityKeys {
+		vals[i] = fields[k]
 	}
-	return key.String(), true
+	key, err := json.Marshal(vals)
+	return string(key), err == nil
 }
 
 // mergeDatasets combines multiple dataset JSON strings into one.
