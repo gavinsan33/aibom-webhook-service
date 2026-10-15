@@ -53,7 +53,7 @@ The commands on this page use `oc`. `kubectl` takes the same arguments. Other di
 
 - **No impersonation.** `system:admin` is an OpenShift identity. Run as a cluster-admin and drop `--kube-as-user=system:admin` and `--as=system:admin`.
 - **Set `prometheus.url`.** There is no default outside OpenShift.
-- **Prometheus access.** If Prometheus checks the bearer token, set `monitoringAccess.clusterRole` on the namespace chart to a ClusterRole that grants read access. Without the Prometheus Operator, also set `vllmMetrics.enabled=false`.
+- **Prometheus access.** Only needed if Prometheus checks the bearer token. Set `monitoringAccess.clusterRole` on the namespace chart to the name of a ClusterRole that already exists on your cluster and grants the access your Prometheus requires; the chart doesn't create one. It is bound only to the `aibom-postprocess` ServiceAccount. Without the Prometheus Operator, also set `vllmMetrics.enabled=false`.
 - **TLS.** There is no service-ca bundle, so an HTTPS Prometheus must have a certificate the system trust store accepts.
 
 ```bash
