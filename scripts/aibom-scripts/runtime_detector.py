@@ -90,13 +90,6 @@ class _NotifyingDict(dict):
         if changed:
             _notify_change()
 
-    def setdefault(self, key, default=None):
-        changed = key not in self
-        result = super().setdefault(key, default)
-        if changed:
-            _notify_change()
-        return result
-
 
 _detected_datasets = []
 _runtime_info = _NotifyingDict()
