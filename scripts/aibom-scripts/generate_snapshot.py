@@ -24,7 +24,7 @@ except ImportError:
 # timeout into a warning plus a fallback value so whatever was collected still
 # gets written. The mutator's `|| echo ...` wrapper around this script covers
 # the rest (python3 missing, an error before the first stage).
-_STAGE_TIMEOUT_S = int(os.environ.get("AIBOM_DISCOVERY_STAGE_TIMEOUT_S", "60"))
+_STAGE_TIMEOUT_S = 60
 
 
 class _StageTimeout(Exception):
@@ -36,21 +36,19 @@ def _run_stage(name, fn, on_error=lambda exc: None, timeout_s=None):
     timeout) warn and return on_error(exc). SIGALRM interrupts a blocking
     syscall such as open() on a FIFO, which nothing else in-process can."""
     timeout_s = timeout_s or _STAGE_TIMEOUT_S
-    armed = hasattr(signal, "SIGALRM")
-    if armed:
-        def _on_alarm(signum, frame):
-            raise _StageTimeout(f"timed out after {timeout_s}s")
-        previous = signal.signal(signal.SIGALRM, _on_alarm)
-        signal.alarm(timeout_s)
+
+    def _on_alarm(signum, frame):
+        raise _StageTimeout(f"timed out after {timeout_s}s")
+    previous = signal.signal(signal.SIGALRM, _on_alarm)
+    signal.alarm(timeout_s)
     try:
         return fn()
     except Exception as exc:
         print(f"WARNING: {name} failed, continuing without it: {exc}", file=sys.stderr)
         return on_error(exc)
     finally:
-        if armed:
-            signal.alarm(0)
-            signal.signal(signal.SIGALRM, previous)
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 def _benchmark_error(exc):
