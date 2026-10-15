@@ -379,8 +379,6 @@ Both charts have a `platform` value (`auto`/`openshift`/`kubernetes`); `auto` ch
 - OpenShift-only objects aren't rendered elsewhere: the service-ca ConfigMap (the watcher's mount of it is already optional), the `system:image-puller` RoleBinding, and the `Image` ClusterRole and its bindings. `cluster-monitoring-view` is bound only on OpenShift. `build.enabled` fails the render.
 - The justfile's `AIBOM_PLATFORM=kubernetes` swaps `oc` for `kubectl` and empties the `system:admin` impersonation (`--as=`/`--kube-as-user=` with an empty value is the flags' own default, i.e. no impersonation).
 
-The deploy recipes, `kind-deploy` aside, otherwise assumed `oc` throughout. Separately, the chart had silently stopped passing `--prometheus-url` and `--debug-*` (and the since-removed `--grafana-*`) after 54a3890, so those values did nothing (including `kind-deploy`'s Prometheus override) until this was restored.
-
 ## Deploy Versioning (`--version`)
 
 `--version` is the single source of truth for what `just deploy` builds and how it's labeled: it sets the BuildConfig output ImageStreamTag, the Deployment's image reference, and (unless it's `latest`) `build.gitRef` — so the BuildConfig actually checks out and builds that exact commit, instead of always building whatever `build.gitRef`'s branch currently points to regardless of the tag name.
