@@ -3101,15 +3101,11 @@ def main():
     # A higher tier missing a field (a .git with no remote) is filled from
     # the next one, if it describes the same checkout (#113). The image
     # lookup only runs while commit or repository is still unknown.
-    detected_provenance = None
-    for detect in (
-        lambda: detect_git_provenance_from_runtime_info(runtime_info),
-        lambda: detect_git_clone_from_containers(containers),
-        lambda: detect_git_provenance_from_containers(containers),
-    ):
-        if detected_provenance and detected_provenance.get("git_commit") and detected_provenance.get("git_repository"):
-            break
-        detected_provenance = merge_provenance(detected_provenance, detect())
+    detected_provenance = merge_provenance(
+        detect_git_provenance_from_runtime_info(runtime_info), detect_git_clone_from_containers(containers)
+    )
+    if not (detected_provenance and detected_provenance.get("git_commit") and detected_provenance.get("git_repository")):
+        detected_provenance = merge_provenance(detected_provenance, detect_git_provenance_from_containers(containers))
     if detected_provenance:
         print("--- Git Provenance Detection ---")
         print(f"  Detected via: {detected_provenance.get('detected_via', 'unknown')}")
