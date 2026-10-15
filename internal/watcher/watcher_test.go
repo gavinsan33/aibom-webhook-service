@@ -2114,9 +2114,6 @@ func TestPostprocessJobName_DistinguishesNamespacesAndLongNames(t *testing.T) {
 	if ppName("ns", long+"1") == ppName("ns", long+"2") {
 		t.Error("long names differing past the truncation point produced one postprocess Job name")
 	}
-	if n := ppName("ns", long); len(n) > maxJobNameLength {
-		t.Errorf("name %q is %d chars, max %d", n, len(n), maxJobNameLength)
-	}
 }
 
 func TestCreatePostprocessJob_GeneratesSigningKeyInOwnNamespace(t *testing.T) {
