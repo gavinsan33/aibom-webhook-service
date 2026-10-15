@@ -768,14 +768,9 @@ func mergeDatasets(datasets []string) string {
 		}
 
 		hasGit := false
-		for k := range df.RuntimeInfo {
-			if strings.HasPrefix(k, "git_") {
-				hasGit = true
-				break
-			}
-		}
 		for k, v := range df.RuntimeInfo {
 			if strings.HasPrefix(k, "git_") {
+				hasGit = true
 				if gitTaken {
 					continue
 				}
