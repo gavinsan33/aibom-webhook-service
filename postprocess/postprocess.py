@@ -2781,8 +2781,7 @@ def _discovery_details(disc):
     out = {}
     for name, (section, keys) in _DISCOVERY_DETAILS.items():
         src = disc.get(section) or {}
-        vals = {k: src[k] for k in keys if k in src}
-        vals = {k: v for k, v in vals.items() if v not in (None, "", "N/A", "None")}
+        vals = {k: src[k] for k in keys if src.get(k) not in (None, "", "N/A", "None")}
         if vals:
             out[name] = vals
     mem = [
