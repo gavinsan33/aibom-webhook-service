@@ -9,16 +9,7 @@ edit_uri: edit/main/docs/
 theme:
   name: material
 
-exclude_docs: |
-  requirements.txt
-  vars.yml
-
-plugins:
-  - search
-  - macros:
-      include_yaml:
-        - docs/vars.yml
-      render_by_default: false
+exclude_docs: requirements.txt
 
 markdown_extensions:
   - admonition

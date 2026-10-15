@@ -1,7 +1,3 @@
----
-render_macros: true
----
-
 # Configuration
 
 Set chart values with `--set key=value` or `-f values.yaml` on `helm upgrade --install`. Each table lists the value, its default and what it does. The commented defaults are in `charts/aibom-webhook/values.yaml` and `charts/aibom-workload-namespace/values.yaml`.
@@ -47,7 +43,7 @@ Set chart values with `--set key=value` or `-f values.yaml` on `helm upgrade --i
 
 | Value | Default | Description |
 |-------|---------|-------------|
-| `aibomSystemNamespace` | `{{ webhook_namespace }}` | The namespace the webhook chart was installed into. The image-puller RoleBinding is created there. |
+| `aibomSystemNamespace` | `project-aibom` | The namespace the webhook chart was installed into. The image-puller RoleBinding is created there. |
 | `monitoringAccess.enabled` | `true` | Binds the `aibom-postprocess` ServiceAccount to `cluster-monitoring-view`. Needs cluster-scoped permission. When `false`, the install succeeds but telemetry is empty until a cluster-admin applies the binding. |
 | `vllmMetrics.enabled` | `true` | Adds a `PodMonitor` scraping vLLM's `/metrics` on port 8000 for instrumented pods. Needs the Prometheus Operator CRDs, or the install fails. Set `false` without them. Inference metrics also need `monitoringAccess.enabled`. |
 | `scripts.generateSnapshot`, `.runtimeDetector`, `.k8sApi`, `.datasetSidecar` | `""` | Only for installing from a checkout, where `--set-file` reads the scripts from `scripts/aibom-scripts/`. Leave unset for an OCI install, which embeds them. |
