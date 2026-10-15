@@ -24,7 +24,7 @@ Telemetry is collected only for pods with a detected GPU.
 The discovery image needs only `python3` and `bash`. Left unset, the chart uses the OpenShift AI `runtime-pytorch` ImageStream in `redhat-ods-applications` where OpenShift AI is installed, and `pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime` from Docker Hub everywhere else. If the cluster can't pull the default, for example because it has no egress, point the chart at an image it can pull:
 
 ```bash
-helm upgrade --install aibom-webhook oci://quay.io/gsanders/aibom-webhook \
+helm upgrade --install aibom-webhook oci://quay.io/project-aibom/aibom-webhook \
   -n project-aibom --create-namespace --kube-as-user=system:admin \
   --set image.discovery.repository=<registry>/<image> \
   --set image.discovery.tag=<tag>
@@ -39,7 +39,7 @@ Supported workload types are Job, JobSet, PyTorchJob and RayJob, plus any pod th
 Both charts are published as OCI artifacts, so no checkout of this repository is needed:
 
 ```bash
-helm upgrade --install aibom-webhook oci://quay.io/gsanders/aibom-webhook \
+helm upgrade --install aibom-webhook oci://quay.io/project-aibom/aibom-webhook \
   -n project-aibom --create-namespace --kube-as-user=system:admin
 ```
 
@@ -57,11 +57,11 @@ The commands on this page use `oc`. `kubectl` takes the same arguments. Other di
 - **TLS.** There is no service-ca bundle, so an HTTPS Prometheus must have a certificate the system trust store accepts.
 
 ```bash
-helm upgrade --install aibom-webhook oci://quay.io/gsanders/aibom-webhook \
+helm upgrade --install aibom-webhook oci://quay.io/project-aibom/aibom-webhook \
   -n project-aibom --create-namespace \
   --set prometheus.url=http://prometheus-operated.monitoring.svc:9090
 kubectl label namespace <namespace> aibom.io/enabled=true --overwrite
-helm upgrade --install aibom-ns-<namespace> oci://quay.io/gsanders/aibom-workload-namespace \
+helm upgrade --install aibom-ns-<namespace> oci://quay.io/project-aibom/aibom-workload-namespace \
   -n <namespace>
 ```
 
@@ -73,7 +73,7 @@ Each namespace that runs instrumented workloads needs the `aibom.io/enabled` lab
 
 ```bash
 oc label namespace <namespace> aibom.io/enabled=true --overwrite
-helm upgrade --install aibom-ns-<namespace> oci://quay.io/gsanders/aibom-workload-namespace \
+helm upgrade --install aibom-ns-<namespace> oci://quay.io/project-aibom/aibom-workload-namespace \
   -n <namespace> --kube-as-user=system:admin
 ```
 
