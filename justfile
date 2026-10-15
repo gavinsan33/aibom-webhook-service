@@ -12,12 +12,11 @@ webhook_namespace := "project-aibom"
 default_repo := "quay.io/gsanders"
 # Cluster flavor the deploy recipes target: openshift (default) or kubernetes.
 # kubernetes uses kubectl and doesn't impersonate system:admin, an OpenShift
-# identity; a cluster-admin kubeconfig is expected instead. Both derived values
-# can be overridden on their own.
+# identity; a cluster-admin kubeconfig is expected instead.
 platform := env("AIBOM_PLATFORM", "openshift")
-kubectl := env("AIBOM_KUBECTL", if platform == "openshift" { "oc" } else { "kubectl" })
+kubectl := if platform == "openshift" { "oc" } else { "kubectl" }
 # Identity cluster-scoped steps impersonate. Empty uses your own credentials.
-admin_as := env("AIBOM_ADMIN_AS", if platform == "openshift" { "system:admin" } else { "" })
+admin_as := if platform == "openshift" { "system:admin" } else { "" }
 
 # --- Build & test ------------------------------------------------------------
 
