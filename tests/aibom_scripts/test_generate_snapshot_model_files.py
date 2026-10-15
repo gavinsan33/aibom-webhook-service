@@ -105,6 +105,7 @@ def test_malformed_json_files_are_skipped(tmp_path):
 # or crash the init container.
 # ---------------------------------------------------------------------------
 
+import contextlib
 import signal
 import sys
 
@@ -121,13 +122,18 @@ def _load_stage_runner(timeout="60"):
     return ns
 
 
+@contextlib.contextmanager
 def _guard(seconds=10):
     """Fail the test, rather than hang the suite, if something blocks."""
     def _boom(signum, frame):
         raise AssertionError("blocked: fail-open guard did not work")
     previous = signal.signal(signal.SIGALRM, _boom)
     signal.alarm(seconds)
-    return previous
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs mkfifo")
@@ -135,12 +141,8 @@ def test_read_model_source_files_skips_fifo_readme(tmp_path):
     _make_model(tmp_path)
     (tmp_path / "README.md").unlink()
     os.mkfifo(tmp_path / "README.md")
-    previous = _guard()
-    try:
+    with _guard():
         result = read_model_source_files(str(tmp_path))
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, previous)
     # The FIFO is ignored, the rest of the model's files are still read.
     assert result["architectures"] == ["Qwen2ForCausalLM"]
     assert "repo_id" not in result
@@ -152,12 +154,8 @@ def test_read_model_source_files_skips_symlink_to_fifo(tmp_path):
     os.mkfifo(tmp_path / "pipe")
     (tmp_path / "config.json").unlink()
     (tmp_path / "config.json").symlink_to(tmp_path / "pipe")
-    previous = _guard()
-    try:
+    with _guard():
         result = read_model_source_files(str(tmp_path))
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, previous)
     assert "architectures" not in result
 
 
@@ -186,12 +184,8 @@ def test_run_stage_times_out_a_blocked_open(tmp_path):
         with open(fifo, "rb") as f:  # blocks until a writer appears
             return f.read()
 
-    previous = _guard()
-    try:
+    with _guard():
         result = ns["_run_stage"]("blocked", blocked_open, lambda exc: "fallback", timeout_s=1)
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, previous)
     assert result == "fallback"
 
 
