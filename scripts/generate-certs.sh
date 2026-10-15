@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # Generate self-signed TLS certs for running the webhook locally (just run).
-# Cluster deployments get their certs from cert-manager instead (see
-# charts/aibom-webhook/templates/certificates.yaml) — this script never touches
+# Cluster deployments get their certs from service-ca on OpenShift or
+# cert-manager elsewhere (see the chart's tls.provider) — this script never touches
 # a cluster.
 # Usage: ./scripts/generate-certs.sh
 
