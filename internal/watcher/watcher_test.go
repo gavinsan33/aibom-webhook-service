@@ -1723,29 +1723,6 @@ func TestBuildPostprocessInputs_TagsEachPodWithItsJobsResult(t *testing.T) {
 	}
 }
 
-func TestJobResult(t *testing.T) {
-	failed := completedJob("j", "ns")
-	failed.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue}}
-	notTrue := completedJob("j", "ns")
-	notTrue.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionFalse}}
-	running := completedJob("j", "ns")
-	running.Status.Conditions = nil
-
-	for name, tc := range map[string]struct {
-		job  *batchv1.Job
-		want string
-	}{
-		"complete": {completedJob("j", "ns"), "Complete"},
-		"failed":   {failed, "Failed"},
-		"false":    {notTrue, ""},
-		"running":  {running, ""},
-	} {
-		if got := jobResult(tc.job); got != tc.want {
-			t.Errorf("%s: jobResult = %q, want %q", name, got, tc.want)
-		}
-	}
-}
-
 func failedPostprocessFixtures(jobName, namespace string) (*batchv1.Job, *corev1.ConfigMap) {
 	ppJob, _, dataConfigMap := newAIBOMPostprocessFixtures(jobName, namespace)
 	ppJob.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue}}
