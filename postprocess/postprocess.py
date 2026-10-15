@@ -638,9 +638,56 @@ def _int_or_float(val):
 
 
 def _to_bool(val):
-    if isinstance(val, bool):
-        return val
-    return str(val).strip().lower() in ("1", "true", "yes")
+    return val.strip().lower() in ("1", "true", "yes")
+
+
+def _parse_flags(args, arg_map, sep, bool_values=False):
+    """Read the flags in `arg_map` out of `args` into ({name: value}, first
+    positional). `--no<sep>flag` negates a bool flag; with `bool_values`, a
+    bool flag also takes a following `true`/`false`. The positional is only
+    recognized while every flag so far was one we know the arity of."""
+    bool_flags = {k for k, (_, t) in arg_map.items() if t is bool}
+    result = {}
+    positional = None
+    expect_positional = True
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        i += 1
+        if not _is_flag_token(tok):
+            if expect_positional:
+                positional = tok
+            expect_positional = False
+            continue
+
+        key, val = _split_flag(tok, sep)
+        negated = key.startswith("--no" + sep) and "--" + key[5:] in bool_flags
+        if negated:
+            key = "--" + key[5:]
+        spec = arg_map.get(key)
+        if spec is None:
+            expect_positional = False
+            continue
+
+        name, conv = spec
+        if conv is bool:
+            if bool_values and val is None and i < len(args) and args[i].lower() in _BOOL_WORDS:
+                val = args[i]
+                i += 1
+            result[name] = not negated and (val is None or _to_bool(val))
+            continue
+        if val is None and i < len(args) and not _is_flag_token(args[i]):
+            val = args[i]
+            i += 1
+        if val is None or _has_unexpanded_var(val):
+            continue
+        try:
+            converted = conv(val)
+        except (ValueError, TypeError):
+            converted = val
+        if converted is not None:
+            result[name] = converted
+    return result, positional
 
 
 def _shell_script(command):
@@ -777,9 +824,6 @@ _VLLM_ARG_MAP = {
     "--override-generation-config": ("generation_config_overrides", _parse_json_or_kv),
 }
 
-_BOOL_FLAGS = {k for k, (_, t) in _VLLM_ARG_MAP.items() if t is bool}
-
-
 def _vllm_server_args(tokens):
     """The arguments of the first vLLM *server* invocation (`vllm serve ...`
     or `python -m vllm.entrypoints...api_server`), or None. `vllm bench ...`
@@ -795,46 +839,9 @@ def _vllm_server_args(tokens):
 
 
 def _parse_vllm_args(args):
-    result = {"serving_engine": "vllm"}
-    positional = None
-    # `vllm serve <model>`: the model is the first positional, which can only
-    # be told apart from an unknown flag's value while every flag so far was
-    # one we know the arity of.
-    expect_positional = True
-    i = 0
-    while i < len(args):
-        tok = args[i]
-        i += 1
-        if not _is_flag_token(tok):
-            if expect_positional and positional is None:
-                positional = tok
-            expect_positional = False
-            continue
-
-        key, val = _split_flag(tok, "-")
-        negated = False
-        if key.startswith("--no-") and "--" + key[5:] in _BOOL_FLAGS:
-            key, negated = "--" + key[5:], True
-        spec = _VLLM_ARG_MAP.get(key)
-        if spec is None:
-            expect_positional = False
-            continue
-
-        name, conv = spec
-        if conv is bool:
-            result[name] = not negated and (True if val is None else _to_bool(val))
-            continue
-        if val is None and i < len(args) and not _is_flag_token(args[i]):
-            val = args[i]
-            i += 1
-        if val is None or _has_unexpanded_var(val):
-            continue
-        try:
-            converted = conv(val)
-        except (ValueError, TypeError):
-            converted = val
-        if converted is not None:
-            result[name] = converted
+    # `vllm serve <model>`: the model is the first positional.
+    parsed, positional = _parse_flags(args, _VLLM_ARG_MAP, "-")
+    result = {"serving_engine": "vllm", **parsed}
 
     if "model_name" not in result and positional and not _has_unexpanded_var(positional):
         result["model_name"] = positional
@@ -910,7 +917,6 @@ _TRL_ARG_MAP = {
     "--seed": ("random_seed", int),
 }
 
-_TRL_BOOL_FLAGS = {k for k, (_, t) in _TRL_ARG_MAP.items() if t is bool}
 _TRL_SUBCOMMAND_RE = re.compile(r"^[a-z][a-z_]*$")
 
 
@@ -936,40 +942,9 @@ def detect_trl_from_command(command):
     if args is None:
         return None
 
-    result = {"training_framework": "trl"}
-
-    i = 0
-    while i < len(args):
-        tok = args[i]
-        i += 1
-        if not tok.startswith("--"):
-            continue
-        key, val = _split_flag(tok, "_")
-        negated = False
-        if key.startswith("--no_") and "--" + key[5:] in _TRL_BOOL_FLAGS:
-            key, negated = "--" + key[5:], True
-        spec = _TRL_ARG_MAP.get(key)
-        if spec is None:
-            continue
-
-        name, conv = spec
-        if conv is bool:
-            # `--use_peft`, `--use_peft true` and `--use_peft=false` all occur.
-            if val is None and i < len(args) and args[i].lower() in _BOOL_WORDS:
-                val = args[i]
-                i += 1
-            result[name] = not negated and (True if val is None else _to_bool(val))
-            continue
-        if val is None and i < len(args) and not _is_flag_token(args[i]):
-            val = args[i]
-            i += 1
-        if val is None or _has_unexpanded_var(val):
-            continue
-        try:
-            converted = conv(val)
-        except (ValueError, TypeError):
-            converted = val
-        result[name] = converted
+    # `--use_peft`, `--use_peft true` and `--use_peft=false` all occur.
+    parsed, _ = _parse_flags(args, _TRL_ARG_MAP, "_", bool_values=True)
+    result = {"training_framework": "trl", **parsed}
 
     use_dora = result.pop("use_dora", False)
     use_rslora = result.pop("use_rslora", False)
