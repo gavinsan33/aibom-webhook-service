@@ -1522,7 +1522,7 @@ def _normalize_repo(url):
     u = (redact_git_url(url) or "").strip().lower()
     rest = re.sub(r"^[a-z][a-z0-9+.-]*://", "", u)
     rest = re.sub(r"^[^@/]*@", "", rest)
-    if rest == re.sub(r"^[^@/]*@", "", u):  # had no scheme: scp-style host:path
+    if "://" not in u:  # scp-style host:path
         rest = rest.replace(":", "/", 1)
     return re.sub(r"(\.git)?/*$", "", rest)
 
