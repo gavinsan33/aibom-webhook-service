@@ -1,0 +1,47 @@
+# `helm test`: the webhook answers on its Service, and the AIBOM API is served
+# (both CRDs installed). The CRD check reads API discovery, which every
+# authenticated ServiceAccount may read, so the pod needs no extra RBAC. The
+# health check skips certificate verification: trusting the webhook's CA would
+# mean mounting its TLS Secret, private key included.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: aibom-webhook-test
+  namespace: {{ include "aibom-webhook.namespace" . }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: test
+      image: "{{ .Values.image.postprocess.repository }}:{{ include "aibom-webhook.postprocessTag" . }}"
+      {{- with .Values.image.pullPolicy }}
+      imagePullPolicy: {{ . }}
+      {{- end }}
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      command:
+        - python3
+        - -c
+        - |
+          import json, ssl, sys, urllib.request
+          sa = "/var/run/secrets/kubernetes.io/serviceaccount"
+          urllib.request.urlopen("https://{{ include "aibom-webhook.serviceDNSName" . }}/healthz",
+                                 context=ssl._create_unverified_context(), timeout=10)
+          print("webhook /healthz: ok")
+          req = urllib.request.Request("https://kubernetes.default.svc/apis/aibom.io/v1alpha1",
+                                       headers={"Authorization": "Bearer " + open(sa + "/token").read()})
+          ctx = ssl.create_default_context(cafile=sa + "/ca.crt")
+          served = {r["name"] for r in json.load(urllib.request.urlopen(req, context=ctx, timeout=10))["resources"]}
+          missing = {"aiboms", "aibomtelemetries"} - served
+          if missing:
+              sys.exit(f"CRDs not installed: {sorted(missing)}")
+          print("CRDs: ok")
