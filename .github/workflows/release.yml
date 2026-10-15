@@ -12,7 +12,7 @@ on:
     tags: ["v*.*.*"]
 
 env:
-  REGISTRY: quay.io/gsanders
+  REGISTRY: quay.io/project-aibom
 
 jobs:
   release:

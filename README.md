@@ -32,12 +32,12 @@ Both charts are published to Quay as OCI artifacts, so no checkout is needed.
 
 ```bash
 # 1. Install the webhook
-helm upgrade --install aibom-webhook oci://quay.io/gsanders/aibom-webhook \
+helm upgrade --install aibom-webhook oci://quay.io/project-aibom/aibom-webhook \
   -n project-aibom --create-namespace --kube-as-user=system:admin
 
 # 2. Enable a workload namespace (it must already exist)
 oc label namespace <namespace> aibom.io/enabled=true --overwrite
-helm upgrade --install aibom-ns-<namespace> oci://quay.io/gsanders/aibom-workload-namespace \
+helm upgrade --install aibom-ns-<namespace> oci://quay.io/project-aibom/aibom-workload-namespace \
   -n <namespace> --kube-as-user=system:admin
 
 # 3. Verify: submit a Job, then check the pod for the init container
