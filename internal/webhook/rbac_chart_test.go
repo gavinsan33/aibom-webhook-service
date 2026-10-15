@@ -3,6 +3,7 @@ package webhook
 import (
 	"context"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -55,16 +56,7 @@ func TestWorkloadNamespaceRoleCoversPerJobRole(t *testing.T) {
 
 func covers(rules []rbacv1.PolicyRule, group, resource, verb string) bool {
 	for _, r := range rules {
-		if contains(r.APIGroups, group) && contains(r.Resources, resource) && contains(r.Verbs, verb) {
-			return true
-		}
-	}
-	return false
-}
-
-func contains(list []string, s string) bool {
-	for _, v := range list {
-		if v == s {
+		if slices.Contains(r.APIGroups, group) && slices.Contains(r.Resources, resource) && slices.Contains(r.Verbs, verb) {
 			return true
 		}
 	}
