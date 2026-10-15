@@ -30,6 +30,17 @@ A stale `aibom-scripts` ConfigMap can fail pod startup for every instrumented wo
 
 Re-run the workload-namespace install (see [Getting Started](getting-started.md)) to refresh it.
 
+## An AIBOM has no stored time series, or `AIBOMTelemetry` objects are left over
+
+An AIBOM is still created without `spec.data.telemetry_series_ref` when Prometheus returned no data, the series would exceed the 900 KB cap, or creating the `AIBOMTelemetry` object was denied, for example by a ResourceQuota or a namespace whose chart predates the resource. The postprocess Job logs a warning in each case.
+
+The series object is created before the AIBOM. If the AIBOM create then fails, the object is left behind: the postprocess Job can't delete these objects, by design. The Job logs the delete command, and its retry creates a fresh object. Leftovers have no owner, so the AIBOM column is empty:
+
+```bash
+oc get aibomtel -A
+oc delete aibomtel <name> -n <namespace>
+```
+
 ## Telemetry is empty
 
 Reading platform metrics from Thanos Querier requires a `cluster-monitoring-view` ClusterRoleBinding, which `just setup-namespace` creates per namespace by default and which needs cluster-admin permission.
