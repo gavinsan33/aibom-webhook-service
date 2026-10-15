@@ -64,11 +64,11 @@ The webhook binary takes these flags. The chart sets them from the values above,
 | `--tls-cert` | `/certs/tls.crt` | Path to the TLS certificate |
 | `--tls-key` | `/certs/tls.key` | Path to the TLS private key |
 | `--port` | `8443` | Server port |
-| `--discovery-image` | `pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime` | Image for the discovery init container. The chart always sets it from `image.discovery`. |
+| `--discovery-image` | `pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime`, pinned by digest | Image for the discovery init container. The chart always sets it from `image.discovery`. |
 | `--dataset-detection` | `true` | Inject dataset detection hooks into application containers |
 | `--enable-watcher` | `true` | Start the Job completion watcher (`watcher.enabled`) |
 | `--postprocess-image` | `busybox:latest` | Image for postprocess Jobs. A placeholder; the chart always overrides it with `image.postprocess`. |
-| `--dataset-sidecar-image` | `python:3.12-slim` | Image for the dataset-signing sidecar container |
+| `--dataset-sidecar-image` | `python:3.12-slim`, pinned by digest | Image for the dataset-signing sidecar container |
 | `--trusted-watcher-identity` | empty | The webhook's own ServiceAccount username, used to check that a Job claiming to be a postprocess Job was created by the watcher. The chart sets it. When empty the check is off and a warning is logged. |
 | `--trusted-job-controller-identity` | empty | See `webhook.trustedJobControllerIdentity`. |
 | `--prometheus-url` | `https://thanos-querier.openshift-monitoring.svc:9091` | See `prometheus.url`. |

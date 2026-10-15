@@ -41,7 +41,7 @@ ImageStream where the OpenShift AI API exists, else the public PyTorch image.
 {{- else if .Capabilities.APIVersions.Has "datasciencecluster.opendatahub.io/v1" -}}
 image-registry.openshift-image-registry.svc:5000/redhat-ods-applications/runtime-pytorch:pytorch
 {{- else -}}
-pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime
+pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime@sha256:e5c32997194edfc6fb0235223d1cd0433056045a468e7dfeaac390a3fcf8ae6d
 {{- end -}}
 {{- end -}}
 
