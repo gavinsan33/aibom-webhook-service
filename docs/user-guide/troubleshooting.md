@@ -59,4 +59,4 @@ oc create clusterrolebinding aibom-postprocess-monitoring-view \
   --serviceaccount=project-aibom:aibom-postprocess
 ```
 
-On a cluster that isn't OpenShift, use the ClusterRole you set in `monitoringAccess.clusterRole` instead.
+On a cluster that isn't OpenShift, use a ClusterRole that grants the access your Prometheus requires instead.
