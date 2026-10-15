@@ -297,22 +297,6 @@ def test_detect_parallelization_single_gpu_returns_none():
     assert pp.detect_parallelization_from_command(tokens) is None
 
 
-def test_parallelization_strategy_from_device_map_multi_device():
-    assert pp._parallelization_strategy_from_device_map({"model_device_count": 2}) == "model_parallel"
-
-
-def test_parallelization_strategy_from_device_map_single_device_returns_none():
-    # {"": 0}, "cuda:1", "auto" on one GPU all resolve to one device (#109).
-    assert pp._parallelization_strategy_from_device_map(
-        {"model_device_map": "{'': 0}", "model_device_count": 1}
-    ) is None
-
-
-def test_parallelization_strategy_from_device_map_none_returns_none():
-    assert pp._parallelization_strategy_from_device_map({"model_device_map": "auto"}) is None
-    assert pp._parallelization_strategy_from_device_map({}) is None
-
-
 def test_detect_parallelization_no_signal_returns_none():
     assert pp.detect_parallelization_from_command(["python", "train.py"]) is None
     assert pp.detect_parallelization_from_command([]) is None
@@ -1581,6 +1565,16 @@ def test_compile_aibom_falls_back_to_device_map_for_parallelization_strategy():
         annotations={"experiment-intent": "training"}, telemetry=None,
     )
     assert aibom["training"]["parallelization_strategy"] == "model_parallel"
+
+
+def test_compile_aibom_single_device_map_is_not_model_parallel():
+    # {"": 0}, "cuda:1", "auto" on one GPU all resolve to one device (#109).
+    runtime_info = {"model_device_map": "{'': 0}", "model_device_count": 1}
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info=runtime_info,
+        annotations={"experiment-intent": "training"}, telemetry=None,
+    )
+    assert aibom["training"]["parallelization_strategy"] is None
 
 
 def test_compile_aibom_cli_detected_strategy_overrides_device_map_fallback():

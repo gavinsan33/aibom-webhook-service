@@ -1139,20 +1139,6 @@ def detect_parallelization_from_command(tokens):
     return None
 
 
-def _parallelization_strategy_from_device_map(runtime_info):
-    """Fallback for in-script sharding with no CLI/launcher/accelerate-config
-    signal at all -- e.g. a raw transformers.Trainer or inference script that
-    passes `device_map="auto"` directly to `from_pretrained`, sharding the
-    model across GPUs within a single process. Lowest-priority signal: any
-    explicit launcher/CLI/accelerate detection is more authoritative than
-    this heuristic. Uses the number of accelerators the runtime hook saw the
-    map resolve to, so single-device maps (`{"": 0}`, `"cuda:1"`, `"auto"` on
-    one GPU) aren't called model parallel (#109)."""
-    if (runtime_info.get("model_device_count") or 0) > 1:
-        return "model_parallel"
-    return None
-
-
 _HF_URI_RE = re.compile(r"^([^/@:]+(?:/[^/@:]+)?)(?:[@:]([^/]+))?(?:/.*)?$")
 
 
@@ -2594,7 +2580,8 @@ def compile_aibom(
                 annotations.get("parallelization-strategy")
                 or runtime_info.get("parallelization_strategy")
                 or dm.get("parallelization_strategy")
-                or _parallelization_strategy_from_device_map(runtime_info)
+                # Lowest priority: in-script sharding (device_map) seen by the runtime hook.
+                or ("model_parallel" if (runtime_info.get("model_device_count") or 0) > 1 else None)
             ),
         }
 
