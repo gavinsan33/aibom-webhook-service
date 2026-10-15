@@ -1,18 +1,5 @@
 {{- if .Values.finalizerCleanup.enabled }}
-# Post-delete hook (#104): `helm uninstall` removes the watcher, and with it
-# the only thing that ever releases the aibom.io/log-extraction (Job) and
-# aibom.io/log-extraction-pod (Pod) finalizers. Any Job or predictor Pod still
-# carrying one would stay Terminating forever, and deleting its namespace
-# would hang. This runs the webhook binary once in --strip-finalizers mode to
-# remove them cluster-wide.
-#
-# post-delete, not pre-delete: while the Deployment still exists the watcher
-# can re-add a finalizer to a Job it sees after the strip. Running after the
-# release's resources are gone means nothing can. That also means the
-# release's own ServiceAccount and ClusterRole no longer exist, so the hook
-# carries its own, and removes them again once it succeeds. If it fails they
-# are left in place for debugging; `before-hook-creation` clears them on the
-# next attempt. Skip with `helm uninstall --no-hooks` if it ever blocks.
+# Strips our finalizers on uninstall; see CLAUDE.md "Stale Finalizers" (#104).
 apiVersion: v1
 kind: ServiceAccount
 metadata:
