@@ -36,6 +36,7 @@ All hooks are fault-tolerant — detection failures never interrupt training.
 """
 
 import atexit
+import contextlib
 import fcntl
 import hashlib
 import importlib.util
@@ -480,33 +481,22 @@ def _register_durable_flush():
             _dbg("SIGTERM handler not installed (not main thread)")
 
 
-class _OutputLock:
+@contextlib.contextmanager
+def _output_lock(path, timeout_s):
     """Exclusive flock on a sidecar-file next to the output, taken with a
     bounded wait so a stuck holder can never hang process exit."""
-
-    def __init__(self, path, timeout_s):
-        self._path = path + ".lock"
-        self._timeout_s = timeout_s
-        self._file = None
-
-    def __enter__(self):
-        self._file = open(self._path, "a")
-        deadline = time.monotonic() + self._timeout_s
+    lock_path = path + ".lock"
+    with open(lock_path, "a") as f:  # closing releases the flock
+        deadline = time.monotonic() + timeout_s
         while True:
             try:
-                fcntl.flock(self._file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                return self
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
             except OSError:
                 if time.monotonic() >= deadline:
-                    self._file.close()
-                    self._file = None
-                    raise TimeoutError(f"could not lock {self._path} within {self._timeout_s}s")
+                    raise TimeoutError(f"could not lock {lock_path} within {timeout_s}s")
                 time.sleep(0.02)
-
-    def __exit__(self, *exc):
-        if self._file is not None:
-            self._file.close()  # releases the flock
-            self._file = None
+        yield
 
 
 def _merge_output(existing, data, info):
@@ -574,7 +564,7 @@ def _flush(final=True, in_signal=False):
     _dbg(f"Flushing {len(data)} dataset(s) to {_OUTPUT_PATH} (final={final})")
     try:
         os.makedirs(os.path.dirname(_OUTPUT_PATH) or ".", exist_ok=True)
-        with _OutputLock(_OUTPUT_PATH, 1.0 if in_signal else _LOCK_TIMEOUT_S):
+        with _output_lock(_OUTPUT_PATH, 1.0 if in_signal else _LOCK_TIMEOUT_S):
             existing = {}
             if os.path.exists(_OUTPUT_PATH):
                 try:
