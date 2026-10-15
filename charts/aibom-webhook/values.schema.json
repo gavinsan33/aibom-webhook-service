@@ -1,0 +1,240 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AIBOM Webhook",
+  "type": "object",
+  "properties": {
+    "platform": {
+      "type": "string",
+      "description": "auto, openshift or kubernetes. auto detects OpenShift by its image.openshift.io API; set it when rendering without a cluster.",
+      "enum": [
+        "auto",
+        "openshift",
+        "kubernetes"
+      ]
+    },
+    "image": {
+      "type": "object",
+      "description": "Container images.",
+      "properties": {
+        "webhook": {
+          "type": "object",
+          "description": "The webhook and watcher image.",
+          "properties": {
+            "repository": {
+              "type": "string",
+              "description": "Image repository."
+            },
+            "tag": {
+              "type": "string",
+              "description": "Image tag. Empty means the chart's appVersion."
+            }
+          }
+        },
+        "postprocess": {
+          "type": "object",
+          "description": "The image the postprocess Job runs.",
+          "properties": {
+            "repository": {
+              "type": "string",
+              "description": "Image repository."
+            },
+            "tag": {
+              "type": "string",
+              "description": "Image tag. Empty means the chart's appVersion."
+            }
+          }
+        },
+        "discovery": {
+          "type": "object",
+          "description": "The aibom-discovery init container's image. Needs python3 and bash. Empty uses OpenShift AI's runtime-pytorch image where OpenShift AI is installed, and a digest-pinned pytorch/pytorch image otherwise. Setting repository requires tag.",
+          "properties": {
+            "repository": {
+              "type": "string",
+              "description": "Image repository."
+            },
+            "tag": {
+              "type": "string",
+              "description": "Image tag. Required when repository is set."
+            }
+          }
+        },
+        "pullPolicy": {
+          "type": "string",
+          "description": "Pull policy for the webhook image. Empty leaves it to Kubernetes.",
+          "enum": [
+            "",
+            "Always",
+            "IfNotPresent",
+            "Never"
+          ]
+        }
+      }
+    },
+    "replicaCount": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Webhook replicas."
+    },
+    "resources": {
+      "type": "object",
+      "description": "Webhook container resource requests and limits."
+    },
+    "certManager": {
+      "type": "object",
+      "description": "cert-manager settings for the webhook's TLS certificate.",
+      "properties": {
+        "issuerName": {
+          "type": "string",
+          "description": "Issuer the chart creates and uses."
+        },
+        "duration": {
+          "type": "string",
+          "description": "Certificate lifetime, e.g. 8760h."
+        },
+        "renewBefore": {
+          "type": "string",
+          "description": "Renew this long before expiry, e.g. 720h."
+        }
+      }
+    },
+    "webhook": {
+      "type": "object",
+      "description": "Admission webhook settings.",
+      "properties": {
+        "failurePolicy": {
+          "type": "string",
+          "description": "What the API server does when the webhook is unreachable. Ignore lets pods through uninstrumented.",
+          "enum": [
+            "Ignore",
+            "Fail"
+          ]
+        },
+        "reinvocationPolicy": {
+          "type": "string",
+          "description": "Admission reinvocation policy.",
+          "enum": [
+            "Never",
+            "IfNeeded"
+          ]
+        },
+        "namespaceSelectorLabel": {
+          "type": "object",
+          "description": "Label a namespace must carry to opt in.",
+          "properties": {
+            "key": {
+              "type": "string",
+              "description": "Label key."
+            },
+            "value": {
+              "type": "string",
+              "description": "Label value."
+            }
+          }
+        },
+        "trustedJobControllerIdentity": {
+          "type": "string",
+          "description": "Username the cluster's Job controller creates pods as, e.g. system:serviceaccount:kube-system:job-controller. Verify it on your cluster before setting it."
+        }
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "description": "NetworkPolicy letting the API server reach the webhook.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Create the NetworkPolicy."
+        }
+      }
+    },
+    "build": {
+      "type": "object",
+      "description": "In-cluster image builds with an OpenShift BuildConfig (OpenShift only).",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Build the images in-cluster."
+        },
+        "gitRepo": {
+          "type": "string",
+          "description": "Repository the build clones."
+        },
+        "gitRef": {
+          "type": "string",
+          "description": "Branch, tag or commit the build checks out."
+        }
+      }
+    },
+    "watcher": {
+      "type": "object",
+      "description": "Job and pod completion watcher.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Run the watcher. Without it no AIBOMs are compiled."
+        }
+      }
+    },
+    "finalizerCleanup": {
+      "type": "object",
+      "description": "Post-delete hook that strips the watcher's finalizers on uninstall.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Run the hook."
+        }
+      }
+    },
+    "prometheus": {
+      "type": "object",
+      "description": "Telemetry source.",
+      "properties": {
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Prometheus or Thanos Querier URL. Unset means Thanos Querier on OpenShift and none elsewhere. Empty disables telemetry."
+        }
+      }
+    },
+    "monitoringAccess": {
+      "type": "object",
+      "description": "Prometheus read access for the postprocess ServiceAccount.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Create the ClusterRoleBinding. Needs cluster-admin."
+        },
+        "clusterRole": {
+          "type": "string",
+          "description": "ClusterRole to bind. Empty means cluster-monitoring-view on OpenShift and none elsewhere."
+        }
+      }
+    },
+    "gitProvenance": {
+      "type": "object",
+      "description": "Git provenance detection.",
+      "properties": {
+        "registryLookup": {
+          "type": "boolean",
+          "description": "Read image labels from the image's registry when there's no Image object. Makes outbound requests to registries."
+        }
+      }
+    },
+    "debug": {
+      "type": "object",
+      "description": "Debug settings. Not for production.",
+      "properties": {
+        "keepPostprocessJobs": {
+          "type": "boolean",
+          "description": "Keep finished postprocess Jobs and their input ConfigMaps."
+        },
+        "telemetryAllPods": {
+          "type": "boolean",
+          "description": "Query telemetry for pods with no detected GPU."
+        }
+      }
+    }
+  }
+}
