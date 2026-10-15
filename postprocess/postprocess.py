@@ -960,7 +960,13 @@ def detect_trl_from_command(command):
 # Parallelization
 # ---------------------------------------------------------------------------
 
-_LAUNCHERS = {"accelerate", "deepspeed", "torchrun", "mpirun", "mpiexec"}
+_LAUNCHERS = {
+    "accelerate": "accelerate",
+    "deepspeed": "deepspeed",
+    "torchrun": "torchrun",
+    "mpirun": "mpirun",
+    "mpiexec": "mpirun",
+}
 _LAUNCHER_MODULES = {
     "torch.distributed.run": "torchrun",
     "torch.distributed.launch": "torchrun",
@@ -1002,15 +1008,11 @@ def _launcher_of(segment):
     if start >= len(segment):
         return None
     word = os.path.basename(segment[start])
-    if word == "mpiexec":
-        return "mpirun"
-    if word in _LAUNCHERS:
-        return word
     if word.startswith("python"):
         for i, tok in enumerate(segment[start + 1:], start + 1):
             if tok == "-m" and i + 1 < len(segment):
                 return _LAUNCHER_MODULES.get(segment[i + 1])
-    return None
+    return _LAUNCHERS.get(word)
 
 
 def _is_single_process_launch(launcher, tokens):
