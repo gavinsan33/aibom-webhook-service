@@ -199,9 +199,6 @@ def _publish_final(last_mtime):
 
 
 def main():
-    # Already installed at import time when run as a script; this also covers
-    # main() being called from anywhere else.
-    signal.signal(signal.SIGTERM, _handle_sigterm)
     _dbg(f"watching {_OUTPUT_PATH} for pod {_POD_NAMESPACE}/{_POD_NAME}, configmap={_DATA_CONFIGMAP}")
 
     last_mtime = None
