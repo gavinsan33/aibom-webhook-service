@@ -31,12 +31,8 @@ image.openshift.io API, which `helm template` without --api-versions can't see.
 {{- end -}}
 {{- end -}}
 
-{{/*
-Discovery init container image. The tag defaults to the chart's appVersion,
-like the webhook and postprocess images.
-*/}}
 {{- define "aibom-webhook.discoveryImage" -}}
-{{ .Values.image.discovery.repository }}:{{ .Values.image.discovery.tag | default .Chart.AppVersion }}
+{{ .Values.image.discovery.repository }}:{{ include "aibom-webhook.discoveryTag" . }}
 {{- end -}}
 
 {{/*
@@ -61,6 +57,10 @@ images built for that release. A checkout's Chart.yaml has appVersion "latest".
 
 {{- define "aibom-webhook.postprocessTag" -}}
 {{- .Values.image.postprocess.tag | default .Chart.AppVersion -}}
+{{- end -}}
+
+{{- define "aibom-webhook.discoveryTag" -}}
+{{- .Values.image.discovery.tag | default .Chart.AppVersion -}}
 {{- end -}}
 
 {{/*
