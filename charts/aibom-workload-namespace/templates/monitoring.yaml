@@ -18,13 +18,12 @@ metadata:
   annotations:
     service.beta.openshift.io/inject-cabundle: "true"
 {{- end }}
-{{- $monitoringRole := include "aibom-workload-namespace.monitoringClusterRole" . }}
-{{- if and .Values.monitoringAccess.enabled $monitoringRole }}
+{{- if and .Values.monitoringAccess.enabled (include "aibom-workload-namespace.openshift" .) }}
 ---
 # Grants read access to OpenShift's built-in Prometheus/Thanos Querier.
 # cluster-monitoring-view is a ClusterRole shipped by OpenShift's cluster
-# monitoring operator, not something this chart defines (other clusters set
-# monitoringAccess.clusterRole instead, or get no binding). Bound to the specific
+# monitoring operator, not something this chart defines, so other clusters get
+# no binding. Bound to the specific
 # aibom-postprocess ServiceAccount (not the whole namespace's SA group, unlike
 # the other RoleBindings in rbac.yaml) since read access to cluster-wide
 # platform metrics is broader than what any other workload in this namespace
@@ -44,7 +43,7 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ $monitoringRole }}
+  name: cluster-monitoring-view
 subjects:
   - kind: ServiceAccount
     name: aibom-postprocess
