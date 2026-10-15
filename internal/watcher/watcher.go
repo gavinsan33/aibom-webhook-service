@@ -1398,15 +1398,9 @@ func (w *Watcher) postprocessFailedEvent(ctx context.Context, namespace, trigger
 // ensureCompiledSigningKey creates the Ed25519 key a namespace's AIBOMs are
 // signed with, once, in our own namespace. It's generated here rather than by
 // the workload-namespace chart so the private key never exists anywhere a
-// workload pod can mount it (#149). An existing Secret is left alone.
+// workload pod can mount it (#149). An existing Secret is left alone (the
+// create fails with AlreadyExists), so the webhook never needs to read keys.
 func (w *Watcher) ensureCompiledSigningKey(ctx context.Context, name string) error {
-	_, err := w.clientset.CoreV1().Secrets(w.namespace).Get(ctx, name, metav1.GetOptions{})
-	if err == nil {
-		return nil
-	}
-	if !errors.IsNotFound(err) {
-		return err
-	}
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return err

@@ -51,4 +51,4 @@ Namespaces installed before signing existed have no Secret. The watcher treats t
 
 The HMAC keys carry no long-term value: losing one costs only the in-flight pods described above. Back up `aibom-compiled-signing-key-<namespace>` if you want later AIBOMs to keep verifying against the same published key after a loss of the namespace. It is a private key, so store it in your secrets manager, not in Git.
 
-The watcher's access to the HMAC Secrets is limited by `resourceNames`, in namespaces that installed the workload chart. In its own namespace it can read and create Secrets, which is how it generates the Ed25519 keys. The `aibom-postprocess` ServiceAccount has no API grant on any Secret. The kubelet mounts the key into the Job.
+The watcher's access to the HMAC Secrets is limited by `resourceNames`, in namespaces that installed the workload chart. In its own namespace it can create Secrets but not read them, which is enough to generate the Ed25519 keys. The `aibom-postprocess` ServiceAccount has no API grant on any Secret. The kubelet mounts the key into the Job.
