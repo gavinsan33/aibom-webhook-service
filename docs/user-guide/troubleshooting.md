@@ -16,7 +16,7 @@ The result should carry the `aibom.io/instrumented` label, and a `mutating pod .
 
 ## Pods stay in `Init:ImagePullBackOff`
 
-The `aibom-discovery` init container can't pull its image. Unless `image.discovery` is set, it is `{{ registry }}/aibom-discovery` at the chart's version, which needs egress to Quay. Check the event:
+The `aibom-discovery` init container can't pull its image. Unless `image.discovery` is set, it is `quay.io/project-aibom/aibom-discovery` at the chart's version, which needs egress to Quay. Check the event:
 
 ```bash
 oc describe pod <pod-name> -n <namespace>

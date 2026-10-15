@@ -21,7 +21,7 @@
 
 Telemetry is collected only for pods with a detected GPU.
 
-Instrumented pods pull the discovery image, `{{ registry }}/aibom-discovery` at the chart's version: a small UBI image (about 230 MB) with `python3`, `bash`, `lscpu` and `lsblk`. If the cluster can't reach Quay, for example because it has no egress, point the chart at a copy it can pull:
+Instrumented pods pull the discovery image, `quay.io/project-aibom/aibom-discovery` at the chart's version: a small UBI image (about 230 MB) with `python3`, `bash`, `lscpu` and `lsblk`. If the cluster can't reach Quay, for example because it has no egress, point the chart at a copy it can pull:
 
 ```bash
 helm upgrade --install aibom-webhook oci://quay.io/project-aibom/aibom-webhook \
