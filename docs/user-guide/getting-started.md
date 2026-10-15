@@ -10,7 +10,7 @@
 
 | Dependency | Needed for | Required? | Without it |
 |------------|-----------|-----------|------------|
-| [cert-manager](https://cert-manager.io/) | Issues and renews the webhook's TLS certificate | Yes | The webhook chart can't issue its certificate, so the API server can't call it. |
+| [cert-manager](https://cert-manager.io/) | Issues and renews the webhook's TLS certificate outside OpenShift | Only off OpenShift | The webhook chart can't issue its certificate, so the API server can't call it. On OpenShift the built-in service-ca operator issues it instead; set `tls.provider=cert-manager` to use cert-manager there. |
 | A pullable image with `python3` and `bash` | The `aibom-discovery` init container | Yes | Instrumented pods fail to start. Fail-open does not cover this. See below. |
 | Prometheus Operator CRDs (`monitoring.coreos.com/v1` `PodMonitor`) | Scraping vLLM's `/metrics` for inference performance | Yes, unless vLLM metrics are skipped | The namespace chart install fails outright. Skip it with `--skip-vllm-metrics`, or `--set vllmMetrics.enabled=false` with Helm. |
 | A Prometheus API endpoint (`prometheus.url`) | All telemetry queries | For telemetry | Telemetry comes back empty. On OpenShift it defaults to Thanos Querier in `openshift-monitoring`. Elsewhere it is empty until you set it. |
@@ -54,6 +54,7 @@ Without `--version`, Helm installs the newest release. Pass `--version=X.Y.Z` to
 The commands on this page use `oc`. `kubectl` takes the same arguments. Other differences:
 
 - **No impersonation.** `system:admin` is an OpenShift identity. Run as a cluster-admin and drop `--kube-as-user=system:admin` and `--as=system:admin`.
+- **Install cert-manager.** It issues the webhook's certificate; OpenShift uses its built-in service CA instead.
 - **Set `prometheus.url`.** There is no default outside OpenShift.
 - **Prometheus access.** Only needed if Prometheus checks the bearer token. The chart binds nothing here, so bind the webhook namespace's `aibom-postprocess` ServiceAccount to a ClusterRole that grants the access your Prometheus requires. Without the Prometheus Operator, also set `vllmMetrics.enabled=false` on the namespace chart.
 - **TLS.** There is no service-ca bundle, so an HTTPS Prometheus must have a certificate the system trust store accepts.
