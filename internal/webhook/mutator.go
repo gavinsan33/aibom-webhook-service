@@ -66,11 +66,18 @@ type PatchOperation struct {
 	Value interface{} `json:"value,omitempty"`
 }
 
+// Default images for the injected containers, pinned by digest so the same
+// release always runs the same image. Tags alone can be repushed.
+const (
+	DefaultDiscoveryImage      = "pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime@sha256:e5c32997194edfc6fb0235223d1cd0433056045a468e7dfeaac390a3fcf8ae6d"
+	DefaultDatasetSidecarImage = "python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1"
+)
+
 func NewMutator(discoveryImage string, datasetDetection bool, trustedJobControllerIdentity string) *Mutator {
 	return &Mutator{
 		DiscoveryImage:               discoveryImage,
 		DatasetDetection:             datasetDetection,
-		DatasetSidecarImage:          "python:3.12-slim",
+		DatasetSidecarImage:          DefaultDatasetSidecarImage,
 		TrustedJobControllerIdentity: trustedJobControllerIdentity,
 	}
 }
