@@ -110,7 +110,7 @@ roleRef:
 subjects:
   - kind: Group
     apiGroup: rbac.authorization.k8s.io
-    name: system:serviceaccounts:{{ .Release.Namespace }}
+    name: "system:serviceaccounts:{{ .Release.Namespace }}"
 ---
 # Lets the aibom-discovery init container (running as the workload's own
 # ServiceAccount) read the InferenceService that owns it, to resolve model
@@ -141,7 +141,7 @@ roleRef:
 subjects:
   - kind: Group
     apiGroup: rbac.authorization.k8s.io
-    name: system:serviceaccounts:{{ .Release.Namespace }}
+    name: "system:serviceaccounts:{{ .Release.Namespace }}"
 {{- if include "aibom-workload-namespace.openshift" . }}
 ---
 # Grants pods in this namespace pull access to images in the aibom-system
@@ -160,5 +160,5 @@ roleRef:
 subjects:
   - kind: Group
     apiGroup: rbac.authorization.k8s.io
-    name: system:serviceaccounts:{{ .Release.Namespace }}
+    name: "system:serviceaccounts:{{ .Release.Namespace }}"
 {{- end }}
