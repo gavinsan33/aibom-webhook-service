@@ -20,7 +20,7 @@ except ImportError:
 # starting at all. Every stage that touches something the workload or its
 # image controls (a missing binary, a FIFO on the model PVC, a stalled API
 # call) therefore runs through _run_stage, which turns an exception or a
-# timeout into a warning plus a fallback value so whatever was collected still
+# timeout into a warning plus a None result so whatever was collected still
 # gets written. The mutator's `|| echo ...` wrapper around this script covers
 # the rest (python3 missing, an error before the first stage).
 _STAGE_TIMEOUT_S = 60
@@ -30,9 +30,9 @@ class _StageTimeout(Exception):
     pass
 
 
-def _run_stage(name, fn, on_error=lambda exc: None, timeout_s=None):
+def _run_stage(name, fn, timeout_s=None):
     """Run fn() under a SIGALRM deadline; on any exception (including the
-    timeout) warn and return on_error(exc). SIGALRM interrupts a blocking
+    timeout) warn and return None. SIGALRM interrupts a blocking
     syscall such as open() on a FIFO, which nothing else in-process can."""
     timeout_s = timeout_s or _STAGE_TIMEOUT_S
 
@@ -44,7 +44,7 @@ def _run_stage(name, fn, on_error=lambda exc: None, timeout_s=None):
         return fn()
     except Exception as exc:
         print(f"WARNING: {name} failed, continuing without it: {exc}", file=sys.stderr)
-        return on_error(exc)
+        return None
     finally:
         signal.alarm(0)
         signal.signal(signal.SIGALRM, previous)
@@ -321,7 +321,6 @@ pod_namespace = os.environ.get("POD_NAMESPACE", "")
 configmap_name = _run_stage(
     "ConfigMap name lookup",
     lambda: k8s_api.resolve_data_configmap_name() if k8s_api else "",
-    lambda exc: "",
 )
 
 # Canonical (sorted-key, no incidental whitespace) serialization: this exact
