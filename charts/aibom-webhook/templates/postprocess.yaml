@@ -11,7 +11,7 @@ metadata:
 ---
 # What the watcher does in its own namespace: create and clean up postprocess
 # Jobs and their input ConfigMaps, and generate each workload namespace's
-# signing key on first use (get-then-create, so no update).
+# signing key on first use (create-only; AlreadyExists means it's there).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -26,7 +26,7 @@ rules:
     verbs: ["get", "create", "update", "patch", "delete"]
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["get", "create"]
+    verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
