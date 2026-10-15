@@ -243,7 +243,7 @@ deploy-buildconfig *args: _check-auth
     values_args=()
     [[ -n "$values_file" ]] && values_args=(-f "$values_file")
     gitref_args=()
-    [[ "$version" = "latest" ]] || gitref_args=(--set "build.gitRef=$version")
+    [[ "$version" = "latest" ]] || gitref_args=(--set-string "build.gitRef=$version")
     first_install=false
     helm status aibom-webhook -n {{ webhook_namespace }} >/dev/null 2>&1 || first_install=true
     helm upgrade --install aibom-webhook charts/aibom-webhook -n {{ webhook_namespace }} "$ns_flag" \
@@ -252,7 +252,7 @@ deploy-buildconfig *args: _check-auth
         --set build.enabled=true \
         --set image.webhook.repository="image-registry.openshift-image-registry.svc:5000/{{ webhook_namespace }}/aibom-webhook-service" \
         --set image.postprocess.repository="image-registry.openshift-image-registry.svc:5000/{{ webhook_namespace }}/aibom-postprocess" \
-        --set image.webhook.tag="$version" --set image.postprocess.tag="$version" "${gitref_args[@]}"
+        --set-string image.webhook.tag="$version" --set-string image.postprocess.tag="$version" "${gitref_args[@]}"
     if [[ "$first_install" = true ]]; then
         # The BuildConfigs' ConfigChange trigger already auto-fired an initial build the
         # moment they were just created above — starting another would just double build
@@ -374,7 +374,7 @@ deploy-local *args: _check-auth
         --set build.enabled=false \
         --set image.webhook.repository="${repo}/aibom-webhook-service" \
         --set image.postprocess.repository="${repo}/aibom-postprocess" \
-        --set image.webhook.tag="$version" --set image.postprocess.tag="$version"
+        --set-string image.webhook.tag="$version" --set-string image.postprocess.tag="$version"
     {{ kubectl }} -n {{ webhook_namespace }} rollout restart deployment/aibom-webhook
     {{ kubectl }} -n {{ webhook_namespace }} rollout status deployment/aibom-webhook --timeout=120s
     echo "NOTE: run 'just setup-namespace <namespace>' for each workload namespace"
@@ -423,7 +423,7 @@ deploy *args: _check-auth
         --set build.enabled=false \
         --set image.webhook.repository="${repo}/aibom-webhook-service" \
         --set image.postprocess.repository="${repo}/aibom-postprocess" \
-        --set image.webhook.tag="$version" --set image.postprocess.tag="$version"
+        --set-string image.webhook.tag="$version" --set-string image.postprocess.tag="$version"
     {{ kubectl }} -n {{ webhook_namespace }} rollout restart deployment/aibom-webhook
     {{ kubectl }} -n {{ webhook_namespace }} rollout status deployment/aibom-webhook --timeout=120s
     echo "NOTE: run 'just setup-namespace <namespace>' for each workload namespace"
