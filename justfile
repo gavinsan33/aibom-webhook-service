@@ -252,13 +252,15 @@ deploy-buildconfig *args: _check-auth
         --set build.enabled=true \
         --set image.webhook.repository="image-registry.openshift-image-registry.svc:5000/{{ webhook_namespace }}/aibom-webhook-service" \
         --set image.postprocess.repository="image-registry.openshift-image-registry.svc:5000/{{ webhook_namespace }}/aibom-postprocess" \
-        --set-string image.webhook.tag="$version" --set-string image.postprocess.tag="$version" "${gitref_args[@]}"
+        --set image.discovery.repository="image-registry.openshift-image-registry.svc:5000/{{ webhook_namespace }}/aibom-discovery" \
+        --set-string image.webhook.tag="$version" --set-string image.postprocess.tag="$version" \
+        --set-string image.discovery.tag="$version" "${gitref_args[@]}"
     if [[ "$first_install" = true ]]; then
         # The BuildConfigs' ConfigChange trigger already auto-fired an initial build the
         # moment they were just created above — starting another would just double build
         # time. Wait on that auto-triggered build (always numbered -1) instead.
         echo "first install: waiting on the auto-triggered initial builds instead of starting redundant ones"
-        for bc in aibom-webhook-service aibom-postprocess; do
+        for bc in aibom-webhook-service aibom-postprocess aibom-discovery; do
             for i in $(seq 1 30); do
                 oc -n {{ webhook_namespace }} get "build/${bc}-1" >/dev/null 2>&1 && break
                 sleep 1
@@ -269,7 +271,7 @@ deploy-buildconfig *args: _check-auth
         # latest is intentionally mutable — always rebuild it. Any other version is an
         # immutable per-commit tag: if it's already been built (and not since pruned),
         # rebuilding would just reproduce the same content, so skip it.
-        for bc in aibom-webhook-service aibom-postprocess; do
+        for bc in aibom-webhook-service aibom-postprocess aibom-discovery; do
             if [ "$version" != "latest" ] && oc -n {{ webhook_namespace }} get istag "${bc}:${version}" >/dev/null 2>&1; then
                 echo "${bc}:${version} already built — skipping rebuild"
             else
