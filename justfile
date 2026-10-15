@@ -9,7 +9,7 @@ binary_name := "webhook-server"
 webhook_namespace := "project-aibom"
 # quay.io org/user that deploy/deploy-local/chart-push push to and pull from by default.
 # Override per-invocation with --repo=<repo>, or with `just --set default_repo <repo> <recipe>`.
-default_repo := "quay.io/gsanders"
+default_repo := "quay.io/project-aibom"
 # Cluster flavor the deploy recipes target: openshift (default) or kubernetes.
 # kubernetes uses kubectl and doesn't impersonate system:admin, an OpenShift
 # identity; a cluster-admin kubeconfig is expected instead.
@@ -384,7 +384,7 @@ deploy-local *args: _check-auth
 # Quay's GitHub build triggers are set up (see README) to auto-build both
 # images on every push to main: nothing runs locally at all, this just tells
 # the cluster where to pull from. Also matches values.yaml's own defaults
-# (quay.io/gsanders, tag latest), so `just deploy` with no arguments is
+# (quay.io/project-aibom, tag latest), so `just deploy` with no arguments is
 # equivalent to a plain `helm upgrade --install` with no --set overrides —
 # repo/version only matter when deploying a different quay org or pinning to
 # an immutable SHA tag instead of the mutable "latest" Quay's main trigger

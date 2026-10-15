@@ -16,12 +16,12 @@ platform: auto
 
 image:
   webhook:
-    repository: quay.io/gsanders/aibom-webhook-service
+    repository: quay.io/project-aibom/aibom-webhook-service
     # Empty means the chart's appVersion: the release's own tag in a published
     # chart, "latest" from a checkout.
     tag: ""
   postprocess:
-    repository: quay.io/gsanders/aibom-postprocess
+    repository: quay.io/project-aibom/aibom-postprocess
     tag: ""
   # Image for the aibom-discovery init container injected into instrumented
   # pods (see CLAUDE.md's "Pod Matching and Injection") — unlike webhook/
