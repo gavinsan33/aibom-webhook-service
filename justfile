@@ -180,7 +180,7 @@ _check-auth:
 # specifically trying to avoid needing.
 #
 # Install/upgrade the webhook chart, build both images in-cluster from source, and
-# roll out the result. Requires cert-manager already installed in the cluster.
+# roll out the result. The webhook certificate comes from OpenShift's service-ca.
 # Builds every time: a BuildConfig's ConfigChange trigger only fires automatically
 # on its *initial* creation, never on later edits (e.g. a new tag) — so relying on
 # the trigger alone would leave subsequent deploys pointing at an unbuilt tag.
@@ -444,7 +444,7 @@ deploy *args: _check-auth
 # route — no auth/TLS needed there, which postprocess.py already tolerates
 # (see SERVICE_ACCOUNT_TOKEN_FILE/SERVICE_CA_CERT_FILE's missing-file
 # fallbacks). Requires the kind cluster to already be up with cert-manager
-# installed (templates/certificates.yaml still needs it).
+# installed (kind isn't OpenShift, so templates/certificates.yaml needs it).
 
 kind_cluster_name := "mock-openshift"
 kind_webhook_img := "localhost/aibom-webhook-service:dev"
