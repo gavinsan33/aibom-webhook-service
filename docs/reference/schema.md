@@ -61,7 +61,7 @@ It is owned by the AIBOM, so deleting the AIBOM deletes it. Like the AIBOM's, it
 
 Values are in raw base units (bytes, bytes per second, cores, MiB, watts, percent, seconds), not the scaled GiB, Mbps and MBps the AIBOM reports. Timestamps are Unix seconds. Per-GPU series need dcgm-exporter's pod mapping; without it the GPU metrics are absent.
 
-**Resolution.** The series covers each pod's full run, with no cold-start exclusion. The step is the run length divided by 200, but never shorter than the 30-second scrape interval, so a metric has up to about 200 points and runs under about 100 minutes have fewer: a 20-minute run has 40. The whole object is capped at 900 KB. If it would be larger, the points are merged into coarser steps, down to no fewer than 100 per line, and only then are the per-pod `series` dropped, largest metric first. Typical sizes are about 40 KB for one pod with one GPU over 20 minutes and under 600 KB for 4 pods with 8 GPUs each over 12 hours.
+**Resolution.** The series covers each pod's full run at up to about 200 points per metric; on very large runs the per-pod `series` may be dropped to fit the size cap.
 
 **Integrity.** The object isn't signed itself. The AIBOM's signed `spec.data.telemetry_series_ref` holds the SHA-256 and size of `spec.seriesJson`, and `oc aibom describe` checks the object against them on its `Telemetry Series:` line. It reports a match as fully verified only when the AIBOM's own signature is valid, since without that the digest could be forged along with the series. Only the postprocess Job's ServiceAccount can create these objects.
 
