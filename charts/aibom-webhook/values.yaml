@@ -25,14 +25,13 @@ image:
     tag: ""
   # Image for the aibom-discovery init container injected into instrumented
   # pods (see CLAUDE.md's "Pod Matching and Injection"): a small UBI image
-  # (discovery/Dockerfile) built with the others but never by this project's
-  # BuildConfig. Any image with python3, bash, lscpu and lsblk works, since
-  # generate_snapshot.py uses stdlib only. The nvidia-smi binary and its NVML
-  # driver library are NOT part of any base image — for GPU pods the NVIDIA
-  # Container Toolkit injects them from the node's driver at container start,
-  # triggered by the nvidia.com/gpu claim the webhook mirrors onto this init
-  # container (see CLAUDE.md); CPU-only pods simply get "Not available" for the
-  # GPU fields. Instrumented pods can't start if this image can't be pulled.
+  # (discovery/Dockerfile) built with the others. Any image with python3, bash,
+  # lscpu and lsblk works, since generate_snapshot.py uses stdlib only. The
+  # nvidia-smi binary and its NVML driver library are NOT part of any base
+  # image — for GPU pods the NVIDIA Container Toolkit injects them from the
+  # node's driver at container start, triggered by the nvidia.com/gpu claim the
+  # webhook mirrors onto this init container (see CLAUDE.md); CPU-only pods
+  # simply get "Not available" for the GPU fields. Instrumented pods can't start if this image can't be pulled.
   discovery:
     repository: quay.io/project-aibom/aibom-discovery
     tag: ""
