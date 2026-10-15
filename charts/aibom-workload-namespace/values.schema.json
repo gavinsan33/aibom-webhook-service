@@ -1,0 +1,63 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AIBOM Workload Namespace",
+  "type": "object",
+  "properties": {
+    "aibomSystemNamespace": {
+      "type": "string",
+      "description": "Namespace the aibom-webhook chart was installed into.",
+      "minLength": 1
+    },
+    "platform": {
+      "type": "string",
+      "description": "auto, openshift or kubernetes. auto detects OpenShift by its image.openshift.io API; set it when rendering without a cluster.",
+      "enum": [
+        "auto",
+        "openshift",
+        "kubernetes"
+      ]
+    },
+    "vllmMetrics": {
+      "type": "object",
+      "description": "vLLM metrics scraping.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Add a PodMonitor scraping vLLM's /metrics on port 8000. Needs the Prometheus Operator CRDs."
+        }
+      }
+    },
+    "scripts": {
+      "type": "object",
+      "description": "Script contents, only for installing from a checkout with --set-file. Leave empty for a packaged chart, which embeds them.",
+      "properties": {
+        "generateSnapshot": {
+          "type": "string",
+          "description": "Contents of generate_snapshot.py."
+        },
+        "runtimeDetector": {
+          "type": "string",
+          "description": "Contents of runtime_detector.py."
+        },
+        "k8sApi": {
+          "type": "string",
+          "description": "Contents of k8s_api.py."
+        },
+        "datasetSidecar": {
+          "type": "string",
+          "description": "Contents of dataset_sidecar.py."
+        }
+      }
+    },
+    "test": {
+      "type": "object",
+      "description": "helm test settings.",
+      "properties": {
+        "image": {
+          "type": "string",
+          "description": "Image for the test pod; needs python3. Empty means the postprocess image at this chart's appVersion."
+        }
+      }
+    }
+  }
+}
