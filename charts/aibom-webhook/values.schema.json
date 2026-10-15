@@ -46,7 +46,7 @@
         },
         "discovery": {
           "type": "object",
-          "description": "The aibom-discovery init container's image. Needs python3 and bash. Empty uses OpenShift AI's runtime-pytorch image where OpenShift AI is installed, and a digest-pinned pytorch/pytorch image otherwise. Setting repository requires tag.",
+          "description": "The aibom-discovery init container's image. Any image with python3, bash, lscpu and lsblk works.",
           "properties": {
             "repository": {
               "type": "string",
@@ -54,7 +54,7 @@
             },
             "tag": {
               "type": "string",
-              "description": "Image tag. Required when repository is set."
+              "description": "Image tag. Empty means the chart's appVersion."
             }
           }
         },

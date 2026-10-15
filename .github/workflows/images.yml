@@ -1,6 +1,6 @@
 name: Build images
 
-# Every push to main rebuilds both images as :latest and :<short sha>, which
+# Every push to main rebuilds the three images as :latest and :<short sha>, which
 # `just deploy` and the dev charts from chart-publish.yml use. Release tags
 # (:X.Y.Z) come from release.yml instead. This replaces Quay's GitHub build
 # triggers, whose generated deploy key GitHub rejects as too short.
@@ -21,6 +21,8 @@ jobs:
             file: Dockerfile
           - image: aibom-postprocess
             file: postprocess/Dockerfile
+          - image: aibom-discovery
+            file: discovery/Dockerfile
     steps:
       - uses: actions/checkout@v4
 
