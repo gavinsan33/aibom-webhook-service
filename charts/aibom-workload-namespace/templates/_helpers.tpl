@@ -9,15 +9,3 @@ aibom-webhook chart's helper of the same name.
 {{- else if ne $p "kubernetes" -}}{{ fail (printf "platform must be auto, openshift or kubernetes, not %q" $p) }}
 {{- end -}}
 {{- end -}}
-
-{{/*
-ClusterRole granting Prometheus read access: monitoringAccess.clusterRole, else
-cluster-monitoring-view on OpenShift. Empty means no binding is created.
-*/}}
-{{- define "aibom-workload-namespace.monitoringClusterRole" -}}
-{{- if .Values.monitoringAccess.clusterRole -}}
-{{ .Values.monitoringAccess.clusterRole }}
-{{- else if include "aibom-workload-namespace.openshift" . -}}
-cluster-monitoring-view
-{{- end -}}
-{{- end -}}
