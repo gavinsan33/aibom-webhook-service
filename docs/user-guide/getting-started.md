@@ -1,7 +1,3 @@
----
-render_macros: true
----
-
 # Getting Started
 
 ## Prerequisites
@@ -28,8 +24,8 @@ Telemetry is collected only for pods with a detected GPU.
 The discovery image needs only `python3` and `bash`. On a cluster without OpenShift AI, point the chart at any image the cluster can pull:
 
 ```bash
-helm upgrade --install aibom-webhook oci://{{ registry }}/aibom-webhook \
-  -n {{ webhook_namespace }} --create-namespace --kube-as-user=system:admin \
+helm upgrade --install aibom-webhook oci://quay.io/gsanders/aibom-webhook \
+  -n project-aibom --create-namespace --kube-as-user=system:admin \
   --set image.discovery.repository=pytorch/pytorch \
   --set image.discovery.tag=2.2.0-cuda12.1-cudnn8-runtime
 ```
@@ -41,8 +37,8 @@ Supported workload types are Job, JobSet, PyTorchJob and RayJob, plus any pod th
 Both charts are published as OCI artifacts, so no checkout of this repository is needed:
 
 ```bash
-helm upgrade --install aibom-webhook oci://{{ registry }}/aibom-webhook \
-  -n {{ webhook_namespace }} --create-namespace --kube-as-user=system:admin
+helm upgrade --install aibom-webhook oci://quay.io/gsanders/aibom-webhook \
+  -n project-aibom --create-namespace --kube-as-user=system:admin
 ```
 
 The chart installs cluster-scoped RBAC, which a namespace-scoped admin cannot grant themselves, so run it as a cluster-admin. The commands here use `--kube-as-user=system:admin` to do that by impersonation, which needs impersonation rights and so won't work on managed clusters such as ROSA or ARO. There, log in as a cluster-admin user and drop `--kube-as-user=system:admin` from the `helm` commands and `--as=system:admin` from the `oc` commands.
@@ -51,11 +47,11 @@ Without `--version`, Helm resolves to the most recently published mutable tag. T
 
 ## Enable a workload namespace
 
-Each namespace that runs instrumented workloads needs the `aibom.io/enabled` label, image pull access to the webhook's namespace (`{{ webhook_namespace }}`), the `aibom-scripts` ConfigMap, and RBAC that lets workload pods and the postprocess Job write their data through the Kubernetes API. The namespace must already exist.
+Each namespace that runs instrumented workloads needs the `aibom.io/enabled` label, image pull access to the webhook's namespace (`project-aibom`), the `aibom-scripts` ConfigMap, and RBAC that lets workload pods and the postprocess Job write their data through the Kubernetes API. The namespace must already exist.
 
 ```bash
 oc label namespace <namespace> aibom.io/enabled=true --overwrite
-helm upgrade --install aibom-ns-<namespace> oci://{{ registry }}/aibom-workload-namespace \
+helm upgrade --install aibom-ns-<namespace> oci://quay.io/gsanders/aibom-workload-namespace \
   -n <namespace> --kube-as-user=system:admin
 ```
 
@@ -95,7 +91,7 @@ Uninstall in reverse order, namespace first and then the webhook:
 ```bash
 oc label namespace <namespace> aibom.io/enabled- --as=system:admin
 helm uninstall aibom-ns-<namespace> -n <namespace> --kube-as-user=system:admin
-helm uninstall aibom-webhook -n {{ webhook_namespace }} --kube-as-user=system:admin
+helm uninstall aibom-webhook -n project-aibom --kube-as-user=system:admin
 ```
 
 The `aiboms.aibom.io` CRD and any existing AIBOM resources are left in place.
