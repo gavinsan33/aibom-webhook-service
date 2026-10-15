@@ -81,7 +81,6 @@ const (
 	resyncPeriod      = 30 * time.Second
 	maxJobNameLength  = aibomdata.MaxJobNameLength
 	postprocessSuffix = aibomdata.PostprocessSuffix
-	configMapSuffix   = aibomdata.ConfigMapSuffix
 
 	// failedPostprocessTTLSeconds is how long a failed postprocess Job (and its
 	// pod logs) stays on the cluster for inspection before Kubernetes' TTL
