@@ -903,14 +903,16 @@ def detect_vllm_from_command(command):
 _VLLM_IMAGE_RE = re.compile(r"(?:^|/)vllm-openai$|(?:^|/)vllm/[^/]+$")
 
 
+def _strip_tag_digest(ref):
+    """Image reference without its :tag and @digest (a registry :port stays)."""
+    head, sep, last = ref.split("@", 1)[0].rpartition("/")
+    return head + sep + last.split(":", 1)[0]
+
+
 def _is_vllm_image(image):
     if not image:
         return False
-    repo = image.split("@", 1)[0]
-    last = repo.rsplit("/", 1)[-1]
-    if ":" in last:
-        repo = repo[:len(repo) - len(last)] + last.split(":", 1)[0]
-    return bool(_VLLM_IMAGE_RE.search(repo))
+    return bool(_VLLM_IMAGE_RE.search(_strip_tag_digest(image)))
 
 
 def _detect_vllm_from_entrypoint_args(container):
@@ -1147,11 +1149,7 @@ def _parse_storage_uri(uri):
         if m:
             return m.group(1), m.group(2), "hf_uri"
     elif uri.startswith("oci://"):
-        ref = uri[len("oci://"):]
-        ref = ref.split("@", 1)[0]
-        last = ref.rsplit("/", 1)[-1]
-        if ":" in last:
-            ref = ref[: len(ref) - len(last)] + last.split(":", 1)[0]
+        ref = _strip_tag_digest(uri[len("oci://"):])
         if ref:
             return ref, None, "oci_uri"
     return None
@@ -1635,9 +1633,7 @@ _REGISTRY_MANIFEST_ACCEPT = ", ".join((
 def _parse_image_ref(ref):
     """(registry host, repository) of an image reference, filling in Docker
     Hub's implicit host and `library/` prefix. None for a bare digest."""
-    name = re.sub(r"^[a-z-]+://", "", ref or "").split("@", 1)[0]  # docker-pullable://
-    if ":" in name.rsplit("/", 1)[-1]:
-        name = name.rsplit(":", 1)[0]
+    name = _strip_tag_digest(re.sub(r"^[a-z-]+://", "", ref or ""))  # docker-pullable://
     if not name or name.startswith("sha256"):
         return None
     first, _, rest = name.partition("/")
