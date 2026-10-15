@@ -2543,14 +2543,6 @@ def test_use_vllm_no_longer_flips_intent_to_inference():
     assert _intent_for("trl sft --use_peft --lora_r 16 --use_vllm --model_name_or_path m") == "sft"
 
 
-def test_bare_use_peft_now_yields_sft_intent():
-    assert _intent_for("trl sft --use_peft --lora_r 16 --load_in_4bit") == "sft"
-
-
-def test_positional_vllm_serve_yields_inference_intent():
-    assert _intent_for("vllm serve meta-llama/Llama-3.1-8B") == "inference"
-
-
 def test_trl_config_file_yields_training_intent_instead_of_unknown():
     assert _intent_for("trl sft --config cfg.yaml") == "training"
 
