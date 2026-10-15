@@ -17,16 +17,6 @@ Run these in order, as a cluster-admin, for each upgrade:
 
 Existing AIBOMs are not changed by any of this.
 
-## Changed defaults
-
-Upgrading past the release that added platform detection (the `platform` value) changes a few things on existing installs:
-
-- `prometheus.url` and `debug.*` take effect again. The chart had stopped passing them to the webhook, so the binary's defaults (Thanos Querier, debug off) applied whatever was set.
-- The `grafana.*` values and `resource_utilization.grafana_links` are removed. A values file that still sets `grafana` is ignored.
-- With `image.discovery` unset, a cluster without OpenShift AI now gets `pytorch/pytorch` instead of the OpenShift AI ImageStream it couldn't pull. A cluster with OpenShift AI is unchanged. If you had set `image.discovery.repository`, also set `image.discovery.tag`, since its `pytorch` default is gone.
-- Postprocess Jobs make HTTPS requests to registries for images with no `Image` object. Set `gitProvenance.registryLookup=false` to stop them.
-- If you render the charts offline, set `platform`. Otherwise the OpenShift-only resources, such as the service-ca ConfigMap and the `cluster-monitoring-view` binding, are dropped.
-
 ## Versions
 
 Both charts are at version `0.1.0`. The plain `0.1.0` tag is republished on every chart push, and each push also gets an immutable `0.1.0-<git-sha>` tag. With no `--version`, Helm takes the mutable tag. To make an upgrade repeatable, pin the SHA tag. See [Getting Started](../user-guide/getting-started.md).
