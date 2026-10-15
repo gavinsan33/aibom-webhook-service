@@ -379,16 +379,16 @@ deploy-local *args: _check-auth
     {{ kubectl }} -n {{ webhook_namespace }} rollout status deployment/aibom-webhook --timeout=120s
     echo "NOTE: run 'just setup-namespace <namespace>' for each workload namespace"
 
-# The seamless default: install/upgrade the chart against images Quay already
+# The seamless default: install/upgrade the chart against images CI already
 # built — no build, no push, just a helm install pointing at a tag. Works once
-# Quay's GitHub build triggers are set up (see README) to auto-build both
-# images on every push to main: nothing runs locally at all, this just tells
+# .github/workflows/images.yml has built both images on a push to main
+# (see docs/reference/development.md): nothing runs locally at all, this just tells
 # the cluster where to pull from. Also matches values.yaml's own defaults
 # (quay.io/project-aibom, tag latest), so `just deploy` with no arguments is
 # equivalent to a plain `helm upgrade --install` with no --set overrides —
 # repo/version only matter when deploying a different quay org or pinning to
-# an immutable SHA tag instead of the mutable "latest" Quay's main trigger
-# keeps overwriting. For in-cluster builds instead, see `just deploy-buildconfig`.
+# an immutable SHA tag instead of the mutable "latest" each main build
+# overwrites. For in-cluster builds instead, see `just deploy-buildconfig`.
 # Usage: just deploy [--repo=<repo>] [--version=<tag>] [--values=<file>] [--skip-crds]
 [group('deploy')]
 deploy *args: _check-auth
