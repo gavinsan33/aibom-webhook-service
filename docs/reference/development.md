@@ -8,7 +8,7 @@ There are three ways to get images into the cluster — pick whichever fits:
 
 | Situation | Recipe |
 |---|---|
-| Default — Quay's GitHub build triggers already build both images on every push to `main` | `just deploy` |
+| Default — `.github/workflows/images.yml` already builds both images on every push to `main` | `just deploy` |
 | No egress to quay.io, or no external registry account | `just deploy-buildconfig` (in-cluster OpenShift BuildConfig) |
 | Iterating locally, don't want to wait on Quay or a git push | `just deploy-local --repo=<repo>` |
 
@@ -17,7 +17,7 @@ The recipes target OpenShift: they call `oc` and impersonate `system:admin`. Set
 If your account doesn't have cluster-scoped permission to create/patch CRDs, pass `--skip-crds` to any of the three; the `aiboms.aibom.io` CRD and `project-aibom` namespace must then already exist (created once via `oc apply -f charts/aibom-webhook/crds/aibom-crd.yaml` and `oc create namespace project-aibom`).
 
 ```bash
-# Default: pull whatever Quay's build triggers most recently built and pushed
+# Default: pull whatever images.yml most recently built and pushed
 just deploy
 
 # Pin to an immutable SHA tag instead of the mutable "latest" Quay keeps overwriting
@@ -33,7 +33,7 @@ just deploy-buildconfig
 just deploy-buildconfig --version=<older-sha>
 
 # Or, build locally and push to quay.io yourself — for iterating without
-# waiting on Quay's build trigger or pushing a commit
+# waiting on a CI build or pushing a commit
 just deploy-local --repo=quay.io/<your-org>
 
 # Set up a workload namespace (label, image pull access, scripts ConfigMap)
@@ -52,24 +52,17 @@ To remove a workload namespace's setup: `just uninstall-namespace --namespace=<n
 
 To remove the deployment: `just undeploy` (runs `helm uninstall aibom-webhook`, after a confirmation prompt). Helm installs CRDs once but never upgrades or removes them automatically, so `just deploy`/`deploy-buildconfig`/`deploy-local` each explicitly `oc apply -f charts/aibom-webhook/crds/aibom-crd.yaml` before the `helm upgrade --install` step (skipped along with everything else cluster-scoped when `--skip-crds` is passed — see that flag's own note below). `helm uninstall` still leaves the CRD (and any AIBOM custom resources) in place regardless.
 
-## Setting Up Quay Auto-Build
+## Image builds
 
-One-time setup, done in the Quay web UI (not scriptable — it requires a GitHub OAuth authorization). Repeat for both `aibom-webhook-service` and `aibom-postprocess` repos on quay.io:
-
-1. Repo → **Builds** tab → **Add Build Trigger** → **GitHub Repository Push**, authorizing Quay against GitHub if prompted
-2. Source repo: this repo; branch filter restricted to `main` only
-3. Dockerfile location: `/Dockerfile` for `aibom-webhook-service`, `/postprocess/Dockerfile` for `aibom-postprocess`; context `/` for both (the postprocess Dockerfile `COPY`s files from outside its own directory)
-4. Tagging options: add a template so each build produces both `latest` and a short-commit-SHA tag, keeping rollback ("redeploy an older SHA") consistent with `just deploy-buildconfig`'s path
-
-Once set up, every push to `main` produces new `latest` and `<sha>` tags automatically — `just deploy` (no arguments) always deploys whatever was built most recently.
+`.github/workflows/images.yml` rebuilds both images on every push to `main` and pushes them to `{{ registry }}` as `latest` and `<short-sha>`. `just deploy` with no arguments deploys `latest`, and `--version=<sha>` deploys or rolls back to a specific commit's build. It uses the same Quay robot secrets as the release workflow (see below). Quay's own GitHub build triggers aren't used: GitHub rejects the deploy key they generate as too short.
 
 ## Releases and chart publishing
 
 **Releases.** Push a `vX.Y.Z` tag. `.github/workflows/release.yml` builds both images as `quay.io/project-aibom/aibom-webhook-service:X.Y.Z` and `.../aibom-postprocess:X.Y.Z`, then runs `just chart-release --version=X.Y.Z`, which packages both charts with `version` and `appVersion` set to `X.Y.Z` (embedding `scripts/aibom-scripts/*.py` into the workload-namespace chart so it doesn't need `--set-file`) and pushes them to `oci://quay.io/project-aibom`. The workflow fails before pushing anything if an image tag already exists, and `chart-release` refuses a chart version that's already published, so a release is only ever pushed once. After tagging, bump `version` in both `Chart.yaml` files to the next planned release, so dev builds sort after it.
 
-**Dev builds.** `.github/workflows/chart-publish.yml` runs `just chart-push` on every push to `main` that touches `charts/aibom-webhook/**`, `charts/aibom-workload-namespace/**` or `scripts/aibom-scripts/**`. It publishes `<Chart.yaml version>-<git sha>` (e.g. `0.1.0-abc1234`, `-dirty`-suffixed for an uncommitted tree), whose images are `latest`, built by Quay's build triggers. The hyphen makes it a SemVer prerelease, so `helm install` with no `--version` skips it. Run `just chart-push` by hand the same way, after `helm registry login quay.io`.
+**Dev builds.** `.github/workflows/chart-publish.yml` runs `just chart-push` on every push to `main` that touches `charts/aibom-webhook/**`, `charts/aibom-workload-namespace/**` or `scripts/aibom-scripts/**`. It publishes `<Chart.yaml version>-<git sha>` (e.g. `0.1.0-abc1234`, `-dirty`-suffixed for an uncommitted tree), whose images are `latest`, built by `images.yml`. The hyphen makes it a SemVer prerelease, so `helm install` with no `--version` skips it. Run `just chart-push` by hand the same way, after `helm registry login quay.io`.
 
-**One-time setup.** Create a Quay robot account with push access to the two image repos and the two chart repos, and add its username and token as the `QUAY_ROBOT_USERNAME`/`QUAY_ROBOT_TOKEN` repo secrets (Settings → Secrets and variables → Actions). Make all four repos public, or arrange pull credentials, so installs can pull anonymously.
+**One-time setup.** Create a Quay robot account with push access to the two image repos and the two chart repos (used by all three workflows), and add its username and token as the `QUAY_ROBOT_USERNAME`/`QUAY_ROBOT_TOKEN` repo secrets (Settings → Secrets and variables → Actions). Make all four repos public, or arrange pull credentials, so installs can pull anonymously.
 
 ## Local testing (without a cluster)
 

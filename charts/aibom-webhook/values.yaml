@@ -1,6 +1,6 @@
-# Defaults to the Quay build triggers that auto-build both images on every push
-# to main (see README's Cluster Deployment section) — the seamless, no-cluster-
-# permission-needed path. `just deploy` (build.enabled=true) overrides both
+# Defaults to the images CI builds on every push to main
+# (.github/workflows/images.yml) and on release tags (release.yml) — the
+# seamless, no-cluster-permission-needed path. `just deploy` (build.enabled=true) overrides both
 # repositories to the in-cluster registry path instead, since that's where its
 # BuildConfig actually writes; see justfile.
 #
