@@ -16,3 +16,4 @@ charts/aibom-workload-namespace/files/
 # mkdocs build output
 site/
 uv.lock
+chart-verifier/
