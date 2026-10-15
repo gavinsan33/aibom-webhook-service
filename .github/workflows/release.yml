@@ -68,4 +68,4 @@ jobs:
             --password "${{ secrets.QUAY_ROBOT_TOKEN }}"
 
       - name: Publish charts
-        run: just chart-release --version=${{ steps.version.outputs.version }} --repo=$REGISTRY
+        run: just chart-push --version=${{ steps.version.outputs.version }} --repo=$REGISTRY
