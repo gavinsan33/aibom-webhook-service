@@ -129,9 +129,10 @@ monitoringAccess:
 # Image object for a workload's image (any non-OpenShift cluster, or an image
 # OpenShift never imported), the postprocess Job reads the labels from the
 # image's registry instead. Anonymous pulls only, so private images are skipped.
-# Needs egress from workload namespaces to the registries. Set false to disable.
+# Off by default: it makes outbound requests to whatever registry a workload's
+# image came from, and needs egress from this chart's namespace to reach them.
 gitProvenance:
-  registryLookup: true
+  registryLookup: false
 
 # debug.keepPostprocessJobs skips the usual cleanup of a succeeded (or failed)
 # postprocess Job/data ConfigMap, for inspecting postprocess pod logs/exit

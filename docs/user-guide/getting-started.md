@@ -11,7 +11,7 @@
 | Dependency | Needed for | Required? | Without it |
 |------------|-----------|-----------|------------|
 | [cert-manager](https://cert-manager.io/) | Issues and renews the webhook's TLS certificate outside OpenShift | Only off OpenShift | The webhook chart can't issue its certificate, so the API server can't call it. On OpenShift the built-in service-ca operator issues it instead; set `tls.provider=cert-manager` to use cert-manager there. |
-| A pullable image with `python3` and `bash` | The `aibom-discovery` init container | Yes | Instrumented pods fail to start. Fail-open does not cover this. See below. |
+| Pull access to the discovery image | The `aibom-discovery` init container | Yes | Instrumented pods fail to start. Fail-open does not cover this. See below. |
 | Prometheus Operator CRDs (`monitoring.coreos.com/v1` `PodMonitor`) | Scraping vLLM's `/metrics` for inference performance | Yes, unless vLLM metrics are skipped | The namespace chart install fails outright. Skip it with `--skip-vllm-metrics`, or `--set vllmMetrics.enabled=false` with Helm. |
 | A Prometheus API endpoint (`prometheus.url`) | All telemetry queries | For telemetry | Telemetry comes back empty. On OpenShift it defaults to Thanos Querier in `openshift-monitoring`. Elsewhere it is empty until you set it. |
 | Read access to Prometheus for the postprocess ServiceAccount | Letting postprocess read those metrics | For telemetry, if Prometheus checks the token | Telemetry comes back empty. On OpenShift the webhook chart binds `cluster-monitoring-view`. If your account can't create it, skip it with `--set monitoringAccess.enabled=false` and have a cluster-admin create it once by hand ([Troubleshooting](troubleshooting.md)). Elsewhere bind it yourself. |
@@ -21,7 +21,7 @@
 
 Telemetry is collected only for pods with a detected GPU.
 
-The discovery image needs only `python3` and `bash`. Left unset, the chart uses the OpenShift AI `runtime-pytorch` ImageStream in `redhat-ods-applications` where OpenShift AI is installed, and `pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime` from Docker Hub everywhere else. If the cluster can't pull the default, for example because it has no egress, point the chart at an image it can pull:
+Instrumented pods pull the discovery image, `{{ registry }}/aibom-discovery` at the chart's version: a small UBI image (about 230 MB) with `python3`, `bash`, `lscpu` and `lsblk`. If the cluster can't reach Quay, for example because it has no egress, point the chart at a copy it can pull:
 
 ```bash
 helm upgrade --install aibom-webhook oci://quay.io/project-aibom/aibom-webhook \
