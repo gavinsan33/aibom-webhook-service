@@ -39,7 +39,13 @@ func StripAllFinalizers(ctx context.Context, c kubernetes.Interface) (jobs, pods
 			if !hasFinalizer(j) {
 				continue
 			}
-			removed, serr := stripJobFinalizer(ctx, c, j.Namespace, j.Name)
+			jc := c.BatchV1().Jobs(j.Namespace)
+			removed, serr := stripFinalizer(finalizerName,
+				func() (metav1.Object, error) { return jc.Get(ctx, j.Name, metav1.GetOptions{}) },
+				func(patch []byte) error {
+					_, err := jc.Patch(ctx, j.Name, types.MergePatchType, patch, metav1.PatchOptions{})
+					return err
+				})
 			if serr != nil {
 				log.Printf("warning: could not strip finalizer from job %s/%s: %v", j.Namespace, j.Name, serr)
 				failures++
@@ -63,7 +69,13 @@ func StripAllFinalizers(ctx context.Context, c kubernetes.Interface) (jobs, pods
 			if !hasPodFinalizer(p) {
 				continue
 			}
-			removed, serr := stripPodFinalizer(ctx, c, p.Namespace, p.Name)
+			pc := c.CoreV1().Pods(p.Namespace)
+			removed, serr := stripFinalizer(podFinalizerName,
+				func() (metav1.Object, error) { return pc.Get(ctx, p.Name, metav1.GetOptions{}) },
+				func(patch []byte) error {
+					_, err := pc.Patch(ctx, p.Name, types.MergePatchType, patch, metav1.PatchOptions{})
+					return err
+				})
 			if serr != nil {
 				log.Printf("warning: could not strip finalizer from pod %s/%s: %v", p.Namespace, p.Name, serr)
 				failures++
@@ -82,47 +94,24 @@ func StripAllFinalizers(ctx context.Context, c kubernetes.Interface) (jobs, pods
 	return jobs, pods, nil
 }
 
-// stripJobFinalizer re-reads the Job and patches with its resourceVersion so a
-// concurrent change to the finalizer list (the API server's own, say) is
+// stripFinalizer re-reads the object and patches with its resourceVersion so
+// a concurrent change to the finalizer list (the API server's own, say) is
 // detected as a conflict and retried instead of being overwritten.
-func stripJobFinalizer(ctx context.Context, c kubernetes.Interface, namespace, name string) (bool, error) {
+func stripFinalizer(finalizer string, get func() (metav1.Object, error), patch func([]byte) error) (bool, error) {
 	removed := false
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		job, err := c.BatchV1().Jobs(namespace).Get(ctx, name, metav1.GetOptions{})
+		obj, err := get()
 		if apierrors.IsNotFound(err) {
 			return nil
 		}
 		if err != nil {
 			return err
 		}
-		patch, ok := finalizerRemovalPatch(job.Finalizers, finalizerName, job.ResourceVersion)
+		p, ok := finalizerRemovalPatch(obj.GetFinalizers(), finalizer, obj.GetResourceVersion())
 		if !ok {
 			return nil
 		}
-		if _, err := c.BatchV1().Jobs(namespace).Patch(ctx, name, types.MergePatchType, patch, metav1.PatchOptions{}); err != nil {
-			return err
-		}
-		removed = true
-		return nil
-	})
-	return removed, err
-}
-
-func stripPodFinalizer(ctx context.Context, c kubernetes.Interface, namespace, name string) (bool, error) {
-	removed := false
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		pod, err := c.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
-		if apierrors.IsNotFound(err) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		patch, ok := finalizerRemovalPatch(pod.Finalizers, podFinalizerName, pod.ResourceVersion)
-		if !ok {
-			return nil
-		}
-		if _, err := c.CoreV1().Pods(namespace).Patch(ctx, name, types.MergePatchType, patch, metav1.PatchOptions{}); err != nil {
+		if err := patch(p); err != nil {
 			return err
 		}
 		removed = true
