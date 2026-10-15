@@ -164,14 +164,13 @@ def test_run_stage_returns_value_on_success():
     assert ns["_run_stage"]("ok", lambda: 42) == 42
 
 
-def test_run_stage_swallows_exception_and_uses_on_error():
+def test_run_stage_swallows_exception_and_returns_none():
     ns = _load_stage_runner()
 
     def boom():
         raise FileNotFoundError("true")
 
     assert ns["_run_stage"]("boom", boom) is None
-    assert ns["_run_stage"]("boom", boom, lambda exc: {"error": str(exc)}) == {"error": "true"}
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs mkfifo")
@@ -185,8 +184,8 @@ def test_run_stage_times_out_a_blocked_open(tmp_path):
             return f.read()
 
     with _guard():
-        result = ns["_run_stage"]("blocked", blocked_open, lambda exc: "fallback", timeout_s=1)
-    assert result == "fallback"
+        result = ns["_run_stage"]("blocked", blocked_open, timeout_s=1)
+    assert result is None
 
 
 def test_run_stage_restores_previous_signal_handler():
