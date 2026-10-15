@@ -66,8 +66,8 @@ _POLL_INTERVAL_S = float(os.environ.get("AIBOM_DATASET_SIDECAR_POLL_INTERVAL", "
 # single failed ConfigMap write there must not lose it (#107). Bounded by the
 # kubelet's termination grace period (30s by default): 4 attempts with
 # 1s, 2s, 4s backoff is ~7s.
-_FINAL_PUBLISH_ATTEMPTS = int(os.environ.get("AIBOM_DATASET_SIDECAR_FINAL_ATTEMPTS", "4"))
-_FINAL_PUBLISH_BACKOFF_S = float(os.environ.get("AIBOM_DATASET_SIDECAR_FINAL_BACKOFF", "1"))
+_FINAL_PUBLISH_ATTEMPTS = 4
+_FINAL_PUBLISH_BACKOFF_S = 1.0
 
 _shutdown_event = threading.Event()
 
