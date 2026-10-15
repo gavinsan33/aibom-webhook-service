@@ -38,3 +38,8 @@ scripts:
   runtimeDetector: ""
   k8sApi: ""
   datasetSidecar: ""
+
+# Image for the `helm test` pod, which only needs python3. Empty means the
+# postprocess image at this chart's appVersion.
+test:
+  image: ""
