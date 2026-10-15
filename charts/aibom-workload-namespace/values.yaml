@@ -15,14 +15,9 @@ platform: auto
 # to create — set to false if your account doesn't have it (telemetry
 # collection then just comes back empty for this namespace instead of the
 # install failing) and have a cluster-admin apply that ClusterRoleBinding
-# directly, once, instead.
-#
-# clusterRole is the ClusterRole bound. Empty means cluster-monitoring-view on
-# OpenShift and no binding elsewhere; set it if your Prometheus enforces RBAC
-# on the postprocess ServiceAccount's bearer token.
+# directly, once, instead. OpenShift only; nothing is bound elsewhere.
 monitoringAccess:
   enabled: true
-  clusterRole: ""
 
 # Adds a PodMonitor that scrapes vLLM's own /metrics endpoint (TTFT, ITL,
 # queue depth, KV-cache usage) on port 8000 for every aibom.io/instrumented
