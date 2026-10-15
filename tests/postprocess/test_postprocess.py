@@ -1082,6 +1082,7 @@ def test_compile_aibom_pod_status_oomkilled():
     pod = aibom["execution_metadata"]["pods"][0]
     assert pod["status"] == "OOMKilled"
     assert pod["exit_code"] == 137
+    assert "retried_attempt" not in pod  # no job_result, so not treated as a retry
     assert aibom["execution_metadata"]["status"] == "OOMKilled"
 
 
@@ -2876,13 +2877,6 @@ def test_only_the_completed_jobs_failed_pods_are_discounted_in_a_jobset():
 def test_completed_job_with_no_terminated_state_is_completed():
     containers = [{"pod_name": "job-a1", "name": "training", "job_result": "Complete"}]
     assert _status_aibom(["job-a1"], containers)["execution_metadata"]["status"] == "Completed"
-
-
-def test_bare_pod_without_job_result_is_unchanged():
-    containers = [_container("pod-1", "OOMKilled", 137)]
-    em = _status_aibom(["pod-1"], containers)["execution_metadata"]
-    assert em["status"] == "OOMKilled"
-    assert "retried_attempt" not in em["pods"][0]
 
 
 def test_restart_history_surfaces_an_earlier_oom_kill():
