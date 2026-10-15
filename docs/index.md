@@ -7,7 +7,7 @@ To filter, inspect, and compare the resulting `AIBOM` custom resources, see the 
 ## How it works
 
 1. An admin labels a namespace: `oc label namespace my-ns aibom.io/enabled=true`.
-2. An admin creates the `aibom-scripts` ConfigMap in that namespace (see [Getting Started](user-guide/getting-started.md)).
+2. An admin installs the `aibom-workload-namespace` chart in that namespace, once per namespace. It adds the `aibom-scripts` ConfigMap, the RBAC workloads and the webhook need there, and the HMAC signing keys (see [Getting Started](user-guide/getting-started.md#enable-a-workload-namespace)).
 3. A user submits a Job, JobSet, PyTorchJob, or RayJob in that namespace.
 4. The Kubernetes API server calls the webhook before creating the pod.
 5. The webhook injects an `aibom-discovery` init container (hardware snapshot), dataset detection hooks, and an `aibom.io/instrumented: "true"` label.

@@ -12,7 +12,7 @@ When the workload finishes, a postprocess Job compiles everything (hardware, dat
 ## How It Works
 
 1. An admin labels a namespace: `oc label namespace my-ns aibom.io/enabled=true`
-2. An admin installs the namespace chart, which adds the `aibom-scripts` ConfigMap, RBAC, and signing keys
+2. An admin installs the namespace chart once per namespace, which adds the `aibom-scripts` ConfigMap, RBAC, and the HMAC signing keys
 3. A user submits a Job, JobSet, PyTorchJob, or RayJob (or any pod requesting `nvidia.com/gpu`) in that namespace
 4. The API server calls the webhook, which injects an `aibom-discovery` init container (hardware snapshot), dataset detection hooks, a dataset-signing sidecar, and an `aibom.io/instrumented: "true"` label. The user's YAML is untouched
 5. When the Job completes (or the pod is deleted, for long-running pods like KServe predictors), the watcher creates a postprocess Job that compiles and creates the `AIBOM`
