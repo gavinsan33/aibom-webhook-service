@@ -36,6 +36,7 @@ All hooks are fault-tolerant — detection failures never interrupt training.
 """
 
 import atexit
+import fcntl
 import hashlib
 import importlib.util
 import json
@@ -46,11 +47,6 @@ import threading
 import time
 import traceback
 import weakref
-
-try:
-    import fcntl
-except ImportError:  # not POSIX; flush falls back to unlocked (still atomic)
-    fcntl = None
 
 _OUTPUT_PATH = os.environ.get(
     "AIBOM_DATASET_OUTPUT", "/results/dataset_detected.json"
@@ -494,8 +490,6 @@ class _OutputLock:
         self._file = None
 
     def __enter__(self):
-        if fcntl is None:
-            return self
         self._file = open(self._path, "a")
         deadline = time.monotonic() + self._timeout_s
         while True:
