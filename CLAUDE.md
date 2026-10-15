@@ -377,7 +377,7 @@ Both charts have a `platform` value (`auto`/`openshift`/`kubernetes`); `auto` ch
 - `prometheus.url` defaults to Thanos Querier on OpenShift and empty elsewhere; the value is `null` so an explicit `""` still means "off".
 - The discovery image (`image.discovery` empty) is OpenShift AI's `runtime-pytorch` ImageStream only when `datasciencecluster.opendatahub.io/v1` exists — keyed on OpenShift AI rather than OpenShift, since an OpenShift cluster without OpenShift AI can't pull it either — and `pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime` (the binary's own default) otherwise.
 - OpenShift-only objects aren't rendered elsewhere: the service-ca ConfigMap (the watcher's mount of it is already optional), the `system:image-puller` RoleBinding, and the `Image` ClusterRole and its bindings. `cluster-monitoring-view` is bound only on OpenShift. `build.enabled` fails the render.
-- The justfile's `AIBOM_PLATFORM=kubernetes` swaps `oc` for `kubectl` and empties the `system:admin` impersonation (`--as=`/`--kube-as-user=` with an empty value is the flags' own default, i.e. no impersonation); `AIBOM_KUBECTL`/`AIBOM_ADMIN_AS` override each.
+- The justfile's `AIBOM_PLATFORM=kubernetes` swaps `oc` for `kubectl` and empties the `system:admin` impersonation (`--as=`/`--kube-as-user=` with an empty value is the flags' own default, i.e. no impersonation).
 
 The deploy recipes, `kind-deploy` aside, otherwise assumed `oc` throughout. Separately, the chart had silently stopped passing `--prometheus-url` and `--debug-*` (and the since-removed `--grafana-*`) after 54a3890, so those values did nothing (including `kind-deploy`'s Prometheus override) until this was restored.
 
