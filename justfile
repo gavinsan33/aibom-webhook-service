@@ -584,22 +584,13 @@ uninstall-namespace *args: _check-auth
 # there's exactly one source of truth for the scripts and this recipe is the
 # only place responsible for keeping the packaged copy fresh.
 #
-# Publishes each chart under two tags per run, mirroring the images' own
-# mutable-latest/immutable-<sha> split (see "Setting Up Quay Auto-Build" in the
-# README — every image build produces both):
-#   - <Chart.yaml version> (e.g. 0.1.0) — mutable, overwritten on every
-#     chart-push, since Chart.yaml's version isn't bumped automatically.
-#     `helm upgrade --install ... oci://.../aibom-webhook` with no --version
-#     resolves here.
-#   - <Chart.yaml version>-<git sha> (e.g. 0.1.0-abc1234, "-dirty" suffixed the
-#     same way deploy-local's tag is if the working tree has uncommitted
-#     changes) — immutable, one per chart-push, for pinning/rollback.
-# The pinned tag uses SemVer *prerelease* syntax (hyphen), not build metadata
-# (plus): a prerelease has strictly lower precedence than the plain release
-# per the SemVer spec, so "no --version" reliably and deterministically
-# resolves to the mutable tag above rather than being an unpredictable tie —
-# build metadata is ignored for precedence entirely, which is what made an
-# earlier version of this recipe (using "+<sha>") ambiguous.
+# Publishes each chart as <Chart.yaml version>-<git sha> (e.g. 0.1.0-abc1234,
+# "-dirty" suffixed if the working tree has uncommitted changes): a dev build,
+# immutable, one per chart-push. Its images are :latest (appVersion "latest" in
+# a checkout). It never pushes a plain version: those are releases, published
+# once by `just chart-release` from a git tag (#150). The SemVer prerelease
+# hyphen means `helm install` with no --version skips dev builds and takes the
+# newest release; pass --devel or an exact --version to install one.
 # Usage: just chart-push [--repo=<repo>]
 [group('charts')]
 chart-push *args:
@@ -624,9 +615,44 @@ chart-push *args:
     for chart in aibom-webhook aibom-workload-namespace; do
         base_version="$(grep '^version:' "charts/$chart/Chart.yaml" | awk '{print $2}')"
         pinned_version="${base_version}-${sha}"
-        helm package "charts/$chart" -d "$pkg_dir"
         helm package "charts/$chart" -d "$pkg_dir" --version "$pinned_version"
-        helm push "$pkg_dir/$chart-$base_version.tgz" "oci://$repo"
         helm push "$pkg_dir/$chart-${pinned_version}.tgz" "oci://$repo"
-        echo "pushed oci://$repo/$chart — mutable: $base_version, pin with: --version=$pinned_version"
+        echo "pushed oci://$repo/$chart --version=$pinned_version"
+    done
+
+# Publishes both charts as release <version>, with appVersion set to it so the
+# chart's images default to :<version> -- the tags the release workflow
+# (.github/workflows/release.yml) builds from the same git tag. Refuses to
+# overwrite a version that's already published: a release is pushed once.
+# Usage: just chart-release --version=<semver> [--repo=<repo>]
+[group('charts')]
+chart-release *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    repo="{{ default_repo }}"
+    version=""
+    for arg in {{ args }}; do
+        case "$arg" in
+            --version=*) version="${arg#--version=}" ;;
+            --repo=*) repo="${arg#--repo=}" ;;
+            *) echo "error: unknown argument '$arg' (expected --version=<semver> or --repo=<repo>)" >&2; exit 1 ;;
+        esac
+    done
+    [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "error: --version must be X.Y.Z, got '$version'" >&2; exit 1; }
+    for chart in aibom-webhook aibom-workload-namespace; do
+        if helm show chart "oci://$repo/$chart" --version "$version" >/dev/null 2>&1; then
+            echo "error: oci://$repo/$chart $version is already published" >&2; exit 1
+        fi
+    done
+    pkg_dir="$(mktemp -d)"
+    trap 'rm -rf charts/aibom-workload-namespace/files "$pkg_dir"' EXIT
+    rm -rf charts/aibom-workload-namespace/files
+    mkdir -p charts/aibom-workload-namespace/files
+    cp scripts/aibom-scripts/generate_snapshot.py scripts/aibom-scripts/runtime_detector.py \
+        scripts/aibom-scripts/k8s_api.py scripts/aibom-scripts/dataset_sidecar.py \
+        charts/aibom-workload-namespace/files/
+    for chart in aibom-webhook aibom-workload-namespace; do
+        helm package "charts/$chart" -d "$pkg_dir" --version "$version" --app-version "$version"
+        helm push "$pkg_dir/$chart-$version.tgz" "oci://$repo"
+        echo "released oci://$repo/$chart $version"
     done
