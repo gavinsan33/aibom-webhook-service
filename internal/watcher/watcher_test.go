@@ -1488,7 +1488,7 @@ func TestCollectAIBOM_DebugKeepPostprocessJobs(t *testing.T) {
 
 func TestJobNameTruncation(t *testing.T) {
 	longName := strings.Repeat("a", 60)
-	result := postprocessJobName("ns", longName)
+	result := ppName("ns", longName)
 
 	if len(result) > maxJobNameLength {
 		t.Errorf("postprocess job name length %d exceeds max %d", len(result), maxJobNameLength)
@@ -1498,14 +1498,14 @@ func TestJobNameTruncation(t *testing.T) {
 		t.Errorf("postprocess job name %q should end with %q", result, postprocessSuffix)
 	}
 
-	shortResult := postprocessJobName("ns", "my-job")
+	shortResult := ppName("ns", "my-job")
 	if !strings.HasPrefix(shortResult, "my-job-") || !strings.HasSuffix(shortResult, postprocessSuffix) {
 		t.Errorf("postprocess job name = %q, want my-job-<hash>%s", shortResult, postprocessSuffix)
 	}
 
 	// Name that would produce a trailing dash after truncation
 	dashName := strings.Repeat("a", 44) + "-"
-	dashResult := postprocessJobName("ns", dashName)
+	dashResult := ppName("ns", dashName)
 	if strings.Contains(dashResult, "--") {
 		t.Errorf("postprocess job name %q should not contain double dash", dashResult)
 	}

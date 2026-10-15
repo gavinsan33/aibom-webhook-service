@@ -1024,7 +1024,7 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 // the trigger resource — callers must do that themselves, since the trigger's kind
 // (Job vs Pod) determines which client to patch with.
 func (w *Watcher) createPostprocessJobCore(ctx context.Context, namespace, triggerName string, pods []corev1.Pod, annotations map[string]string, jobResults map[string]string) (string, error) {
-	postprocessName := postprocessJobName(namespace, triggerName)
+	postprocessName := aibomdata.PostprocessJobName(namespace, triggerName)
 	// configMapName is the workload's own data ConfigMap, in its namespace,
 	// that its pods wrote into. inputsName is the merged copy the postprocess
 	// Job mounts, in our namespace.
@@ -1309,10 +1309,6 @@ func (w *Watcher) createPostprocessJobForPod(ctx context.Context, pod *corev1.Po
 	}
 
 	return nil
-}
-
-func postprocessJobName(namespace, jobName string) string {
-	return aibomdata.PostprocessJobName(namespace, jobName)
 }
 
 // collectAIBOM runs once a postprocess Job finishes — succeeded or failed (see
