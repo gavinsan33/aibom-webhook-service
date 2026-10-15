@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"log"
@@ -83,9 +84,11 @@ func main() {
 		w.Write([]byte("ok"))
 	})
 
+	certs := &certReloader{certPath: cfg.TLSCertPath, keyPath: cfg.TLSKeyPath}
 	server := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Port),
 		Handler:      mux,
+		TLSConfig:    &tls.Config{GetCertificate: certs.GetCertificate},
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
 	}
@@ -95,7 +98,7 @@ func main() {
 
 	go func() {
 		log.Printf("starting webhook server on :%d (discovery-image=%s, dataset-detection=%v)", cfg.Port, cfg.DiscoveryImage, cfg.DatasetDetection)
-		if err := server.ListenAndServeTLS(cfg.TLSCertPath, cfg.TLSKeyPath); err != nil && err != http.ErrServerClosed {
+		if err := server.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("server error: %v", err)
 		}
 	}()
