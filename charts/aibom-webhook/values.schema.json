@@ -233,7 +233,7 @@
       "properties": {
         "registryLookup": {
           "type": "boolean",
-          "description": "Read image labels from the image's registry when there's no Image object. Off by default: it makes outbound requests to registries."
+          "description": "Read image labels from the image's registry when there's no Image object. Makes outbound requests to registries."
         }
       }
     },
