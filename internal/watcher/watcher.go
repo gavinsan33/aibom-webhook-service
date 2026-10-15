@@ -408,18 +408,11 @@ func (w *Watcher) addFinalizer(ctx context.Context, job *batchv1.Job) error {
 }
 
 func (w *Watcher) removeFinalizer(ctx context.Context, job *batchv1.Job) {
-	var remaining []string
-	for _, f := range job.Finalizers {
-		if f != finalizerName {
-			remaining = append(remaining, f)
-		}
+	patch, ok := finalizerRemovalPatch(job.Finalizers, finalizerName, "")
+	if !ok {
+		return
 	}
-	finalizersJSON, _ := json.Marshal(remaining)
-	if remaining == nil {
-		finalizersJSON = []byte("[]")
-	}
-	patch := fmt.Sprintf(`{"metadata":{"finalizers":%s}}`, finalizersJSON)
-	_, err := w.clientset.BatchV1().Jobs(job.Namespace).Patch(ctx, job.Name, types.MergePatchType, []byte(patch), metav1.PatchOptions{})
+	_, err := w.clientset.BatchV1().Jobs(job.Namespace).Patch(ctx, job.Name, types.MergePatchType, patch, metav1.PatchOptions{})
 	if err != nil {
 		log.Printf("warning: could not remove finalizer from %s/%s: %v", job.Namespace, job.Name, err)
 	} else {
@@ -449,18 +442,11 @@ func (w *Watcher) addPodFinalizer(ctx context.Context, pod *corev1.Pod) error {
 }
 
 func (w *Watcher) removePodFinalizer(ctx context.Context, pod *corev1.Pod) {
-	var remaining []string
-	for _, f := range pod.Finalizers {
-		if f != podFinalizerName {
-			remaining = append(remaining, f)
-		}
+	patch, ok := finalizerRemovalPatch(pod.Finalizers, podFinalizerName, "")
+	if !ok {
+		return
 	}
-	finalizersJSON, _ := json.Marshal(remaining)
-	if remaining == nil {
-		finalizersJSON = []byte("[]")
-	}
-	patch := fmt.Sprintf(`{"metadata":{"finalizers":%s}}`, finalizersJSON)
-	_, err := w.clientset.CoreV1().Pods(pod.Namespace).Patch(ctx, pod.Name, types.MergePatchType, []byte(patch), metav1.PatchOptions{})
+	_, err := w.clientset.CoreV1().Pods(pod.Namespace).Patch(ctx, pod.Name, types.MergePatchType, patch, metav1.PatchOptions{})
 	if err != nil {
 		log.Printf("warning: could not remove finalizer from pod %s/%s: %v", pod.Namespace, pod.Name, err)
 	} else {
