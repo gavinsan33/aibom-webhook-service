@@ -17,22 +17,6 @@ Run these in order, as a cluster-admin, for each upgrade:
 
 Existing AIBOMs are not changed by any of this.
 
-## Postprocess moved to the webhook namespace
-
-Postprocess Jobs, the `aibom-postprocess` ServiceAccount and the compiled-AIBOM signing key now live in the webhook's namespace, so a pod in a workload namespace can't mount the key or run as that identity.
-
-- **Copy each namespace's signing key before upgrading its namespace chart.** The chart no longer owns `aibom-compiled-signing-key`, so the upgrade deletes it. Without the copy, the watcher generates a new key, the published public key changes, and `oc aibom describe` reports earlier AIBOMs as `KEY MISMATCH`.
-
-    ```bash
-    oc get secret aibom-compiled-signing-key -n <namespace> -o jsonpath='{.data.ed25519-key}' | base64 -d \
-      | oc create secret generic aibom-compiled-signing-key-<namespace> -n project-aibom --from-file=ed25519-key=/dev/stdin
-    ```
-
-- **Upgrade both charts before the next workload finishes.** New postprocess Jobs run as the webhook namespace's ServiceAccount, which gets its access in each workload namespace from the namespace chart. Until a namespace is upgraded, its AIBOMs fail with a Forbidden error.
-- **`monitoringAccess.*` moved** from the namespace chart to the webhook chart, and `just setup-namespace --skip-monitoring-access` is gone.
-- Postprocess Jobs created before the upgrade are left in the workload namespace and are no longer cleaned up. Delete them with `oc delete job -l aibom.io/postprocess-for -n <namespace>`.
-- A failed postprocess Job's logs are in the webhook namespace now. The workload's namespace gets an `AIBOMPostprocessFailed` Event naming it.
-
 ## Versions
 
 Both charts are at version `0.1.0`. The plain `0.1.0` tag is republished on every chart push, and each push also gets an immutable `0.1.0-<git-sha>` tag. With no `--version`, Helm takes the mutable tag. To make an upgrade repeatable, pin the SHA tag. See [Getting Started](../user-guide/getting-started.md).
