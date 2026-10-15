@@ -36,7 +36,7 @@ func StripAllFinalizers(ctx context.Context, c kubernetes.Interface) (jobs, pods
 		}
 		for i := range list.Items {
 			j := &list.Items[i]
-			if !containsString(j.Finalizers, finalizerName) {
+			if !hasFinalizer(j) {
 				continue
 			}
 			removed, serr := stripJobFinalizer(ctx, c, j.Namespace, j.Name)
@@ -60,7 +60,7 @@ func StripAllFinalizers(ctx context.Context, c kubernetes.Interface) (jobs, pods
 		}
 		for i := range list.Items {
 			p := &list.Items[i]
-			if !containsString(p.Finalizers, podFinalizerName) {
+			if !hasPodFinalizer(p) {
 				continue
 			}
 			removed, serr := stripPodFinalizer(ctx, c, p.Namespace, p.Name)
@@ -149,13 +149,4 @@ func finalizerRemovalPatch(finalizers []string, remove, resourceVersion string) 
 	}
 	patch, _ := json.Marshal(map[string]interface{}{"metadata": meta})
 	return patch, true
-}
-
-func containsString(list []string, s string) bool {
-	for _, v := range list {
-		if v == s {
-			return true
-		}
-	}
-	return false
 }
