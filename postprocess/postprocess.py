@@ -591,7 +591,7 @@ def _parse_json_or_kv(val):
 # ---------------------------------------------------------------------------
 
 _SHELLS = {"sh", "bash", "zsh", "dash", "ash"}
-_SEPARATOR_CHARS = frozenset(";&|")
+_SEPARATOR_CHARS = frozenset(";&|\n")
 _UNEXPANDED_VAR_RE = re.compile(r"\$[{(A-Za-z_]")
 _NUMBER_RE = re.compile(r"^-\d+(\.\d+)?$")
 _ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
@@ -643,33 +643,6 @@ def _to_bool(val):
     return str(val).strip().lower() in ("1", "true", "yes")
 
 
-def _newlines_to_separators(script):
-    """Turn each unquoted newline into `;`, the way a shell treats it. shlex
-    would otherwise read it as whitespace and run two commands together."""
-    out = []
-    quote = None
-    i = 0
-    while i < len(script):
-        ch = script[i]
-        if ch == "\\" and quote != "'" and i + 1 < len(script):
-            out.append(script[i:i + 2])
-            i += 2
-            continue
-        if quote:
-            if ch == quote:
-                quote = None
-            out.append(ch)
-        elif ch in "'\"":
-            quote = ch
-            out.append(ch)
-        elif ch == "\n":
-            out.append(" ; ")
-        else:
-            out.append(ch)
-        i += 1
-    return "".join(out)
-
-
 def _shell_script(command):
     """The script text of `sh -c "..."`, or None if `command` isn't a shell
     wrapper. Accepts any flag cluster containing `c` (`-c`, `-lc`, `-euc`,
@@ -708,9 +681,12 @@ def _flatten_container_command(container):
     # and without it a backslash-newline survives as a spurious literal
     # token that can land right after a bare boolean flag (e.g.
     # `--use_peft \<newline>--lora_r`) and get misread as its value.
-    script = _newlines_to_separators(re.sub(r"\\\n", " ", script))
+    script = re.sub(r"\\\n", " ", script)
     try:
-        lex = shlex.shlex(script, posix=True, punctuation_chars=";&|")
+        # An unquoted newline separates commands, as in a shell; a quoted
+        # one stays inside its token.
+        lex = shlex.shlex(script, posix=True, punctuation_chars=";&|\n")
+        lex.whitespace = " \t\r"
         lex.whitespace_split = True
         lex.commenters = ""
         return list(lex)
