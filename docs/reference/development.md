@@ -64,6 +64,19 @@ To remove the deployment: `just undeploy` (runs `helm uninstall aibom-webhook`, 
 
 **One-time setup.** Create a Quay robot account with push access to the two image repos and the two chart repos (used by all three workflows), and add its username and token as the `QUAY_ROBOT_USERNAME`/`QUAY_ROBOT_TOKEN` repo secrets (Settings → Secrets and variables → Actions). Make all four repos public, or arrange pull credentials, so installs can pull anonymously.
 
+**Helm repository.** Each release is also added to a classic Helm repository, an `index.yaml` on the `gh-pages` branch, served at `https://gavinsan33.github.io/aibom-webhook-service`. That's what an OpenShift `HelmChartRepository` points at (see [Getting Started](../user-guide/getting-started.md#install-from-the-openshift-console)); it doesn't take OCI registries. One-time setup: after the first release creates the branch, enable GitHub Pages for this repo from the `gh-pages` branch (Settings → Pages).
+
+**Checking a release for the catalog.** `just chart-verify --version=X.Y.Z` packages both charts and runs Red Hat's chart-verifier with the community profile, writing a report per chart to `chart-verifier/`. Only `helm-lint` is mandatory for a community chart. The webhook chart's `not-contains-crds` and both charts' `images-are-certified` fail and are expected to; they're mandatory only for certified partner charts.
+
+## Publishing to the OpenShift Helm catalog
+
+Both charts are submitted to [openshift-helm-charts/charts](https://github.com/openshift-helm-charts/charts) as community charts, which puts them in every OpenShift cluster's Developer Catalog. Pull requests there are checked by its CI and merged automatically when they pass.
+
+1. **Once, register the charts.** In a fork of that repository, add the two `OWNERS` files from `catalog/` at `charts/community/project-aibom/aibom-webhook/OWNERS` and `charts/community/project-aibom/aibom-workload-namespace/OWNERS`, and open a pull request to `main`. Wait for it to merge. Only the GitHub users listed in `users` can submit versions.
+2. **For each release,** add the release's chart tarballs as `charts/community/project-aibom/<chart>/X.Y.Z/<chart>-X.Y.Z.tgz`, one directory per chart, and open a pull request. The tarballs are on the `gh-pages` branch, or rebuild them with `just _chart-package X.Y.Z <dir>`. Their CI runs chart-verifier itself, so no report is needed. A published version can't be changed; release a new one instead.
+
+Catalog users upgrade from the console's Upgrade action on the Helm release. Helm still doesn't update CRDs on upgrade, so each release's notes should say when the CRDs changed.
+
 ## Local testing (without a cluster)
 
 ```bash
