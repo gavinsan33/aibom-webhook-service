@@ -1038,10 +1038,8 @@ def _is_single_process_launch(launcher, tokens):
 
 def _underscore_flag(tok):
     """`--num-processes=4` -> `--num_processes=4`; the value is untouched."""
-    if not tok.startswith("--"):
-        return tok
-    key, eq, val = tok.partition("=")
-    return "--" + key[2:].replace("-", "_") + eq + val
+    key, val = _split_flag(tok, "_")
+    return key if val is None else key + "=" + val
 
 
 def _segment_parallelization(segment):
