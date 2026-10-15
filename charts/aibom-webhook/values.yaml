@@ -17,10 +17,12 @@ platform: auto
 image:
   webhook:
     repository: quay.io/gsanders/aibom-webhook-service
-    tag: latest
+    # Empty means the chart's appVersion: the release's own tag in a published
+    # chart, "latest" from a checkout.
+    tag: ""
   postprocess:
     repository: quay.io/gsanders/aibom-postprocess
-    tag: latest
+    tag: ""
   # Image for the aibom-discovery init container injected into instrumented
   # pods (see CLAUDE.md's "Pod Matching and Injection") — unlike webhook/
   # postprocess above, this is never built by this project's BuildConfig
@@ -33,12 +35,14 @@ image:
   # simply get "Not available" for the GPU fields. Left empty, it's the OpenShift
   # AI runtime-pytorch ImageStream (no external pull per pod) when the OpenShift
   # AI API (datasciencecluster.opendatahub.io/v1) exists, and
-  # pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime otherwise. Setting repository
+  # pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime, pinned by digest, otherwise. Setting repository
   # requires tag. Instrumented pods can't start if this image can't be pulled.
   discovery:
     repository: ""
     tag: ""
-  pullPolicy: Always
+  # Empty leaves imagePullPolicy unset, so Kubernetes uses IfNotPresent for a
+  # release tag and Always for "latest".
+  pullPolicy: ""
 
 replicaCount: 1
 resources:
