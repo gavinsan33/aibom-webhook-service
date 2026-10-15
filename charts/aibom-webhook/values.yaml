@@ -53,6 +53,13 @@ resources:
     cpu: 200m
     memory: 128Mi
 
+# Who issues the webhook's TLS certificate: service-ca (OpenShift's built-in
+# service CA, no extra operator), cert-manager, or auto (service-ca on
+# OpenShift, cert-manager elsewhere).
+tls:
+  provider: auto
+
+# Only used when tls.provider resolves to cert-manager.
 certManager:
   issuerName: aibom-webhook-selfsigned
   duration: 8760h # 1 year

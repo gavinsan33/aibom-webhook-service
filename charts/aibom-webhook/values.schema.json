@@ -79,9 +79,24 @@
       "type": "object",
       "description": "Webhook container resource requests and limits."
     },
+    "tls": {
+      "type": "object",
+      "description": "The webhook's TLS certificate.",
+      "properties": {
+        "provider": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "service-ca",
+            "cert-manager"
+          ],
+          "description": "service-ca (OpenShift's built-in service CA), cert-manager, or auto: service-ca on OpenShift, cert-manager elsewhere."
+        }
+      }
+    },
     "certManager": {
       "type": "object",
-      "description": "cert-manager settings for the webhook's TLS certificate.",
+      "description": "cert-manager settings, used only when tls.provider resolves to cert-manager.",
       "properties": {
         "issuerName": {
           "type": "string",
