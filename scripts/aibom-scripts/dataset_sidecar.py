@@ -65,15 +65,7 @@ def _handle_sigterm(signum, frame):
     _dbg("received SIGTERM, will do one final pass before exiting")
 
 
-# Installed before the remaining imports and the module-level setup below,
-# not in main(): this process is PID 1 in its container, and the kernel
-# drops a signal with no handler for PID 1 instead of applying its default
-# action. A pod whose main containers exit within a few seconds of this
-# sidecar starting gets its SIGTERM while Python is still importing, so the
-# signal was lost and the kubelet force-killed the sidecar (exit 137) after
-# the full termination grace period, skipping the final publish. Only when
-# run as a script, so importing this module (tests) doesn't change the
-# importer's signal handling.
+# PID 1 drops unhandled signals: install before the slow imports below (see CLAUDE.md).
 if __name__ == "__main__":
     signal.signal(signal.SIGTERM, _handle_sigterm)
 
