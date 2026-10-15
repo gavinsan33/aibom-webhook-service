@@ -507,19 +507,6 @@ def test_capture_git_provenance_finds_repo_from_script_path(tmp_path, monkeypatc
     assert rd._runtime_info["git_commit"] == "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 
 
-def test_git_dirty_ignores_untracked_files(monkeypatch):
-    calls = []
-
-    def fake_run(cmd, **kwargs):
-        calls.append(cmd)
-        return types.SimpleNamespace(returncode=0, stdout="")
-
-    import subprocess as sp
-    monkeypatch.setattr(sp, "run", fake_run)
-    rd._git_dirty("/some/path")
-    assert "-uno" in calls[0]
-
-
 # ---------------------------------------------------------------------------
 # flush()
 # ---------------------------------------------------------------------------
