@@ -7,7 +7,7 @@ Full documentation: https://gavinsan33.github.io/project-aibom/
 ## Requirements
 
 - OpenShift 4.16 or later, or Kubernetes 1.29 or later.
-- [cert-manager](https://cert-manager.io/), which issues the webhook's TLS certificate.
+- On Kubernetes, [cert-manager](https://cert-manager.io/), which issues the webhook's TLS certificate. On OpenShift the built-in service CA issues it, so nothing extra is needed.
 - A cluster-admin to install. The chart creates ClusterRoles, ClusterRoleBindings, a MutatingWebhookConfiguration and the `AIBOM`/`AIBOMTelemetry` CRDs.
 
 ## Install
