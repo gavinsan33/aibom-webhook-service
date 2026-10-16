@@ -623,12 +623,36 @@ def _split_flag(tok, sep):
     return key, (val if eq else None)
 
 
-def _int_or_float(val):
-    """`3` -> 3, `0.5` -> 0.5 (e.g. --num_train_epochs)."""
+def _finite_float(val):
+    """float() without `nan`/`inf`, which would make the AIBOM invalid JSON
+    and unsignable under JCS."""
     f = float(val)
     if not math.isfinite(f):
         raise ValueError(val)
+    return f
+
+
+def _int_or_float(val):
+    """`3` -> 3, `0.5` -> 0.5 (e.g. --num_train_epochs)."""
+    f = _finite_float(val)
     return int(f) if f.is_integer() else f
+
+
+_HUMAN_INT_RE = re.compile(r"^(\d+(?:\.\d+)?)([kmgtKMGT]?)$")
+
+
+def _human_readable_int(val):
+    """vLLM's `--max-model-len` syntax: `4096`, `32k` (x1000), `32K` (x1024).
+    Like vLLM, a fraction is only allowed with a decimal suffix (`25.6k`)."""
+    m = _HUMAN_INT_RE.match(val.strip())
+    if not m:
+        raise ValueError(val)
+    num, suffix = m.groups()
+    if not suffix:
+        return int(num)
+    if suffix.isupper():
+        return int(num) * 1024 ** ("KMGT".index(suffix) + 1)
+    return int(float(num) * 1000 ** ("kmgt".index(suffix) + 1))
 
 
 def _to_bool(val):
@@ -673,12 +697,12 @@ def _parse_flags(args, arg_map, sep, bool_values=False):
         if val is None and i < len(args) and not _is_flag_token(args[i]):
             val = args[i]
             i += 1
-        if val is None or _has_unexpanded_var(val):
+        if not val or _has_unexpanded_var(val):
             continue
         try:
             converted = conv(val)
-        except (ValueError, TypeError):
-            converted = val
+        except (ValueError, TypeError, OverflowError):
+            continue  # `--max-model-len abc` is a typo, not a value to record
         if converted is not None:
             result[name] = converted
     return result, positional
@@ -730,9 +754,26 @@ def _flatten_container_command(container):
         lex.whitespace = " \t\r"
         lex.whitespace_split = True
         lex.commenters = ""
-        return list(lex)
+        return _strip_comments(list(lex))
     except ValueError:
         return command
+
+
+def _strip_comments(tokens):
+    """Drop `# ...` up to the next newline. shlex's own `commenters` can't be
+    used: it swallows the newline (merging the lines on either side into one
+    command) and cuts `a/b#c` mid-word. A *quoted* argument starting with `#`
+    can't be told apart here and is dropped too."""
+    out = []
+    in_comment = False
+    for tok in tokens:
+        if "\n" in tok and set(tok) <= _SEPARATOR_CHARS:
+            in_comment = False
+        elif in_comment or tok.startswith("#"):
+            in_comment = True
+            continue
+        out.append(tok)
+    return out
 
 
 def _split_segments(tokens):
@@ -792,7 +833,7 @@ _VLLM_ARG_MAP = {
     "--quantization": ("quantization", str),
     "-q": ("quantization", str),
     "--dtype": ("dtype", str),
-    "--max-model-len": ("max_model_len", int),
+    "--max-model-len": ("max_model_len", _human_readable_int),
     "--tensor-parallel-size": ("tensor_parallel_size", int),
     "-tp": ("tensor_parallel_size", int),
     "--pipeline-parallel-size": ("pipeline_parallel_size", int),
@@ -800,7 +841,7 @@ _VLLM_ARG_MAP = {
     "--enable-expert-parallel": ("enable_expert_parallel", bool),
     "--data-parallel-size": ("data_parallel_size", int),
     "-dp": ("data_parallel_size", int),
-    "--gpu-memory-utilization": ("gpu_memory_utilization", float),
+    "--gpu-memory-utilization": ("gpu_memory_utilization", _finite_float),
     "--max-num-seqs": ("max_num_seqs", int),
     "--seed": ("seed", int),
     "--trust-remote-code": ("trust_remote_code", bool),
@@ -900,7 +941,7 @@ _TRL_ARG_MAP = {
     "--use_rslora": ("use_rslora", bool),
     "--load_in_4bit": ("load_in_4bit", bool),
     "--load_in_8bit": ("load_in_8bit", bool),
-    "--learning_rate": ("learning_rate", float),
+    "--learning_rate": ("learning_rate", _finite_float),
     "--per_device_train_batch_size": ("batch_size", int),
     "--num_train_epochs": ("epochs", _int_or_float),
     "--seed": ("random_seed", int),

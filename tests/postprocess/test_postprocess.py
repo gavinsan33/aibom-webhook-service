@@ -2548,6 +2548,227 @@ def test_trl_config_file_yields_training_intent_instead_of_unknown():
 
 
 # ---------------------------------------------------------------------------
+# CLI parsing: malformed and unconventional user input
+# ---------------------------------------------------------------------------
+
+
+_VLLM_LONG_FLAGS = [k for k in pp._VLLM_ARG_MAP if k.startswith("--")]
+
+
+@pytest.mark.parametrize("flag", _VLLM_LONG_FLAGS)
+def test_every_vllm_flag_accepts_snake_case(flag):
+    """vLLM's own parser accepts `--max_model_len` for `--max-model-len`."""
+    name, conv = pp._VLLM_ARG_MAP[flag]
+    snake = "--" + flag[2:].replace("-", "_")
+    value = {int: "2", pp._human_readable_int: "2", pp._finite_float: "0.5", bool: None}.get(conv, "a=1")
+    tail = [snake] if value is None else [snake, value]
+    kebab = [flag] if value is None else [flag, value]
+    assert pp.detect_vllm_from_command(["vllm", "serve", "m"] + tail) == pp.detect_vllm_from_command(
+        ["vllm", "serve", "m"] + kebab
+    )
+
+
+def test_vllm_mixed_separators_and_negated_snake_case():
+    result = pp.detect_vllm_from_command(
+        ["vllm", "serve", "m", "--max_model-len", "1024", "--no_enable_prefix_caching",
+         "--enable_expert_parallel", "--gpu_memory_utilization=0.85"]
+    )
+    assert result["max_model_len"] == 1024
+    assert result["enable_prefix_caching"] is False
+    assert result["enable_expert_parallel"] is True
+    assert result["gpu_memory_utilization"] == 0.85
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("4096", 4096), ("32k", 32000), ("32K", 32768), ("25.6k", 25600), ("1m", 1_000_000),
+])
+def test_vllm_max_model_len_human_readable(value, expected):
+    result = pp.detect_vllm_from_command(["vllm", "serve", "m", "--max-model-len", value])
+    assert result["max_model_len"] == expected
+
+
+@pytest.mark.parametrize("args", [
+    ["--max-model-len", "abc"], ["--max-model-len", "0.5K"], ["--max-model-len", "4096.5"],
+    ["--tensor-parallel-size", "two"], ["--gpu-memory-utilization", "90%"],
+    ["--gpu-memory-utilization", "nan"], ["--port", "8000.0"],
+])
+def test_vllm_malformed_typed_values_are_dropped_not_stored_as_strings(args):
+    result = pp.detect_vllm_from_command(["vllm", "serve", "m"] + args)
+    name = pp._VLLM_ARG_MAP[args[0]][0]
+    assert name not in result
+    assert result["model_name"] == "m"
+
+
+@pytest.mark.parametrize("args", [
+    ["--learning_rate", "nan"], ["--learning_rate", "inf"], ["--num_train_epochs", "inf"],
+    ["--num_train_epochs", "-inf"], ["--lora_r", "sixteen"], ["--seed", "1e3x"],
+    ["--per_device_train_batch_size", "8.5"],
+])
+def test_trl_malformed_or_non_finite_values_are_dropped(args):
+    """NaN/inf would make the AIBOM invalid JSON and break JCS signing."""
+    result = pp.detect_trl_from_command(["trl", "sft"] + args)
+    name = pp._TRL_ARG_MAP[args[0]][0]
+    assert name not in result
+    assert result["training_framework"] == "trl"
+
+
+def test_empty_flag_values_are_ignored():
+    result = pp.detect_vllm_from_command(["vllm", "serve", "--model=", "--port=", "--dtype", ""])
+    assert result == {"serving_engine": "vllm"}
+    assert "model_name" not in pp.detect_trl_from_command(["trl", "sft", "--model_name_or_path="])
+
+
+def test_vllm_flag_missing_its_value_does_not_swallow_the_next_flag():
+    result = pp.detect_vllm_from_command(["vllm", "serve", "--model", "--port", "8000"])
+    assert "model_name" not in result
+    assert result["port"] == 8000
+
+
+def test_vllm_trailing_flag_with_no_value():
+    assert pp.detect_vllm_from_command(["vllm", "serve", "m", "--max-model-len"]) == {
+        "serving_engine": "vllm", "model_name": "m"
+    }
+
+
+def test_vllm_repeated_flag_last_one_wins():
+    """argparse semantics: a later `--model` overrides an earlier one."""
+    result = pp.detect_vllm_from_command(["vllm", "serve", "--model", "a/one", "--model", "b/two"])
+    assert result["model_name"] == "b/two"
+
+
+def test_vllm_short_flags_with_equals_and_negative_numbers():
+    result = pp.detect_vllm_from_command(["vllm", "serve", "m", "-tp=4", "-pp", "2", "--seed", "-1"])
+    assert result["tensor_parallel_size"] == 4
+    assert result["pipeline_parallel_size"] == 2
+    assert result["seed"] == -1
+
+
+def test_explicit_quantization_flag_suppresses_name_guess():
+    result = pp.detect_vllm_from_command(["vllm", "serve", "org/m-AWQ", "--quantization", "fp8"])
+    assert result["quantization"] == "fp8"
+    assert "quantization_method" not in result
+
+
+@pytest.mark.parametrize("model,method", [
+    ("/mnt/models/Qwen2-7B-Instruct-AWQ", "awq"),
+    ("./llama-7b.Q4_K_M.gguf", "gguf"),
+    ("org/m-awq", "awq"),
+    ("org/模型-GPTQ-Int8", "gptq"),
+])
+def test_quantization_detected_from_unconventional_model_names(model, method):
+    assert pp.detect_vllm_from_command(["vllm", "serve", model])["quantization_method"] == method
+
+
+@pytest.mark.parametrize("model", ["org/Awqward-7b", "org/print4-model", "org/fp8ish-chat"])
+def test_quantization_markers_inside_words_are_not_matched(model):
+    result = pp.detect_vllm_from_command(["vllm", "serve", model])
+    assert result["model_name"] == model
+    assert "quantization_method" not in result
+
+
+def test_model_name_with_spaces_survives_quoting():
+    result = pp.detect_model_from_containers([_sh("vllm serve 'org/my model' --max-model-len 2048")])
+    assert result["model_name"] == "org/my model"
+    assert result["max_model_len"] == 2048
+
+
+def test_model_name_containing_hash_is_not_a_comment():
+    assert pp.detect_model_from_containers([_sh("vllm serve org/m#v2")])["model_name"] == "org/m#v2"
+
+
+def test_shell_comments_are_ignored():
+    script = "# vllm serve old/model --max-model-len 1\nvllm serve new/model  # --max-model-len 99\n"
+    result = pp.detect_model_from_containers([_sh(script)])
+    assert result["model_name"] == "new/model"
+    assert "max_model_len" not in result
+
+
+def test_trailing_comment_does_not_merge_the_next_line():
+    """shlex's own comment handling ate the newline, so `pip install` and the
+    server ended up in one (package-install) command."""
+    result = pp.detect_model_from_containers([_sh("pip install vllm  # pin later\nvllm serve a/b")])
+    assert result["model_name"] == "a/b"
+
+
+def test_blank_lines_and_crlf_line_endings():
+    result = pp.detect_model_from_containers(
+        [_sh("pip install trl\r\n\r\n\ntrl sft --seed 5 \\\r\n  --lora_r 8\r\n")]
+    )
+    assert result["random_seed"] == 5
+
+
+def test_unbalanced_quote_fails_closed():
+    assert pp.detect_model_from_containers([_sh('vllm serve "org/m --port 1')]) == {}
+
+
+def test_env_assignments_and_exec_prefix_before_vllm():
+    result = pp.detect_model_from_containers(
+        [_sh("CUDA_VISIBLE_DEVICES=0,1 HF_HOME=/cache exec vllm serve a/b -tp 2")]
+    )
+    assert result["model_name"] == "a/b"
+    assert result["tensor_parallel_size"] == 2
+
+
+def test_absolute_path_to_vllm_binary():
+    assert pp.detect_vllm_from_command(["/opt/venv/bin/vllm", "serve", "m"])["model_name"] == "m"
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("True", "lora"), ("TRUE", "lora"), ("yes", "lora"), ("1", "lora"),
+    ("False", None), ("no", None), ("0", None),
+])
+def test_trl_use_peft_boolean_spellings(value, expected):
+    result = pp.detect_trl_from_command(["trl", "sft", "--use_peft", value, "--lora_r", "8"])
+    assert result.get("adaptation_method") == expected
+
+
+def test_trl_bool_flag_does_not_consume_a_following_non_bool_value():
+    result = pp.detect_trl_from_command(["trl", "sft", "--use_peft", "org/model"])
+    assert result["adaptation_method"] == "peft"
+    assert "model_name" not in result
+
+
+def test_trl_dora_and_rslora_together_fall_back_to_generic_peft():
+    result = pp.detect_trl_from_command(["trl", "sft", "--use_peft", "--use_dora", "--use_rslora"])
+    assert result["adaptation_method"] == "peft"
+
+
+def test_trl_lora_flags_without_use_peft_do_not_claim_adaptation():
+    result = pp.detect_trl_from_command(["trl", "sft", "--lora_r", "16", "--lora_alpha", "32"])
+    assert "adaptation_method" not in result
+    assert result["lora_rank"] == 16
+
+
+def test_trl_scientific_and_hyphenated_flags():
+    result = pp.detect_trl_from_command(
+        ["trl", "sft", "--learning-rate", "2e-5", "--per-device-train-batch-size", "8",
+         "--model-name-or-path", "org/m"]
+    )
+    assert result["learning_rate"] == 2e-5
+    assert result["batch_size"] == 8
+    assert result["model_name"] == "org/m"
+
+
+def test_trl_flag_case_is_significant():
+    """argparse is case sensitive, so trl would reject these too."""
+    assert "learning_rate" not in pp.detect_trl_from_command(["trl", "sft", "--Learning_Rate", "1e-4"])
+
+
+def test_trl_without_subcommand_is_not_an_invocation():
+    assert pp.detect_trl_from_command(["trl", "--help"]) is None
+    assert pp.detect_trl_from_command(["python", "trl.py", "--seed", "1"]) is None
+
+
+def test_trl_module_path_through_accelerate():
+    result = pp.detect_model_from_containers(
+        [_sh("accelerate launch --num_processes 4 -m trl.scripts.sft --use_peft --lora_r 8")]
+    )
+    assert result["training_framework"] == "trl"
+    assert result["adaptation_method"] == "lora"
+    assert result["parallelization_strategy"] == "data_parallel"
+
+
+# ---------------------------------------------------------------------------
 # Quantization names, hf:// URIs (#108)
 # ---------------------------------------------------------------------------
 
