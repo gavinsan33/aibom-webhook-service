@@ -70,26 +70,12 @@ func ensureWorkloadIdentity(ctx context.Context, clientset kubernetes.Interface,
 		return "", fmt.Errorf("ensure rolebinding %s/%s: %w", namespace, name, err)
 	}
 
-	existing, err := clientset.CoreV1().Secrets(namespace).Get(ctx, name, metav1.GetOptions{})
-	if err == nil && len(existing.Data[workloadIdentityTokenSecretKey]) > 0 {
-		// Already provisioned by an earlier pod of the same job (e.g. a
-		// JobSet replica, or a retried Job pod) -- reuse it rather than
-		// minting (and having to track) a second live token per job.
-		return name, nil
-	}
-	if err != nil {
-		if !apierrors.IsNotFound(err) {
-			return "", fmt.Errorf("get token secret %s/%s: %w", namespace, name, err)
-		}
-		existing = nil
-	}
-
 	token, err := requestServiceAccountToken(ctx, clientset, namespace, name)
 	if err != nil {
 		return "", fmt.Errorf("request token for %s/%s: %w", namespace, name, err)
 	}
 
-	if err := ensureTokenSecret(ctx, clientset, namespace, name, token, existing); err != nil {
+	if err := ensureTokenSecret(ctx, clientset, namespace, name, token); err != nil {
 		return "", fmt.Errorf("write token secret %s/%s: %w", namespace, name, err)
 	}
 	return name, nil
@@ -183,27 +169,20 @@ func requestServiceAccountToken(ctx context.Context, clientset kubernetes.Interf
 	return result.Status.Token, nil
 }
 
-// ensureTokenSecret writes token into a Secret named name, creating it if
-// absent or updating it in place if a prior (e.g. empty/corrupt) Secret of
-// that name already exists -- existing is whatever ensureWorkloadIdentity's
-// earlier Get returned (nil if that Get was a NotFound), reused here so
-// this doesn't need a second round-trip just to learn the ResourceVersion
-// an Update requires.
-func ensureTokenSecret(ctx context.Context, clientset kubernetes.Interface, namespace, name, token string, existing *corev1.Secret) error {
+// ensureTokenSecret creates the Secret holding token. It never reads or
+// updates: the webhook's namespaced Role can't scope get/update to this
+// Secret by name (the name is per-job), and a namespace-wide get would also
+// expose the signing-key Secrets. An existing Secret is left alone, so a later
+// pod of the same job (a JobSet replica, a retried Job pod) reuses the first
+// pod's token and the one minted here goes unused until it expires.
+func ensureTokenSecret(ctx context.Context, clientset kubernetes.Interface, namespace, name, token string) error {
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 		Type:       corev1.SecretTypeOpaque,
 		Data:       map[string][]byte{workloadIdentityTokenSecretKey: []byte(token)},
 	}
-	if existing != nil {
-		secret.ResourceVersion = existing.ResourceVersion
-		_, err := clientset.CoreV1().Secrets(namespace).Update(ctx, secret, metav1.UpdateOptions{})
-		return err
-	}
 	_, err := clientset.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{})
 	if apierrors.IsAlreadyExists(err) {
-		// Lost a create race against another pod of the same job; whichever
-		// write won is fine, both mint a token for the same ServiceAccount.
 		return nil
 	}
 	return err
