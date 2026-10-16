@@ -8,59 +8,37 @@ and rollback-able instead of always overwriting one mutable "latest" tag in plac
 {{- if not (include "aibom-webhook.openshift" .) }}
 {{- fail "build.enabled=true needs OpenShift BuildConfigs; use prebuilt images on other clusters" }}
 {{- end }}
-apiVersion: image.openshift.io/v1
-kind: ImageStream
-metadata:
-  name: aibom-webhook-service
-  namespace: {{ include "aibom-webhook.namespace" . }}
----
-apiVersion: build.openshift.io/v1
-kind: BuildConfig
-metadata:
-  name: aibom-webhook-service
-  namespace: {{ include "aibom-webhook.namespace" . }}
-spec:
-  source:
-    type: Git
-    git:
-      uri: {{ .Values.build.gitRepo }}
-      ref: {{ .Values.build.gitRef }}
-  strategy:
-    type: Docker
-    dockerStrategy:
-      dockerfilePath: Dockerfile
-  output:
-    to:
-      kind: ImageStreamTag
-      name: aibom-webhook-service:{{ include "aibom-webhook.webhookTag" . }}
-  triggers:
-    - type: ConfigChange
+{{- range list
+  (dict "name" "aibom-webhook-service" "dockerfile" "Dockerfile" "tag" "webhookTag")
+  (dict "name" "aibom-postprocess" "dockerfile" "postprocess/Dockerfile" "tag" "postprocessTag")
+  (dict "name" "aibom-discovery" "dockerfile" "discovery/Dockerfile" "tag" "discoveryTag") }}
 ---
 apiVersion: image.openshift.io/v1
 kind: ImageStream
 metadata:
-  name: aibom-postprocess
-  namespace: {{ include "aibom-webhook.namespace" . }}
+  name: {{ .name }}
+  namespace: {{ include "aibom-webhook.namespace" $ }}
 ---
 apiVersion: build.openshift.io/v1
 kind: BuildConfig
 metadata:
-  name: aibom-postprocess
-  namespace: {{ include "aibom-webhook.namespace" . }}
+  name: {{ .name }}
+  namespace: {{ include "aibom-webhook.namespace" $ }}
 spec:
   source:
     type: Git
     git:
-      uri: {{ .Values.build.gitRepo }}
-      ref: {{ .Values.build.gitRef }}
+      uri: {{ $.Values.build.gitRepo }}
+      ref: {{ $.Values.build.gitRef }}
   strategy:
     type: Docker
     dockerStrategy:
-      dockerfilePath: postprocess/Dockerfile
+      dockerfilePath: {{ .dockerfile }}
   output:
     to:
       kind: ImageStreamTag
-      name: aibom-postprocess:{{ include "aibom-webhook.postprocessTag" . }}
+      name: {{ .name }}:{{ include (printf "aibom-webhook.%s" .tag) $ }}
   triggers:
     - type: ConfigChange
+{{- end }}
 {{- end }}

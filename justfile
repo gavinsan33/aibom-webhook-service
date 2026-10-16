@@ -252,13 +252,15 @@ deploy-buildconfig *args: _check-auth
         --set build.enabled=true \
         --set image.webhook.repository="image-registry.openshift-image-registry.svc:5000/{{ webhook_namespace }}/aibom-webhook-service" \
         --set image.postprocess.repository="image-registry.openshift-image-registry.svc:5000/{{ webhook_namespace }}/aibom-postprocess" \
-        --set-string image.webhook.tag="$version" --set-string image.postprocess.tag="$version" "${gitref_args[@]}"
+        --set image.discovery.repository="image-registry.openshift-image-registry.svc:5000/{{ webhook_namespace }}/aibom-discovery" \
+        --set-string image.webhook.tag="$version" --set-string image.postprocess.tag="$version" \
+        --set-string image.discovery.tag="$version" "${gitref_args[@]}"
     if [[ "$first_install" = true ]]; then
         # The BuildConfigs' ConfigChange trigger already auto-fired an initial build the
         # moment they were just created above — starting another would just double build
         # time. Wait on that auto-triggered build (always numbered -1) instead.
         echo "first install: waiting on the auto-triggered initial builds instead of starting redundant ones"
-        for bc in aibom-webhook-service aibom-postprocess; do
+        for bc in aibom-webhook-service aibom-postprocess aibom-discovery; do
             for i in $(seq 1 30); do
                 oc -n {{ webhook_namespace }} get "build/${bc}-1" >/dev/null 2>&1 && break
                 sleep 1
@@ -269,7 +271,7 @@ deploy-buildconfig *args: _check-auth
         # latest is intentionally mutable — always rebuild it. Any other version is an
         # immutable per-commit tag: if it's already been built (and not since pruned),
         # rebuilding would just reproduce the same content, so skip it.
-        for bc in aibom-webhook-service aibom-postprocess; do
+        for bc in aibom-webhook-service aibom-postprocess aibom-discovery; do
             if [ "$version" != "latest" ] && oc -n {{ webhook_namespace }} get istag "${bc}:${version}" >/dev/null 2>&1; then
                 echo "${bc}:${version} already built — skipping rebuild"
             else
@@ -595,20 +597,25 @@ uninstall-namespace *args: _check-auth
 # X.Y.Z with appVersion X.Y.Z, so their images default to :X.Y.Z -- the tags
 # .github/workflows/release.yml builds from the same git tag. Refuses a version
 # that's already published: a release is pushed once.
-# Usage: just chart-push [--version=X.Y.Z] [--repo=<repo>]
+# --out keeps the packages, which release.yml also adds to the Helm repo on
+# GitHub Pages.
+# Usage: just chart-push [--version=X.Y.Z] [--repo=<repo>] [--out=<dir>]
 [group('charts')]
 chart-push *args:
     #!/usr/bin/env bash
     set -euo pipefail
     repo="{{ default_repo }}"
     version=""
+    out=""
     for arg in {{ args }}; do
         case "$arg" in
             --version=*) version="${arg#--version=}" ;;
             --repo=*) repo="${arg#--repo=}" ;;
-            *) echo "error: unknown argument '$arg' (expected --version=X.Y.Z or --repo=<repo>)" >&2; exit 1 ;;
+            --out=*) out="${arg#--out=}" ;;
+            *) echo "error: unknown argument '$arg' (expected --version=X.Y.Z, --repo=<repo> or --out=<dir>)" >&2; exit 1 ;;
         esac
     done
+    app_version=""
     if [[ -n "$version" ]]; then
         [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "error: --version must be X.Y.Z, got '$version'" >&2; exit 1; }
         for chart in aibom-webhook aibom-workload-namespace; do
@@ -616,24 +623,64 @@ chart-push *args:
                 echo "error: oci://$repo/$chart $version is already published" >&2; exit 1
             fi
         done
+        app_version="$version"
+    else
+        sha="$(git rev-parse --short HEAD)"
+        git diff --quiet HEAD || sha="${sha}-dirty"
+        # Both charts share one Chart.yaml version.
+        version="$(grep '^version:' charts/aibom-webhook/Chart.yaml | awk '{print $2}')-${sha}"
     fi
-    pkg_dir="$(mktemp -d)"
-    trap 'rm -rf charts/aibom-workload-namespace/files "$pkg_dir"' EXIT
+    if [[ -z "$out" ]]; then
+        out="$(mktemp -d)"
+        trap 'rm -rf "$out"' EXIT
+    fi
+    {{ just_executable() }} _chart-package "$version" "$out" "$app_version"
+    for chart in aibom-webhook aibom-workload-namespace; do
+        helm push "$out/$chart-$version.tgz" "oci://$repo"
+        echo "pushed oci://$repo/$chart --version=$version"
+    done
+
+# Packages both charts as <version> into <out>, embedding
+# scripts/aibom-scripts/*.py in the namespace chart. A non-empty app_version
+# also sets appVersion.
+_chart-package version out app_version="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    trap 'rm -rf charts/aibom-workload-namespace/files' EXIT
     rm -rf charts/aibom-workload-namespace/files
-    mkdir -p charts/aibom-workload-namespace/files
+    mkdir -p charts/aibom-workload-namespace/files "{{ out }}"
     cp scripts/aibom-scripts/generate_snapshot.py scripts/aibom-scripts/runtime_detector.py \
         scripts/aibom-scripts/k8s_api.py scripts/aibom-scripts/dataset_sidecar.py \
         charts/aibom-workload-namespace/files/
-    sha="$(git rev-parse --short HEAD)"
-    git diff --quiet HEAD || sha="${sha}-dirty"
     for chart in aibom-webhook aibom-workload-namespace; do
-        if [[ -n "$version" ]]; then
-            chart_version="$version"
-            helm package "charts/$chart" -d "$pkg_dir" --version "$version" --app-version "$version"
-        else
-            chart_version="$(grep '^version:' "charts/$chart/Chart.yaml" | awk '{print $2}')-${sha}"
-            helm package "charts/$chart" -d "$pkg_dir" --version "$chart_version"
-        fi
-        helm push "$pkg_dir/$chart-${chart_version}.tgz" "oci://$repo"
-        echo "pushed oci://$repo/$chart --version=$chart_version"
+        helm package "charts/$chart" -d "{{ out }}" --version "{{ version }}" {{ if app_version == "" { "" } else { "--app-version " + app_version } }}
+    done
+
+# Runs Red Hat's chart-verifier on both charts, packaged as <version>, with the
+# community profile the OpenShift Helm catalog uses. Skips chart-testing, which
+# installs the chart into a cluster. Writes a report per chart to <out>.
+# Needs podman or docker.
+# Usage: just chart-verify [--version=<semver>] [--out=<dir>]
+[group('charts')]
+chart-verify *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    version="$(grep '^version:' charts/aibom-webhook/Chart.yaml | awk '{print $2}')"
+    out="chart-verifier"
+    for arg in {{ args }}; do
+        case "$arg" in
+            --version=*) version="${arg#--version=}" ;;
+            --out=*) out="${arg#--out=}" ;;
+            *) echo "error: unknown argument '$arg' (expected --version=<semver> or --out=<dir>)" >&2; exit 1 ;;
+        esac
+    done
+    runtime="$(command -v podman || command -v docker)" || { echo "error: needs podman or docker" >&2; exit 1; }
+    {{ just_executable() }} _chart-package "$version" "$out" "$version"
+    out="$(cd "$out" && pwd)"
+    for chart in aibom-webhook aibom-workload-namespace; do
+        "$runtime" run --rm -v "$out:/charts:z" quay.io/redhat-certification/chart-verifier:latest \
+            verify "/charts/$chart-$version.tgz" -x chart-testing --set profile.vendortype=community \
+            > "$out/$chart-$version-report.yaml"
+        echo "$chart: $out/$chart-$version-report.yaml"
+        grep -B2 'outcome: FAIL' "$out/$chart-$version-report.yaml" | grep 'check:' | sed 's/^ */  failed: /' || true
     done

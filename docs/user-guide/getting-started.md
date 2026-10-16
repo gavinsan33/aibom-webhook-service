@@ -11,7 +11,7 @@
 | Dependency | Needed for | Required? | Without it |
 |------------|-----------|-----------|------------|
 | [cert-manager](https://cert-manager.io/) | Issues and renews the webhook's TLS certificate outside OpenShift | Only off OpenShift | The webhook chart can't issue its certificate, so the API server can't call it. On OpenShift the built-in service-ca operator issues it instead; set `tls.provider=cert-manager` to use cert-manager there. |
-| A pullable image with `python3` and `bash` | The `aibom-discovery` init container | Yes | Instrumented pods fail to start. Fail-open does not cover this. See below. |
+| Pull access to the discovery image | The `aibom-discovery` init container | Yes | Instrumented pods fail to start. Fail-open does not cover this. See below. |
 | Prometheus Operator CRDs (`monitoring.coreos.com/v1` `PodMonitor`) | Scraping vLLM's `/metrics` for inference performance | Yes, unless vLLM metrics are skipped | The namespace chart install fails outright. Skip it with `--skip-vllm-metrics`, or `--set vllmMetrics.enabled=false` with Helm. |
 | A Prometheus API endpoint (`prometheus.url`) | All telemetry queries | For telemetry | Telemetry comes back empty. On OpenShift it defaults to Thanos Querier in `openshift-monitoring`. Elsewhere it is empty until you set it. |
 | Read access to Prometheus for the postprocess ServiceAccount | Letting postprocess read those metrics | For telemetry, if Prometheus checks the token | Telemetry comes back empty. On OpenShift the webhook chart binds `cluster-monitoring-view`. If your account can't create it, skip it with `--set monitoringAccess.enabled=false` and have a cluster-admin create it once by hand ([Troubleshooting](troubleshooting.md)). Elsewhere bind it yourself. |
@@ -21,7 +21,7 @@
 
 Telemetry is collected only for pods with a detected GPU.
 
-The discovery image needs only `python3` and `bash`. Left unset, the chart uses the OpenShift AI `runtime-pytorch` ImageStream in `redhat-ods-applications` where OpenShift AI is installed, and `pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime` from Docker Hub everywhere else. If the cluster can't pull the default, for example because it has no egress, point the chart at an image it can pull:
+Instrumented pods pull the discovery image, `quay.io/project-aibom/aibom-discovery` at the chart's version: a small UBI image (about 230 MB) with `python3`, `bash`, `lscpu` and `lsblk`. If the cluster can't reach Quay, for example because it has no egress, point the chart at a copy it can pull:
 
 ```bash
 helm upgrade --install aibom-webhook oci://quay.io/project-aibom/aibom-webhook \
@@ -46,6 +46,23 @@ helm upgrade --install aibom-webhook oci://quay.io/project-aibom/aibom-webhook \
 The chart installs cluster-scoped RBAC, which a namespace-scoped admin cannot grant themselves, so run it as a cluster-admin. The commands here use `--kube-as-user=system:admin` to do that by impersonation, which needs impersonation rights and so won't work on managed clusters such as ROSA or ARO. There, log in as a cluster-admin user and drop `--kube-as-user=system:admin` from the `helm` commands and `--as=system:admin` from the `oc` commands.
 
 Without `--version`, Helm installs the newest release. Pass `--version=X.Y.Z` to pin one, or `--version=<version>-<git-sha>` for a dev build from `main` (see [Upgrading](../reference/upgrading.md#versions)).
+
+## Install from the OpenShift console
+
+To install from the console's Developer Catalog (Helm Charts) instead of the command line, a cluster-admin adds the project's Helm repository once:
+
+```yaml
+apiVersion: helm.openshift.io/v1beta1
+kind: HelmChartRepository
+metadata:
+  name: project-aibom
+spec:
+  name: Project AIBOM
+  connectionConfig:
+    url: https://gavinsan33.github.io/aibom-webhook-service
+```
+
+Both charts then appear in the catalog, with a form built from their values. Install the webhook chart once, as a cluster-admin, then the namespace chart in each namespace that runs workloads, still after labeling the namespace with `oc label`. Upgrades are not automatic: the Helm release's Upgrade action installs a newer version, and the CRDs still need the separate apply described in [Upgrading](../reference/upgrading.md).
 
 ## Kubernetes without OpenShift
 
