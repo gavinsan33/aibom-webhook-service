@@ -1760,3 +1760,64 @@ func TestStripAllFinalizers(t *testing.T) {
 		t.Errorf("second run = %d jobs / %d pods / %v, want 0 / 0 / nil", jobs, pods, err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// mergeDatasets across pods (#107)
+// ---------------------------------------------------------------------------
+
+func TestMergeDatasets_DedupesSameDatasetAcrossPods(t *testing.T) {
+	pod := `{"datasets":[{"dataset_name":"alpaca","source":"datasets.load_dataset"}]}`
+	result := mergeDatasets([]string{pod, pod, pod})
+
+	var got struct {
+		Datasets []map[string]interface{} `json:"datasets"`
+	}
+	if err := json.Unmarshal([]byte(result), &got); err != nil {
+		t.Fatalf("invalid result %q: %v", result, err)
+	}
+	if len(got.Datasets) != 1 {
+		t.Errorf("3 identical pods should merge to 1 dataset, got %d: %s", len(got.Datasets), result)
+	}
+}
+
+func TestMergeDatasets_KeepsSameNameFromDifferentSources(t *testing.T) {
+	a := `{"datasets":[{"dataset_name":"alpaca","source":"datasets.load_dataset"}]}`
+	b := `{"datasets":[{"dataset_name":"alpaca","source":"torch.utils.data.DataLoader"}]}`
+	var got struct {
+		Datasets []map[string]interface{} `json:"datasets"`
+	}
+	if err := json.Unmarshal([]byte(mergeDatasets([]string{a, b})), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Datasets) != 2 {
+		t.Errorf("same name via different sources are distinct entries, got %d", len(got.Datasets))
+	}
+}
+
+func TestMergeDatasets_GitInfoComesFromOnePod(t *testing.T) {
+	// Pod A has a commit but is on a detached HEAD (no branch); pod B has a
+	// branch and dirty flag for a different checkout. Per-key merging would
+	// label A's commit with B's branch.
+	a := `{"runtime_info":{"git_commit":"aaa111","git_repository":"https://h/a"}}`
+	b := `{"runtime_info":{"git_commit":"bbb222","git_branch":"main","git_dirty":true,"framework":"PyTorch"}}`
+
+	var got struct {
+		RuntimeInfo map[string]interface{} `json:"runtime_info"`
+	}
+	if err := json.Unmarshal([]byte(mergeDatasets([]string{a, b})), &got); err != nil {
+		t.Fatal(err)
+	}
+	ri := got.RuntimeInfo
+	if ri["git_commit"] != "aaa111" || ri["git_repository"] != "https://h/a" {
+		t.Errorf("git group should come from the first pod, got %v", ri)
+	}
+	if _, ok := ri["git_branch"]; ok {
+		t.Errorf("git_branch from another pod must not be mixed in, got %v", ri)
+	}
+	if _, ok := ri["git_dirty"]; ok {
+		t.Errorf("git_dirty from another pod must not be mixed in, got %v", ri)
+	}
+	if ri["framework"] != "PyTorch" {
+		t.Errorf("non-git keys still merge across pods, got %v", ri)
+	}
+}

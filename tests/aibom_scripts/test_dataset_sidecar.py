@@ -122,3 +122,61 @@ def test_run_once_does_not_advance_mtime_on_write_failure(tmp_path, monkeypatch)
     result = ds._run_once(None)
 
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# _publish_final() (#107)
+# ---------------------------------------------------------------------------
+
+
+def test_publish_final_retries_a_failed_write(tmp_path, monkeypatch):
+    output_path = _setup(tmp_path, monkeypatch, signing_key=b"key")
+    output_path.write_text(json.dumps({"datasets": [{"dataset_name": "x"}]}))
+    monkeypatch.setattr(ds, "_FINAL_PUBLISH_BACKOFF_S", 0)
+    monkeypatch.setattr(ds.time, "sleep", lambda s: None)
+
+    calls = []
+
+    def flaky_patch(*a, **k):
+        calls.append(1)
+        if len(calls) < 3:
+            raise RuntimeError("api unavailable")
+
+    monkeypatch.setattr(ds.k8s_api, "patch_configmap", flaky_patch)
+
+    result = ds._publish_final(None)
+
+    assert len(calls) == 3
+    assert result == output_path.stat().st_mtime
+
+
+def test_publish_final_gives_up_after_bounded_attempts(tmp_path, monkeypatch):
+    output_path = _setup(tmp_path, monkeypatch, signing_key=b"key")
+    output_path.write_text(json.dumps({"datasets": []}))
+    monkeypatch.setattr(ds.time, "sleep", lambda s: None)
+    monkeypatch.setattr(ds, "_FINAL_PUBLISH_ATTEMPTS", 3)
+
+    calls = []
+
+    def failing_patch(*a, **k):
+        calls.append(1)
+        raise RuntimeError("api unavailable")
+
+    monkeypatch.setattr(ds.k8s_api, "patch_configmap", failing_patch)
+
+    assert ds._publish_final(None) is None
+    assert len(calls) == 3
+
+
+def test_publish_final_is_a_single_pass_when_nothing_new(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(ds.time, "sleep", lambda s: pytest_fail("must not sleep"))
+    calls = []
+    monkeypatch.setattr(ds.k8s_api, "patch_configmap", lambda *a, **k: calls.append(1))
+
+    assert ds._publish_final(None) is None  # no file at all
+    assert calls == []
+
+
+def pytest_fail(msg):
+    raise AssertionError(msg)
