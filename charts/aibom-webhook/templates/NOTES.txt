@@ -1,0 +1,9 @@
+The AIBOM webhook is installed in {{ include "aibom-webhook.namespace" . }}.
+
+To record AIBOMs in a namespace, label it and install the namespace chart there:
+
+  oc label namespace <namespace> aibom.io/enabled=true
+  helm upgrade --install aibom-ns-<namespace> oci://quay.io/project-aibom/aibom-workload-namespace -n <namespace>{{ if ne (include "aibom-webhook.namespace" .) "project-aibom" }} --set aibomSystemNamespace={{ include "aibom-webhook.namespace" . }}{{ end }}
+
+Check the install with:  helm test {{ .Release.Name }} -n {{ include "aibom-webhook.namespace" . }}
+Docs: https://gavinsan33.github.io/project-aibom/
