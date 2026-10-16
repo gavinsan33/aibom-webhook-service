@@ -8,6 +8,12 @@
 # BuildConfig writes to (see templates/build.yaml) — the two must move together.
 # Override both to a commit SHA (justfile `tag` recipe arg) for immutable, rollback-able
 # builds instead of always overwriting "latest" in place.
+# auto, openshift or kubernetes. auto detects OpenShift by its image.openshift.io
+# API; set it explicitly for `helm template` without a cluster. On OpenShift it
+# enables the image-label git provenance RBAC, the Thanos Querier default below
+# and in-cluster builds (build.enabled).
+platform: auto
+
 image:
   webhook:
     repository: quay.io/gsanders/aibom-webhook-service
@@ -24,15 +30,14 @@ image:
   # GPU pods the NVIDIA Container Toolkit injects them from the node's
   # driver at container start, triggered by the nvidia.com/gpu claim the
   # webhook mirrors onto this init container (see CLAUDE.md); CPU-only pods
-  # simply get "Not available" for the GPU fields. Defaults to the OpenShift AI
-  # runtime-pytorch ImageStream, which avoids an external pull per pod but only
-  # exists where OpenShift AI is installed (redhat-ods-applications). Without it
-  # the init container can't pull and instrumented pods fail to start, so set
-  # this to any image with python3 + bash, e.g. repository pytorch/pytorch,
-  # tag 2.2.0-cuda12.1-cudnn8-runtime.
+  # simply get "Not available" for the GPU fields. Left empty, it's the OpenShift
+  # AI runtime-pytorch ImageStream (no external pull per pod) when the OpenShift
+  # AI API (datasciencecluster.opendatahub.io/v1) exists, and
+  # pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime otherwise. Setting repository
+  # requires tag. Instrumented pods can't start if this image can't be pulled.
   discovery:
-    repository: image-registry.openshift-image-registry.svc:5000/redhat-ods-applications/runtime-pytorch
-    tag: pytorch
+    repository: ""
+    tag: ""
   pullPolicy: Always
 
 replicaCount: 1
@@ -97,19 +102,19 @@ finalizerCleanup:
 # Prometheus/Thanos endpoint the postprocess Job queries directly for telemetry.
 # Auth (bearer ServiceAccount token) and TLS trust (the service-ca ConfigMap
 # aibom-workload-namespace creates per opted-in namespace, or the system trust
-# store if that's absent) are always automatic — see postprocess.py. Empty
-# disables telemetry collection entirely.
+# store if that's absent) are always automatic — see postprocess.py. Unset, it's
+# https://thanos-querier.openshift-monitoring.svc:9091 on OpenShift and empty
+# elsewhere. Empty disables telemetry collection entirely.
 prometheus:
-  url: https://thanos-querier.openshift-monitoring.svc:9091
+  url: null
 
-# Optional, purely for a clickable Grafana Explore deep link in the AIBOM
-# (resource_utilization.grafana_links) — actual telemetry queries always go
-# straight to prometheus.url above, never through Grafana. datasourceUid is
-# the UID of the Grafana datasource pointing at that same Prometheus. Leave
-# both empty to omit the link entirely.
-grafana:
-  url: ""
-  datasourceUid: ""
+# Git provenance from image labels: when the cluster has no image.openshift.io
+# Image object for a workload's image (any non-OpenShift cluster, or an image
+# OpenShift never imported), the postprocess Job reads the labels from the
+# image's registry instead. Anonymous pulls only, so private images are skipped.
+# Needs egress from workload namespaces to the registries. Set false to disable.
+gitProvenance:
+  registryLookup: true
 
 # debug.keepPostprocessJobs skips the usual cleanup of a succeeded (or failed)
 # postprocess Job/data ConfigMap, for inspecting postprocess pod logs/exit

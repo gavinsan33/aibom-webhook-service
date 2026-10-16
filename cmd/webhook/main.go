@@ -33,10 +33,9 @@ func main() {
 	flag.StringVar(&cfg.TrustedWatcherIdentity, "trusted-watcher-identity", "", "full username (e.g. system:serviceaccount:aibom-system:aibom-webhook) of this binary's own watcher identity, used to verify a Job claiming aibom.io/postprocess-for was actually created by the watcher; empty disables the check")
 	flag.StringVar(&cfg.TrustedJobControllerIdentity, "trusted-job-controller-identity", "", "full username the cluster's built-in Job controller uses when creating a Job's pods (commonly system:serviceaccount:kube-system:job-controller, but verify on your own cluster -- it depends on kube-controller-manager's --use-service-account-credentials flag); empty disables this extra check, leaving only the weaker ownerReference-only check")
 	flag.StringVar(&cfg.PrometheusURL, "prometheus-url", "https://thanos-querier.openshift-monitoring.svc:9091", "Prometheus/Thanos endpoint the postprocess Job queries for telemetry (empty disables telemetry collection)")
-	flag.StringVar(&cfg.GrafanaURL, "grafana-url", "", "Grafana base URL, used only to build a clickable Explore link in the AIBOM (telemetry itself always queries prometheus-url directly); empty omits the link")
-	flag.StringVar(&cfg.GrafanaDatasourceUID, "grafana-datasource-uid", "", "UID of the Grafana datasource pointing at prometheus-url, needed to build the Explore link above")
 	flag.BoolVar(&cfg.DebugKeepPostprocessJobs, "debug-keep-postprocess-jobs", false, "skip deleting succeeded postprocess Jobs/data ConfigMaps, for inspecting their logs/state after the fact (leaks one of each per completed workload — not for routine production use)")
 	flag.BoolVar(&cfg.DebugTelemetryAllPods, "debug-telemetry-all-pods", false, "postprocess Jobs query Prometheus telemetry for every pod regardless of detected GPU count (for local testing on clusters with no real GPU hardware, e.g. kind — not for routine production use)")
+	flag.BoolVar(&cfg.RegistryLabelLookup, "registry-label-lookup", true, "postprocess Jobs read image labels for git provenance from the image's registry (anonymously) when the cluster has no Image object for it")
 	flag.StringVar(&cfg.DatasetSidecarImage, "dataset-sidecar-image", "python:3.12-slim", "image for the dataset-signing sidecar container")
 	stripFinalizers := flag.Bool("strip-finalizers", false, "remove this project's aibom.io/log-extraction and aibom.io/log-extraction-pod finalizers from every Job and Pod in the cluster, then exit (run by the chart's post-delete hook)")
 	flag.Parse()
@@ -98,10 +97,9 @@ func main() {
 		w := watcher.New(clientset, watcher.Config{
 			PostprocessImage:         cfg.PostprocessImage,
 			PrometheusURL:            cfg.PrometheusURL,
-			GrafanaURL:               cfg.GrafanaURL,
-			GrafanaDatasourceUID:     cfg.GrafanaDatasourceUID,
 			DebugKeepPostprocessJobs: cfg.DebugKeepPostprocessJobs,
 			DebugTelemetryAllPods:    cfg.DebugTelemetryAllPods,
+			RegistryLabelLookup:      cfg.RegistryLabelLookup,
 		})
 		go func() {
 			if err := w.Start(ctx); err != nil {

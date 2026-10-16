@@ -1,17 +1,15 @@
 package config
 
 type Config struct {
-	TLSCertPath          string
-	TLSKeyPath           string
-	Port                 int
-	DiscoveryImage       string
-	DatasetDetection     bool
-	EnableWatcher        bool
-	PostprocessImage     string
-	DatasetSidecarImage  string
-	PrometheusURL        string
-	GrafanaURL           string
-	GrafanaDatasourceUID string
+	TLSCertPath         string
+	TLSKeyPath          string
+	Port                int
+	DiscoveryImage      string
+	DatasetDetection    bool
+	EnableWatcher       bool
+	PostprocessImage    string
+	DatasetSidecarImage string
+	PrometheusURL       string
 	// DebugKeepPostprocessJobs skips the usual cleanup of a succeeded postprocess
 	// Job/data ConfigMap (see watcher.collectAIBOM) — for inspecting postprocess
 	// pod logs/exit state or the data ConfigMap's contents after the fact. Left on,
@@ -23,6 +21,9 @@ type Config struct {
 	// for local testing against a mock cluster (e.g. kind) with no real GPU
 	// hardware, where nvidia-smi always reports zero GPUs.
 	DebugTelemetryAllPods bool
+	// RegistryLabelLookup lets the postprocess Job read image labels from the
+	// image's registry when the cluster has no Image object for it.
+	RegistryLabelLookup bool
 
 	// TrustedWatcherIdentity is the full Kubernetes username (e.g.
 	// "system:serviceaccount:aibom-system:aibom-webhook") of the

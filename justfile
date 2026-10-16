@@ -10,6 +10,13 @@ webhook_namespace := "project-aibom"
 # quay.io org/user that deploy/deploy-local/chart-push push to and pull from by default.
 # Override per-invocation with --repo=<repo>, or with `just --set default_repo <repo> <recipe>`.
 default_repo := "quay.io/gsanders"
+# Cluster flavor the deploy recipes target: openshift (default) or kubernetes.
+# kubernetes uses kubectl and doesn't impersonate system:admin, an OpenShift
+# identity; a cluster-admin kubeconfig is expected instead.
+platform := env("AIBOM_PLATFORM", "openshift")
+kubectl := if platform == "openshift" { "oc" } else { "kubectl" }
+# Identity cluster-scoped steps impersonate. Empty uses your own credentials.
+admin_as := if platform == "openshift" { "system:admin" } else { "" }
 
 # --- Build & test ------------------------------------------------------------
 
@@ -148,7 +155,7 @@ docker-push-postprocess *args:
 
 # Every recipe below that talks to a cluster depends on this, so it always runs first.
 _check-auth:
-    @oc whoami >/dev/null 2>&1 || { echo "error: not logged in to a cluster — run 'oc login' first" >&2; exit 1; }
+    @{{ if kubectl == "oc" { "oc whoami" } else { kubectl + " auth whoami" } }} >/dev/null 2>&1 || { echo "error: not logged in to a cluster — check your kubeconfig ('oc login' on OpenShift)" >&2; exit 1; }
 
 # --version=<sha> is the single source of truth for what gets built and how it's
 # labeled: it sets the BuildConfig output ImageStreamTag, the Deployment's image
@@ -197,6 +204,7 @@ _check-auth:
 deploy-buildconfig *args: _check-auth
     #!/usr/bin/env bash
     set -euo pipefail
+    [[ "{{ platform }}" = openshift ]] || { echo "error: deploy-buildconfig needs OpenShift BuildConfigs; use 'just deploy' or 'just deploy-local'" >&2; exit 1; }
     version=""
     branch=""
     values_file=""
@@ -222,7 +230,7 @@ deploy-buildconfig *args: _check-auth
     ns_flag="--create-namespace"
     [[ "$skip_crds" = true ]] && ns_flag="--skip-crds"
     kube_as_user_args=()
-    [[ "$skip_crds" = true ]] || kube_as_user_args=(--kube-as-user=system:admin)
+    [[ "$skip_crds" = true ]] || kube_as_user_args=(--kube-as-user={{ admin_as }})
     # Helm's crds/ directory is install-only -- `helm upgrade --install` never
     # re-applies it once the release already exists (README's "Helm installs
     # CRDs once but never upgrades them" note). Left to that alone, a schema
@@ -231,7 +239,7 @@ deploy-buildconfig *args: _check-auth
     # postprocess.py still logs success, and spec is CEL-immutable so it can
     # never be repaired after the fact (review finding, PR #82). Apply it
     # explicitly on every deploy instead of relying on the manual step.
-    [[ "$skip_crds" = true ]] || oc apply -f charts/aibom-webhook/crds/aibom-crd.yaml --as=system:admin
+    [[ "$skip_crds" = true ]] || {{ kubectl }} apply -f charts/aibom-webhook/crds/aibom-crd.yaml --as={{ admin_as }}
     values_args=()
     [[ -n "$values_file" ]] && values_args=(-f "$values_file")
     gitref_args=()
@@ -270,8 +278,8 @@ deploy-buildconfig *args: _check-auth
         done
     fi
     oc -n {{ webhook_namespace }} delete pods -l openshift.io/build.name --field-selector=status.phase==Succeeded
-    oc -n {{ webhook_namespace }} rollout restart deployment/aibom-webhook
-    oc -n {{ webhook_namespace }} rollout status deployment/aibom-webhook --timeout=120s
+    {{ kubectl }} -n {{ webhook_namespace }} rollout restart deployment/aibom-webhook
+    {{ kubectl }} -n {{ webhook_namespace }} rollout status deployment/aibom-webhook --timeout=120s
     echo "NOTE: run 'just setup-namespace <namespace>' for each workload namespace"
 
 # Usage: just undeploy [--skip-crds]
@@ -299,7 +307,7 @@ undeploy *args: _check-auth
         esac
     done
     kube_as_user_args=()
-    [[ "$skip_crds" = true ]] || kube_as_user_args=(--kube-as-user=system:admin)
+    [[ "$skip_crds" = true ]] || kube_as_user_args=(--kube-as-user={{ admin_as }})
     helm uninstall aibom-webhook -n {{ webhook_namespace }} "${kube_as_user_args[@]}"
 
 # Build both images locally and push them to quay.io, then install/upgrade the
@@ -353,11 +361,11 @@ deploy-local *args: _check-auth
     ns_flag="--create-namespace"
     [[ "$skip_crds" = true ]] && ns_flag="--skip-crds"
     kube_as_user_args=()
-    [[ "$skip_crds" = true ]] || kube_as_user_args=(--kube-as-user=system:admin)
+    [[ "$skip_crds" = true ]] || kube_as_user_args=(--kube-as-user={{ admin_as }})
     # See deploy-buildconfig's identical step: Helm's crds/ directory is
     # install-only, so a schema change would otherwise be silently pruned on
     # every existing install until someone remembers the manual `oc apply`.
-    [[ "$skip_crds" = true ]] || oc apply -f charts/aibom-webhook/crds/aibom-crd.yaml --as=system:admin
+    [[ "$skip_crds" = true ]] || {{ kubectl }} apply -f charts/aibom-webhook/crds/aibom-crd.yaml --as={{ admin_as }}
     values_args=()
     [[ -n "$values_file" ]] && values_args=(-f "$values_file")
     helm upgrade --install aibom-webhook charts/aibom-webhook -n {{ webhook_namespace }} "$ns_flag" \
@@ -367,8 +375,8 @@ deploy-local *args: _check-auth
         --set image.webhook.repository="${repo}/aibom-webhook-service" \
         --set image.postprocess.repository="${repo}/aibom-postprocess" \
         --set image.webhook.tag="$version" --set image.postprocess.tag="$version"
-    oc -n {{ webhook_namespace }} rollout restart deployment/aibom-webhook
-    oc -n {{ webhook_namespace }} rollout status deployment/aibom-webhook --timeout=120s
+    {{ kubectl }} -n {{ webhook_namespace }} rollout restart deployment/aibom-webhook
+    {{ kubectl }} -n {{ webhook_namespace }} rollout status deployment/aibom-webhook --timeout=120s
     echo "NOTE: run 'just setup-namespace <namespace>' for each workload namespace"
 
 # The seamless default: install/upgrade the chart against images Quay already
@@ -402,11 +410,11 @@ deploy *args: _check-auth
     ns_flag="--create-namespace"
     [[ "$skip_crds" = true ]] && ns_flag="--skip-crds"
     kube_as_user_args=()
-    [[ "$skip_crds" = true ]] || kube_as_user_args=(--kube-as-user=system:admin)
+    [[ "$skip_crds" = true ]] || kube_as_user_args=(--kube-as-user={{ admin_as }})
     # See deploy-buildconfig's identical step: Helm's crds/ directory is
     # install-only, so a schema change would otherwise be silently pruned on
     # every existing install until someone remembers the manual `oc apply`.
-    [[ "$skip_crds" = true ]] || oc apply -f charts/aibom-webhook/crds/aibom-crd.yaml --as=system:admin
+    [[ "$skip_crds" = true ]] || {{ kubectl }} apply -f charts/aibom-webhook/crds/aibom-crd.yaml --as={{ admin_as }}
     values_args=()
     [[ -n "$values_file" ]] && values_args=(-f "$values_file")
     helm upgrade --install aibom-webhook charts/aibom-webhook -n {{ webhook_namespace }} "$ns_flag" \
@@ -416,8 +424,8 @@ deploy *args: _check-auth
         --set image.webhook.repository="${repo}/aibom-webhook-service" \
         --set image.postprocess.repository="${repo}/aibom-postprocess" \
         --set image.webhook.tag="$version" --set image.postprocess.tag="$version"
-    oc -n {{ webhook_namespace }} rollout restart deployment/aibom-webhook
-    oc -n {{ webhook_namespace }} rollout status deployment/aibom-webhook --timeout=120s
+    {{ kubectl }} -n {{ webhook_namespace }} rollout restart deployment/aibom-webhook
+    {{ kubectl }} -n {{ webhook_namespace }} rollout status deployment/aibom-webhook --timeout=120s
     echo "NOTE: run 'just setup-namespace <namespace>' for each workload namespace"
 
 # --- Local kind cluster --------------------------------------------------------
@@ -519,8 +527,8 @@ setup-namespace *args: _check-auth
     [[ -n "$namespace" ]] || { echo "error: --namespace=<ns> is required" >&2; exit 1; }
     kube_as_user_args=()
     if [ "$skip_label" != true ]; then
-        oc label namespace "$namespace" aibom.io/enabled=true --overwrite --as=system:admin
-        kube_as_user_args=(--kube-as-user=system:admin)
+        {{ kubectl }} label namespace "$namespace" aibom.io/enabled=true --overwrite --as={{ admin_as }}
+        kube_as_user_args=(--kube-as-user={{ admin_as }})
     fi
     monitoring_args=()
     [ "$skip_monitoring_access" = true ] && monitoring_args=(--set monitoringAccess.enabled=false)
@@ -563,10 +571,10 @@ uninstall-namespace *args: _check-auth
     done
     [[ -n "$namespace" ]] || { echo "error: --namespace=<ns> is required" >&2; exit 1; }
     kube_as_user_args=()
-    [[ "$skip_label" = true ]] || kube_as_user_args=(--kube-as-user=system:admin)
+    [[ "$skip_label" = true ]] || kube_as_user_args=(--kube-as-user={{ admin_as }})
     helm uninstall "aibom-ns-$namespace" -n "$namespace" "${kube_as_user_args[@]}"
     if [ "$skip_label" != true ]; then
-        oc label namespace "$namespace" aibom.io/enabled- --as=system:admin
+        {{ kubectl }} label namespace "$namespace" aibom.io/enabled- --as={{ admin_as }}
     fi
 
 # --- Chart publishing -----------------------------------------------------

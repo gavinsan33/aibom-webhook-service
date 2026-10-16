@@ -690,6 +690,144 @@ def test_detect_git_provenance_degrades_quietly_on_error(monkeypatch):
     assert pp.detect_git_provenance_from_containers(containers) is None
 
 
+_REAL_REGISTRY_GET = pp._registry_get
+
+
+@pytest.fixture(autouse=True)
+def _no_registry_network(monkeypatch):
+    def offline(*a, **k):
+        raise RuntimeError("registry access disabled in tests")
+
+    monkeypatch.setattr(pp, "_registry_get", offline)
+
+
+@pytest.mark.parametrize("ref, expected", [
+    ("python@sha256:ab", ("registry-1.docker.io", "library/python")),
+    ("docker.io/library/python@sha256:ab", ("registry-1.docker.io", "library/python")),
+    ("docker-pullable://org/train@sha256:ab", ("registry-1.docker.io", "org/train")),
+    ("quay.io/org/train:1.0@sha256:ab", ("quay.io", "org/train")),
+    ("localhost:5000/train@sha256:ab", ("localhost:5000", "train")),
+    ("ghcr.io/org/sub/train@sha256:ab", ("ghcr.io", "org/sub/train")),
+    ("sha256:ab", None),
+])
+def test_parse_image_ref(ref, expected):
+    assert pp._parse_image_ref(ref) == expected
+
+
+def _digest(obj):
+    body = json.dumps(obj).encode()
+    return "sha256:" + pp.hashlib.sha256(body).hexdigest(), body
+
+
+class _FakeRegistry:
+    """Serves blobs by URL and demands a bearer token, like Docker Hub."""
+
+    def __init__(self, blobs, token="tok"):
+        self.blobs, self.token, self.calls = blobs, token, []
+
+    def __call__(self, url, accept=None, token=None, hops=0):
+        self.calls.append((url, token))
+        if url.startswith("https://auth.example/token"):
+            assert "scope=repository%3Aorg%2Ftrain%3Apull" in url
+            return json.dumps({"token": self.token}).encode()
+        if token != self.token:
+            headers = {"WWW-Authenticate": 'Bearer realm="https://auth.example/token",service="reg"'}
+            raise pp.urllib.error.HTTPError(url, 401, "unauthorized", headers, None)
+        return self.blobs[url]
+
+
+def _registry_image(labels):
+    config_digest, config = _digest({"config": {"Labels": labels}})
+    manifest_digest, manifest = _digest({"config": {"digest": config_digest}})
+    index_digest, index = _digest({"manifests": [
+        {"digest": "sha256:attestation", "platform": {"os": "unknown"}},
+        {"digest": manifest_digest, "platform": {"os": "linux", "architecture": "amd64"}},
+    ]})
+    base = "https://quay.io/v2/org/train"
+    blobs = {
+        f"{base}/manifests/{index_digest}": index,
+        f"{base}/manifests/{manifest_digest}": manifest,
+        f"{base}/blobs/{config_digest}": config,
+    }
+    return index_digest, blobs
+
+
+def test_detect_git_provenance_reads_labels_from_registry_without_image_object(monkeypatch):
+    digest, blobs = _registry_image({
+        "org.opencontainers.image.revision": "cafef00d",
+        "org.opencontainers.image.source": "https://github.com/org/train",
+    })
+    registry = _FakeRegistry(blobs)
+    monkeypatch.setattr(pp, "_registry_get", registry)
+    monkeypatch.setattr(pp.k8s_api, "get_cluster_object", lambda *a, **k: None)
+    containers = [{"image_id": f"quay.io/org/train@{digest}"}]
+    assert pp.detect_git_provenance_from_containers(containers) == {
+        "git_commit": "cafef00d",
+        "git_repository": "https://github.com/org/train",
+        "git_branch": None,
+        "detected_via": "oci_image_label",
+    }
+    # One token request, reused for the child manifest and the config blob.
+    assert sum("auth.example" in url for url, _ in registry.calls) == 1
+
+
+def test_registry_labels_rejected_on_digest_mismatch(monkeypatch):
+    digest, blobs = _registry_image({"org.opencontainers.image.revision": "cafef00d"})
+    blobs[f"https://quay.io/v2/org/train/manifests/{digest}"] = b'{"manifests": []}'
+    monkeypatch.setattr(pp, "_registry_get", _FakeRegistry(blobs))
+    monkeypatch.setattr(pp.k8s_api, "get_cluster_object", lambda *a, **k: None)
+    assert pp.detect_git_provenance_from_containers([{"image_id": f"quay.io/org/train@{digest}"}]) is None
+
+
+def test_registry_lookup_skipped_when_image_object_has_labels_or_disabled(monkeypatch):
+    def fail(*a, **k):
+        raise AssertionError("registry should not be queried")
+
+    monkeypatch.setattr(pp, "_registry_get", fail)
+    image = {"dockerImageMetadata": {"Config": {"Labels": {"org.opencontainers.image.revision": "cafef00d"}}}}
+    monkeypatch.setattr(pp.k8s_api, "get_cluster_object", lambda *a, **k: image)
+    containers = [{"image_id": "quay.io/org/train@sha256:abc123"}]
+    assert pp.detect_git_provenance_from_containers(containers)["git_commit"] == "cafef00d"
+
+    monkeypatch.setattr(pp.k8s_api, "get_cluster_object", lambda *a, **k: None)
+    monkeypatch.setattr(pp, "REGISTRY_LABEL_LOOKUP", False)
+    assert pp.detect_git_provenance_from_containers(containers) is None
+
+
+class _FakeResponse:
+    def __init__(self, body):
+        self.body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def read(self, n):
+        return self.body[:n]
+
+
+def test_registry_get_drops_token_on_cross_host_redirect(monkeypatch):
+    seen = []
+
+    def fake_open(req, timeout):
+        seen.append((req.full_url, req.get_header("Authorization")))
+        if req.full_url.startswith("https://quay.io/"):
+            raise pp.urllib.error.HTTPError(req.full_url, 307, "redirect", {"Location": "https://cdn.example/blob"}, None)
+        return _FakeResponse(b"{}")
+
+    monkeypatch.setattr(pp, "_registry_get", _REAL_REGISTRY_GET)
+    monkeypatch.setattr(pp._registry_opener, "open", fake_open)
+    assert pp._registry_get("https://quay.io/v2/org/train/blobs/sha256:ab", token="tok") == b"{}"
+    assert seen == [
+        ("https://quay.io/v2/org/train/blobs/sha256:ab", "Bearer tok"),
+        ("https://cdn.example/blob", None),
+    ]
+    with pytest.raises(ValueError):
+        pp._registry_get("http://quay.io/v2/")
+
+
 # ---------------------------------------------------------------------------
 # Small helpers
 # ---------------------------------------------------------------------------

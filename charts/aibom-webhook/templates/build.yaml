@@ -5,6 +5,9 @@ tagging both with a commit SHA (see justfile `tag` recipe arg) keeps every build
 and rollback-able instead of always overwriting one mutable "latest" tag in place.
 */ -}}
 {{- if .Values.build.enabled }}
+{{- if not (include "aibom-webhook.openshift" .) }}
+{{- fail "build.enabled=true needs OpenShift BuildConfigs; use prebuilt images on other clusters" }}
+{{- end }}
 apiVersion: image.openshift.io/v1
 kind: ImageStream
 metadata:
