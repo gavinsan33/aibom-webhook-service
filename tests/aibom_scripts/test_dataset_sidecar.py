@@ -180,3 +180,53 @@ def test_publish_final_is_a_single_pass_when_nothing_new(tmp_path, monkeypatch):
 
 def pytest_fail(msg):
     raise AssertionError(msg)
+
+
+# ---------------------------------------------------------------------------
+# SIGTERM handling during startup
+# ---------------------------------------------------------------------------
+
+
+def test_sigterm_handler_is_installed_before_k8s_api_is_imported(tmp_path):
+    """The sidecar is PID 1 in its container, where the kernel drops a signal
+    that has no handler. A pod whose main containers exit seconds after the
+    sidecar starts delivers SIGTERM while Python is still importing, so the
+    handler has to exist before the slow part of startup, not just in main().
+    """
+    import os
+    import signal
+    import subprocess
+    import sys
+    import time
+
+    marker = tmp_path / "handler-at-import"
+    (tmp_path / "k8s_api.py").write_text(
+        "import signal\n"
+        f"open({str(marker)!r}, 'w').write(str(signal.getsignal(signal.SIGTERM)))\n"
+        "def resolve_data_configmap_name():\n"
+        "    return 'cm'\n"
+    )
+    script = os.path.join(os.path.dirname(ds.__file__), "dataset_sidecar.py")
+    env = {
+        **os.environ,
+        "AIBOM_DATASET_OUTPUT": str(tmp_path / "does-not-exist.json"),
+        "AIBOM_DATASET_SIDECAR_POLL_INTERVAL": "60",
+    }
+    # run_path with __name__ == "__main__" behaves like running the script,
+    # but unlike `python script.py` doesn't put the script's own directory
+    # (where the real k8s_api lives) first on sys.path; the fake in cwd wins.
+    code = f"import runpy; runpy.run_path({script!r}, run_name='__main__')"
+    proc = subprocess.Popen([sys.executable, "-c", code], env=env, cwd=tmp_path)
+    try:
+        deadline = time.time() + 10
+        while not marker.exists() and time.time() < deadline:
+            time.sleep(0.05)
+        assert marker.exists(), "sidecar never reached its k8s_api import"
+        assert marker.read_text() != str(signal.SIG_DFL), "SIGTERM handler not installed before the k8s_api import"
+
+        time.sleep(0.3)  # let main() reach its wait loop
+        proc.send_signal(signal.SIGTERM)
+        assert proc.wait(timeout=10) == 0, "sidecar should exit cleanly on SIGTERM"
+    finally:
+        if proc.poll() is None:
+            proc.kill()
