@@ -27,7 +27,7 @@ func main() {
 	flag.StringVar(&cfg.TLSCertPath, "tls-cert", "/certs/tls.crt", "path to TLS certificate")
 	flag.StringVar(&cfg.TLSKeyPath, "tls-key", "/certs/tls.key", "path to TLS private key")
 	flag.IntVar(&cfg.Port, "port", 8443, "webhook server port")
-	flag.StringVar(&cfg.DiscoveryImage, "discovery-image", "pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime", "image for the discovery init container")
+	flag.StringVar(&cfg.DiscoveryImage, "discovery-image", webhook.DefaultDiscoveryImage, "image for the discovery init container")
 	flag.BoolVar(&cfg.DatasetDetection, "dataset-detection", true, "inject dataset detection hooks into application containers")
 	flag.BoolVar(&cfg.EnableWatcher, "enable-watcher", true, "start the Job completion watcher")
 	flag.StringVar(&cfg.PostprocessImage, "postprocess-image", "busybox:latest", "image for postprocess Jobs")
@@ -37,7 +37,7 @@ func main() {
 	flag.BoolVar(&cfg.DebugKeepPostprocessJobs, "debug-keep-postprocess-jobs", false, "skip deleting succeeded postprocess Jobs/data ConfigMaps, for inspecting their logs/state after the fact (leaks one of each per completed workload — not for routine production use)")
 	flag.BoolVar(&cfg.DebugTelemetryAllPods, "debug-telemetry-all-pods", false, "postprocess Jobs query Prometheus telemetry for every pod regardless of detected GPU count (for local testing on clusters with no real GPU hardware, e.g. kind — not for routine production use)")
 	flag.BoolVar(&cfg.RegistryLabelLookup, "registry-label-lookup", true, "postprocess Jobs read image labels for git provenance from the image's registry (anonymously) when the cluster has no Image object for it")
-	flag.StringVar(&cfg.DatasetSidecarImage, "dataset-sidecar-image", "python:3.12-slim", "image for the dataset-signing sidecar container")
+	flag.StringVar(&cfg.DatasetSidecarImage, "dataset-sidecar-image", webhook.DefaultDatasetSidecarImage, "image for the dataset-signing sidecar container")
 	stripFinalizers := flag.Bool("strip-finalizers", false, "remove this project's aibom.io/log-extraction and aibom.io/log-extraction-pod finalizers from every Job and Pod in the cluster, then exit (run by the chart's post-delete hook)")
 	flag.Parse()
 
