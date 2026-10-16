@@ -10,8 +10,8 @@ import (
 // ValidateSigningPublicKeyConfigMap denies a create/update of the
 // aibom-compiled-signing-public-key ConfigMap (see aibomdata's
 // CompiledSigningPublicKeyConfigMapName, and CLAUDE.md's Compiled AIBOM
-// Signing) from anyone other than that namespace's own aibom-postprocess
-// ServiceAccount.
+// Signing) from anyone other than the aibom-postprocess ServiceAccount in the webhook's
+// own namespace, where every postprocess Job runs (#149).
 //
 // Without this check, this ConfigMap has no RBAC of its own -- it's created
 // via rbac.yaml's broad aibom-workload-data Role, bound to every
@@ -31,17 +31,15 @@ import (
 // legitimate AIBOM's cross-check would fail at the same time, since the
 // anchor no longer matches the real signing key.
 //
-// Unlike SanitizeJobPostprocessLabel's TrustedWatcherIdentity, no operator
-// configuration is needed here: aibom-postprocess is always named exactly
-// that (aibomdata.PostprocessServiceAccountName) and always runs in the
-// same namespace as the ConfigMap it publishes to -- watcher.go sets it as
-// the postprocess Job's ServiceAccountName, and rbac.yaml creates it
-// per-namespace. So the trusted identity is fully determined by the
-// object's own namespace, not a separately-configured value that could be
-// wrong for a given cluster.
+// Unlike SanitizeJobPostprocessLabel's TrustedWatcherIdentity, the trusted
+// identity needs no separate operator configuration: aibom-postprocess is
+// always named exactly that (aibomdata.PostprocessServiceAccountName) and
+// always runs in the webhook's own namespace, which the binary knows from its
+// ServiceAccount mount. A workload pod can't run as a ServiceAccount from
+// another namespace, so nothing in a workload namespace can match.
 //
 // Returns "" (allow) for any ConfigMap other than this exact name, or when
-// requesterUsername is the trusted identity for cm's namespace. Otherwise
+// requesterUsername is the postprocess identity in systemNamespace. Otherwise
 // returns a non-empty denial reason.
 //
 // This does mean even a cluster-admin's own manual `oc apply`/`oc edit`
@@ -49,11 +47,11 @@ import (
 // identity itself -- deliberate, mirroring the CRD's own spec immutability:
 // the whole point is that nothing other than the trusted signer can produce
 // a value this anchor will accept.
-func ValidateSigningPublicKeyConfigMap(cm *corev1.ConfigMap, requesterUsername string) string {
+func ValidateSigningPublicKeyConfigMap(cm *corev1.ConfigMap, requesterUsername, systemNamespace string) string {
 	if cm.Name != aibomdata.CompiledSigningPublicKeyConfigMapName {
 		return ""
 	}
-	trusted := fmt.Sprintf("system:serviceaccount:%s:%s", cm.Namespace, aibomdata.PostprocessServiceAccountName)
+	trusted := fmt.Sprintf("system:serviceaccount:%s:%s", systemNamespace, aibomdata.PostprocessServiceAccountName)
 	if requesterUsername == trusted {
 		return ""
 	}

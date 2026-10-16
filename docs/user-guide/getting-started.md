@@ -3,7 +3,7 @@
 ## Prerequisites
 
 - OpenShift 4.16 or later, or Kubernetes 1.29 or later (see [Kubernetes without OpenShift](#kubernetes-without-openshift)), and `helm` 3.x.
-- A cluster-admin account. Both charts install cluster-scoped RBAC, and the workload-namespace chart creates a ClusterRoleBinding (see [Install the webhook](#install-the-webhook)).
+- A cluster-admin account. The webhook chart installs cluster-scoped RBAC, including ClusterRoleBindings for the `aibom-postprocess` ServiceAccount (see [Install the webhook](#install-the-webhook)). The workload-namespace chart creates only namespaced RBAC, plus a RoleBinding in the webhook's namespace.
 - To work from source: Go 1.22+, [`just`](https://github.com/casey/just) (run `make install-just` if you don't have it), and `openssl` for local TLS certificates.
 
 ### Cluster requirements
@@ -14,7 +14,7 @@
 | A pullable image with `python3` and `bash` | The `aibom-discovery` init container | Yes | Instrumented pods fail to start. Fail-open does not cover this. See below. |
 | Prometheus Operator CRDs (`monitoring.coreos.com/v1` `PodMonitor`) | Scraping vLLM's `/metrics` for inference performance | Yes, unless vLLM metrics are skipped | The namespace chart install fails outright. Skip it with `--skip-vllm-metrics`, or `--set vllmMetrics.enabled=false` with Helm. |
 | A Prometheus API endpoint (`prometheus.url`) | All telemetry queries | For telemetry | Telemetry comes back empty. On OpenShift it defaults to Thanos Querier in `openshift-monitoring`. Elsewhere it is empty until you set it. |
-| Read access to Prometheus for the postprocess ServiceAccount | Letting postprocess read those metrics | For telemetry, if Prometheus checks the token | Telemetry comes back empty for that namespace. On OpenShift the namespace chart binds `cluster-monitoring-view`. Skip that with `--skip-monitoring-access`, or `--set monitoringAccess.enabled=false` with Helm, and have a cluster-admin apply the binding once. Elsewhere bind it yourself. |
+| Read access to Prometheus for the postprocess ServiceAccount | Letting postprocess read those metrics | For telemetry, if Prometheus checks the token | Telemetry comes back empty. On OpenShift the webhook chart binds `cluster-monitoring-view`. If your account can't create it, skip it with `--set monitoringAccess.enabled=false` and have a cluster-admin create it once by hand ([Troubleshooting](troubleshooting.md)). Elsewhere bind it yourself. |
 | NVIDIA GPU Operator with dcgm-exporter, pod mapping enabled | GPU utilization, memory and power series | For GPU telemetry | GPU metrics are missing. Without pod mapping the `exported_pod` label doesn't exist and the metrics are simply absent. |
 | NVIDIA Container Toolkit and driver on GPU nodes | `nvidia-smi` in the `aibom-discovery` init container | For GPU hardware fields | GPU fields read "Not available". |
 | OpenShift `image.openshift.io` API, or egress to the image's registry | Source commit from image labels | No | That source-detection tier is skipped. Without an `Image` object the labels are read from the registry, anonymously, so private images are skipped too. |
@@ -53,7 +53,7 @@ The commands on this page use `oc`. `kubectl` takes the same arguments. Other di
 
 - **No impersonation.** `system:admin` is an OpenShift identity. Run as a cluster-admin and drop `--kube-as-user=system:admin` and `--as=system:admin`.
 - **Set `prometheus.url`.** There is no default outside OpenShift.
-- **Prometheus access.** Only needed if Prometheus checks the bearer token. The chart binds nothing here, so bind the namespace's `aibom-postprocess` ServiceAccount to a ClusterRole that grants the access your Prometheus requires. Without the Prometheus Operator, also set `vllmMetrics.enabled=false`.
+- **Prometheus access.** Only needed if Prometheus checks the bearer token. The chart binds nothing here, so bind the webhook namespace's `aibom-postprocess` ServiceAccount to a ClusterRole that grants the access your Prometheus requires. Without the Prometheus Operator, also set `vllmMetrics.enabled=false` on the namespace chart.
 - **TLS.** There is no service-ca bundle, so an HTTPS Prometheus must have a certificate the system trust store accepts.
 
 ```bash
