@@ -1342,47 +1342,149 @@ def redact_git_url(url):
     return f"{parts.scheme}://{netloc}{parts.path}"
 
 
-_COMMIT_SHA_RE = re.compile(r"[0-9a-fA-F]{7,40}")
-# Matches a plausible git remote URL, not just "the first bare token after
-# clone" -- `git clone` accepts value-taking flags before the repo
-# (--depth 1, --origin upstream, ...) whose values would otherwise be
-# mistaken for the repo itself.
-_GIT_URL_RE = re.compile(r"^(?:https?|git|ssh)://|^[\w.-]+@[\w.-]+:|\.git$")
-_SHELL_SEPARATORS = {"&&", "||", ";", "|"}
+# A SHA-1 (abbreviated or full) or a full SHA-256 commit. All-digit refs
+# (`20240101`) are taken as tags; a hex-looking branch name (`cafe123`) is
+# still misread as a commit -- nothing in the command says which it is.
+_COMMIT_SHA_RE = re.compile(r"[0-9a-fA-F]{7,40}|[0-9a-fA-F]{64}")
+# git's own global options that take a value (`git -C repo checkout ...`).
+_GIT_GLOBAL_VALUE_OPTS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace"}
+# `git clone` options that take a separate value, so the value isn't read as
+# the repository (`--reference /cache/mirror.git URL`).
+_GIT_CLONE_VALUE_OPTS = {
+    "-b", "--branch", "-o", "--origin", "--depth", "--reference", "--reference-if-able",
+    "-u", "--upload-pack", "--template", "-c", "--config", "--separate-git-dir",
+    "--shallow-since", "--shallow-exclude", "-j", "--jobs", "--filter",
+    "--server-option", "--bundle-uri", "--revision",
+}
+# `git checkout`/`switch` options naming a new branch (`-b exp origin/exp`).
+_GIT_NEW_BRANCH_OPTS = ("-b", "-B", "-c", "-C", "--orphan")
+# Refs that say nothing about which commit ended up checked out.
+_GIT_UNPINNED_REFS = {"HEAD", "FETCH_HEAD", "ORIG_HEAD", "-", "@"}
+
+
+def _git_invocation(segment):
+    """(subcommand, its args, the `-C` directory) for a `git ...` command."""
+    start = _command_start(segment)
+    if start >= len(segment) or os.path.basename(segment[start]) != "git":
+        return None
+    i, cdir = start + 1, None
+    while i < len(segment) and segment[i].startswith("-"):
+        if segment[i] in _GIT_GLOBAL_VALUE_OPTS and i + 1 < len(segment):
+            if segment[i] == "-C":
+                cdir = os.path.join(cdir or "", segment[i + 1])
+            i += 2
+        else:
+            i += 1
+    if i >= len(segment):
+        return None
+    return segment[i], segment[i + 1:], cdir
+
+
+def _positionals(args, value_opts, stop_at_dashdash=False):
+    """Arguments that aren't options or option values. After `--`, the rest
+    are positional for clone and pathspecs (ignored) for checkout."""
+    out, i = [], 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            if not stop_at_dashdash:
+                out.extend(args[i + 1:])
+            break
+        if a.startswith("-") and a != "-":
+            i += 2 if a in value_opts else 1
+            continue
+        out.append(a)
+        i += 1
+    return out
+
+
+def _clone_dir_name(repo):
+    """The directory `git clone <repo>` creates when none is given."""
+    name = re.split(r"[/:]", repo.rstrip("/"))[-1]
+    return name[:-len(".git")] if name.endswith(".git") else name
+
+
+def _usable_ref(ref):
+    return bool(ref) and ref not in _GIT_UNPINNED_REFS and not _has_unexpanded_var(ref)
+
+
+def _is_commit_ref(ref):
+    return _usable_ref(ref) and bool(_COMMIT_SHA_RE.fullmatch(ref)) and not ref.isdigit()
 
 
 def detect_git_clone_from_command(tokens):
+    """`git clone` and later `git checkout`/`switch` in a command (#113).
+
+    Each checkout is applied to the clone it runs in, by following `cd` and
+    `git -C`; with only one clone, a checkout whose location can't be told is
+    applied to it. With several clones, the one the script last `cd`s (or
+    `-C`s) into is reported, else the first: a later clone is usually a
+    dataset or tool, not the code that runs.
+    ponytail: directories are matched by basename, so two clones with the
+    same name in different parents are confused.
+    """
     if not tokens:
         return None
-    repo = None
-    ref = None
-    for i, tok in enumerate(tokens):
-        if tok == "git" and i + 1 < len(tokens) and tokens[i + 1] == "clone":
-            clone_args = []
-            for t in tokens[i + 2:]:
-                if t in _SHELL_SEPARATORS:
-                    break
-                clone_args.append(t)
-            for t in clone_args:
-                if not t.startswith("-") and _GIT_URL_RE.search(t):
-                    repo = t
-                    break
-            branch = _find_flag_value(clone_args, ("-b", "--branch"))
-            if branch:
-                ref = branch
-        elif tok == "git" and i + 2 < len(tokens) and tokens[i + 1] == "checkout":
-            ref = tokens[i + 2]
+    clones = []  # dicts: repo, dir, commit, branch
+    cwd = None
+    primary = None
 
-    if not repo:
+    def _clone_at(path):
+        name = os.path.basename(os.path.normpath(path)) if path else None
+        return next((c for c in clones if c["dir"] == name), None)
+
+    for segment in _split_segments(tokens):
+        start = _command_start(segment)
+        if start < len(segment) and segment[start] == "cd":
+            target = segment[start + 1] if start + 1 < len(segment) else None
+            cwd = None if target in (None, "-", "~") else os.path.join(cwd or "", target)
+            primary = _clone_at(cwd) or primary
+            continue
+        inv = _git_invocation(segment)
+        if not inv:
+            continue
+        sub, args, cdir = inv
+        if sub == "clone":
+            pos = _positionals(args, _GIT_CLONE_VALUE_OPTS)
+            if not pos or _has_unexpanded_var(pos[0]):
+                continue
+            repo = pos[0]
+            branch = _find_flag_value(args, ("-b", "--branch"))
+            clones.append({
+                "repo": repo,
+                "dir": os.path.basename(os.path.normpath(pos[1])) if len(pos) > 1 else _clone_dir_name(repo),
+                "commit": None,
+                "branch": branch if _usable_ref(branch) else None,
+            })
+        elif sub in ("checkout", "switch"):
+            where = os.path.join(cwd or "", cdir) if cdir else cwd
+            clone = _clone_at(where) or (clones[0] if len(clones) == 1 else None)
+            if not clone:
+                continue
+            if cdir:
+                primary = clone
+            new_branch = _find_flag_value(args, _GIT_NEW_BRANCH_OPTS)
+            pos = _positionals(args, set(_GIT_NEW_BRANCH_OPTS), stop_at_dashdash=True)
+            target = pos[0] if pos else None
+            # A checkout of something unknown (FETCH_HEAD, $REF) clears
+            # what an earlier clone -b/checkout said, rather than keeping it.
+            if new_branch:
+                # `checkout -b exp [start]`: on branch exp, at start if a SHA.
+                clone["branch"] = new_branch if _usable_ref(new_branch) else None
+                clone["commit"] = target if target and _is_commit_ref(target) else None
+            elif target:
+                is_commit = _is_commit_ref(target)
+                clone["commit"] = target if is_commit else None
+                clone["branch"] = target if _usable_ref(target) and not is_commit else None
+
+    chosen = primary or (clones[0] if clones else None)
+    if not chosen:
         return None
-    result = {"git_repository": redact_git_url(repo)}
-    if ref:
-        # A bare hex string of plausible SHA length is almost certainly a
-        # commit; anything else (a branch or tag name) is reported as such.
-        if _COMMIT_SHA_RE.fullmatch(ref):
-            result["git_commit"] = ref
-        else:
-            result["git_branch"] = ref
+    result = {"git_repository": redact_git_url(chosen["repo"])}
+    if chosen["commit"]:
+        result["git_commit"] = chosen["commit"]
+    if chosen["branch"]:
+        result["git_branch"] = chosen["branch"]
     return result
 
 
@@ -1414,6 +1516,43 @@ def detect_git_provenance_from_runtime_info(runtime_info):
     return result
 
 
+def _normalize_repo(url):
+    """Comparable form of a remote: no scheme, userinfo, `.git` or case, and
+    scp-style `git@host:org/repo` written as `host/org/repo`."""
+    u = (redact_git_url(url) or "").strip().lower()
+    rest = re.sub(r"^[a-z][a-z0-9+.-]*://", "", u)
+    rest = re.sub(r"^[^@/]*@", "", rest)
+    if "://" not in u:  # scp-style host:path
+        rest = rest.replace(":", "/", 1)
+    return re.sub(r"(\.git)?/*$", "", rest)
+
+
+def _same_provenance_value(key, a, b):
+    if key == "git_commit":
+        a, b = a.lower(), b.lower()
+        return a.startswith(b) or b.startswith(a)  # an abbreviated SHA matches its full one
+    return _normalize_repo(a) == _normalize_repo(b)
+
+
+def merge_provenance(primary, fallback):
+    """`primary`, with fields it lacks filled from `fallback` -- unless the two
+    name different commits or repositories, since then they describe
+    different checkouts and mixing them would pair one checkout's commit with
+    another's repo, branch or dirty flag (#113)."""
+    if not primary:
+        return fallback
+    if not fallback:
+        return primary
+    for key in ("git_commit", "git_repository"):
+        if primary.get(key) and fallback.get(key) and not _same_provenance_value(key, primary[key], fallback[key]):
+            return primary
+    merged = dict(primary)
+    for key in ("git_commit", "git_repository", "git_branch", "git_dirty"):
+        if merged.get(key) is None and fallback.get(key) is not None:
+            merged[key] = fallback[key]
+    return merged
+
+
 # ---------------------------------------------------------------------------
 # Git provenance detection (from commit labels baked onto a container's
 # image at build time -- OpenShift BuildConfig's own labels, or the
@@ -1440,6 +1579,36 @@ def _image_digest(image_id):
     return image_id.rsplit("@", 1)[-1]
 
 
+_NON_WORKLOAD_CONTAINERS = {
+    "istio-proxy", "linkerd-proxy", "queue-proxy", "oauth-proxy", "kube-rbac-proxy",
+    "storage-initializer", "aibom-discovery", "aibom-dataset-sidecar",
+}
+
+
+def _image_labels(digest, follow_manifest_list=True):
+    """Config labels of the Image object for `digest`. A manifest list's
+    Image has none of its own; its per-platform children (same build, so the
+    same labels) are tried in turn (#113)."""
+    try:
+        image = k8s_api.get_cluster_object("image.openshift.io", "v1", "images", digest)
+    except Exception as e:
+        print(f"  WARNING: could not resolve image {digest}: {e}", file=sys.stderr)
+        return {}
+    if not image:
+        return {}
+    # dockerImageMetadata mirrors Docker's own image config JSON schema
+    # verbatim (capitalized field names), not Kubernetes camelCase.
+    labels = safe_get(image, "dockerImageMetadata", "Config", "Labels") or {}
+    if labels or not follow_manifest_list:
+        return labels
+    for manifest in image.get("dockerImageManifests") or []:
+        if manifest.get("digest"):
+            labels = _image_labels(manifest["digest"], follow_manifest_list=False)
+            if labels:
+                return labels
+    return {}
+
+
 def detect_git_provenance_from_containers(containers):
     """Best-effort git provenance from commit labels baked onto a
     container's image at build time. Only resolves anything if the image was
@@ -1452,21 +1621,28 @@ def detect_git_provenance_from_containers(containers):
     controller recorded, not whether the source was vetted.
     """
     for container in containers:
-        digest = _image_digest(container.get("image_id"))
+        # Sidecars (service mesh, KServe, ours) aren't the workload's code.
+        if container.get("name") in _NON_WORKLOAD_CONTAINERS:
+            continue
+        # A bare `sha256:` image_id (some runtimes) is the config digest, not
+        # the manifest digest Image objects are named by; a digest-pinned
+        # spec image still identifies it (#113).
+        digest = _image_digest(container.get("image_id")) or _image_digest(container.get("image"))
         if not digest:
             continue
-        try:
-            image = k8s_api.get_cluster_object("image.openshift.io", "v1", "images", digest)
-        except Exception as e:
-            print(f"  WARNING: could not resolve image {digest}: {e}", file=sys.stderr)
-            continue
-        if not image:
-            continue
-        # dockerImageMetadata mirrors Docker's own image config JSON schema
-        # verbatim (capitalized field names), not Kubernetes camelCase.
-        labels = safe_get(image, "dockerImageMetadata", "Config", "Labels") or {}
+        labels = _image_labels(digest)
 
         commit = labels.get(_BUILD_LABEL_COMMIT)
+        oci_commit = labels.get(_OCI_LABEL_REVISION)
+        # Labels inherit through FROM, so one of two disagreeing commits
+        # belongs to a base image, and nothing says which (#113).
+        if commit and oci_commit and commit != oci_commit:
+            print(
+                f"  WARNING: image {digest} has conflicting commit labels "
+                f"({_BUILD_LABEL_COMMIT}={commit}, {_OCI_LABEL_REVISION}={oci_commit}); ignoring both",
+                file=sys.stderr,
+            )
+            continue
         if commit:
             return {
                 "git_commit": commit,
@@ -1475,7 +1651,6 @@ def detect_git_provenance_from_containers(containers):
                 "detected_via": "openshift_build_label",
             }
 
-        oci_commit = labels.get(_OCI_LABEL_REVISION)
         if oci_commit:
             return {
                 "git_commit": oci_commit,
@@ -2344,28 +2519,38 @@ def compile_aibom(
     # .git read, or an image's build-time commit label -- see
     # detect_git_clone_from_containers/detect_git_provenance_from_containers).
     # declared_via records which source won, mirroring dataset.declared.declared_via.
+    # Detected fields fill in what the annotations leave out only when they
+    # describe the same checkout (merge_provenance), and any git annotation
+    # makes declared_via "annotation" (#113).
     dp = detected_provenance or {}
-    declared_via = None
-    if annotations.get("git-commit"):
+    annotated = {
+        key: annotations.get(name)
+        for key, name in (
+            ("git_commit", "git-commit"), ("git_repository", "git-repository"), ("git_branch", "git-branch"),
+        )
+        if annotations.get(name)
+    }
+    prov = merge_provenance(annotated, dp) or {}
+    if annotated:
         declared_via = "annotation"
     elif dp.get("git_commit") or dp.get("git_repository"):
         declared_via = dp.get("detected_via")
+    else:
+        declared_via = None
 
     aibom["source_code"] = {
         # Redacted again here, not just in each detector: an annotation is
         # free text, and any future detection tier would have the same
         # problem (#102).
-        "git_repository": redact_git_url(annotations.get("git-repository") or dp.get("git_repository")),
-        "git_commit": annotations.get("git-commit") or dp.get("git_commit"),
-        "git_branch": annotations.get("git-branch") or dp.get("git_branch"),
+        "git_repository": redact_git_url(prov.get("git_repository")),
+        "git_commit": prov.get("git_commit"),
+        "git_branch": prov.get("git_branch"),
         "declared_via": declared_via,
     }
-    # Only the runtime .git-directory tier can know this -- surfaced
-    # regardless of which source won git_commit/git_repository above, since
-    # it's orthogonal information about whether the actually-executed code
-    # matched what's checked into git, not about the code's identity.
-    if dp.get("git_dirty") is not None:
-        aibom["source_code"]["dirty"] = dp["git_dirty"]
+    # Only the runtime .git-directory tier can know this; kept only while
+    # that tier's checkout is the one reported.
+    if prov.get("git_dirty") is not None:
+        aibom["source_code"]["dirty"] = prov["git_dirty"]
 
     # Execution metadata from discovery
     pods = []
@@ -2913,11 +3098,14 @@ def main():
     # what ended up on disk), ahead of a label baked onto the image at
     # build time (which may just describe an unrelated base image's own
     # source rather than the code actually cloned and run at pod startup).
-    detected_provenance = (
-        detect_git_provenance_from_runtime_info(runtime_info)
-        or detect_git_clone_from_containers(containers)
-        or detect_git_provenance_from_containers(containers)
+    # A higher tier missing a field (a .git with no remote) is filled from
+    # the next one, if it describes the same checkout (#113). The image
+    # lookup only runs while commit or repository is still unknown.
+    detected_provenance = merge_provenance(
+        detect_git_provenance_from_runtime_info(runtime_info), detect_git_clone_from_containers(containers)
     )
+    if not (detected_provenance and detected_provenance.get("git_commit") and detected_provenance.get("git_repository")):
+        detected_provenance = merge_provenance(detected_provenance, detect_git_provenance_from_containers(containers))
     if detected_provenance:
         print("--- Git Provenance Detection ---")
         print(f"  Detected via: {detected_provenance.get('detected_via', 'unknown')}")

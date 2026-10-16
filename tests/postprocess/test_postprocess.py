@@ -438,6 +438,39 @@ def test_detect_git_clone_from_command_no_clone_returns_none():
     assert pp.detect_git_clone_from_command(None) is None
 
 
+@pytest.mark.parametrize("script, expected", [
+    # Option values aren't the repository (#113).
+    ("git clone --reference /cache/mirror.git https://h/a.git", {"git_repository": "https://h/a.git"}),
+    ("git clone https://h/a.git && cd a && git checkout -b exp origin/exp",
+     {"git_repository": "https://h/a.git", "git_branch": "exp"}),
+    ("git clone https://h/a.git && cd a && git checkout --detach 0123abc",
+     {"git_repository": "https://h/a.git", "git_commit": "0123abc"}),
+    # FETCH_HEAD says nothing, and clears the clone's -b.
+    ("git clone -b dev https://h/a.git && cd a && git fetch origin pull/1/head && git checkout FETCH_HEAD",
+     {"git_repository": "https://h/a.git"}),
+    ("git clone https://h/a.git && git -C a checkout 0123abcd",
+     {"git_repository": "https://h/a.git", "git_commit": "0123abcd"}),
+    ("git clone https://h/a.git && cd a\npip install -e .\ngit checkout -b foo",
+     {"git_repository": "https://h/a.git", "git_branch": "foo"}),
+    # Several clones: the one the script cd's into, with its own checkout.
+    ("git clone https://h/a.git && git clone https://huggingface.co/datasets/x/y && cd a && git checkout 1a2b3c4d",
+     {"git_repository": "https://h/a.git", "git_commit": "1a2b3c4d"}),
+    ("git clone https://h/a.git && git clone https://h/b.git && cd b && git checkout dev && python train.py",
+     {"git_repository": "https://h/b.git", "git_branch": "dev"}),
+    ("git clone https://h/a.git code && cd /w/code && git checkout v1",
+     {"git_repository": "https://h/a.git", "git_branch": "v1"}),
+    # All-digit refs are tags; a 64-hex ref is a SHA-256 commit.
+    ("git clone https://h/a.git && cd a && git checkout 20240101",
+     {"git_repository": "https://h/a.git", "git_branch": "20240101"}),
+    ("git clone https://h/a.git && cd a && git checkout " + "a" * 64,
+     {"git_repository": "https://h/a.git", "git_commit": "a" * 64}),
+    ("git clone $REPO && cd x", None),
+])
+def test_detect_git_clone_from_command_cases(script, expected):
+    tokens = pp._flatten_container_command({"command": ["sh", "-c", script]})
+    assert pp.detect_git_clone_from_command(tokens) == expected
+
+
 def test_detect_git_clone_from_containers_uses_first_match():
     containers = [
         {"command": ["python", "sidecar.py"]},
@@ -553,25 +586,76 @@ def test_detect_git_provenance_falls_back_to_oci_labels(monkeypatch):
     }
 
 
-def test_detect_git_provenance_prefers_openshift_label_over_oci(monkeypatch):
+def test_detect_git_provenance_prefers_openshift_label_when_labels_agree(monkeypatch):
     containers = [{"image_id": "quay.io/org/train@sha256:abc123"}]
-    monkeypatch.setattr(
-        pp.k8s_api,
-        "get_cluster_object",
-        lambda *a, **k: {
-            "dockerImageMetadata": {
-                "Config": {
-                    "Labels": {
-                        "io.openshift.build.commit.id": "deadbeef",
-                        "org.opencontainers.image.revision": "cafef00d",
-                    }
-                }
-            }
-        },
-    )
+    image = {"dockerImageMetadata": {"Config": {"Labels": {
+        "io.openshift.build.commit.id": "deadbeef",
+        "io.openshift.build.commit.ref": "main",
+        "org.opencontainers.image.revision": "deadbeef",
+    }}}}
+    monkeypatch.setattr(pp.k8s_api, "get_cluster_object", lambda *a, **k: image)
     result = pp.detect_git_provenance_from_containers(containers)
     assert result["git_commit"] == "deadbeef"
     assert result["detected_via"] == "openshift_build_label"
+
+
+def test_detect_git_provenance_ignores_conflicting_labels(monkeypatch):
+    # One of them was inherited from a base image via FROM (#113).
+    containers = [{"image_id": "quay.io/org/train@sha256:abc123"}]
+    image = {"dockerImageMetadata": {"Config": {"Labels": {
+        "io.openshift.build.commit.id": "deadbeef",
+        "org.opencontainers.image.revision": "cafef00d",
+    }}}}
+    monkeypatch.setattr(pp.k8s_api, "get_cluster_object", lambda *a, **k: image)
+    assert pp.detect_git_provenance_from_containers(containers) is None
+
+
+def test_detect_git_provenance_skips_sidecars_and_uses_spec_digest(monkeypatch):
+    # istio-proxy is skipped; a bare sha256: image_id falls back to the
+    # digest-pinned spec image (#113).
+    containers = [
+        {"name": "istio-proxy", "image_id": "quay.io/istio/proxy@sha256:mesh"},
+        {"name": "trainer", "image_id": "sha256:config", "image": "quay.io/org/train@sha256:app"},
+    ]
+    looked_up = []
+
+    def fake_get(group, version, plural, name):
+        looked_up.append(name)
+        return {"dockerImageMetadata": {"Config": {"Labels": {"org.opencontainers.image.revision": "cafef00d"}}}}
+
+    monkeypatch.setattr(pp.k8s_api, "get_cluster_object", fake_get)
+    assert pp.detect_git_provenance_from_containers(containers)["git_commit"] == "cafef00d"
+    assert looked_up == ["sha256:app"]
+
+
+def test_detect_git_provenance_follows_manifest_list(monkeypatch):
+    images = {
+        "sha256:list": {"dockerImageManifests": [{"digest": "sha256:amd64"}, {"digest": "sha256:arm64"}]},
+        "sha256:amd64": {"dockerImageMetadata": {"Config": {"Labels": {
+            "org.opencontainers.image.revision": "cafef00d",
+        }}}},
+    }
+    monkeypatch.setattr(pp.k8s_api, "get_cluster_object", lambda g, v, p, name: images.get(name))
+    containers = [{"image_id": "quay.io/org/train@sha256:list"}]
+    assert pp.detect_git_provenance_from_containers(containers)["git_commit"] == "cafef00d"
+
+
+@pytest.mark.parametrize("primary, fallback, expected", [
+    # A .git without a remote is completed from the clone command.
+    ({"git_commit": "abc1234", "detected_via": "git_directory"},
+     {"git_repository": "https://h/a.git", "detected_via": "cli_arg"},
+     {"git_commit": "abc1234", "git_repository": "https://h/a.git", "detected_via": "git_directory"}),
+    # Abbreviated vs full SHA and scp vs https URL are the same checkout.
+    ({"git_commit": "abc1234", "git_repository": "git@h:org/a.git"},
+     {"git_commit": "abc1234" + "0" * 33, "git_repository": "https://h/org/a", "git_branch": "main"},
+     {"git_commit": "abc1234", "git_repository": "git@h:org/a.git", "git_branch": "main"}),
+    # A different commit or repo is a different checkout: nothing is mixed in.
+    ({"git_commit": "abc1234"}, {"git_commit": "fff9999", "git_repository": "https://h/b"}, {"git_commit": "abc1234"}),
+    ({"git_repository": "https://h/a"}, {"git_repository": "https://h/b", "git_dirty": True}, {"git_repository": "https://h/a"}),
+    (None, {"git_commit": "abc1234"}, {"git_commit": "abc1234"}),
+])
+def test_merge_provenance(primary, fallback, expected):
+    assert pp.merge_provenance(primary, fallback) == expected
 
 
 def test_detect_git_provenance_skips_containers_without_digest(monkeypatch):
@@ -974,6 +1058,26 @@ def test_compile_aibom_no_dirty_key_when_tier_does_not_report_it():
         detected_provenance=detected_provenance,
     )
     assert "dirty" not in aibom["source_code"]
+
+
+def test_compile_aibom_annotation_fills_from_matching_detection_only():
+    # Annotated repo + detected commit/dirty from the same repo are combined,
+    # labelled annotation; a detection from another repo is dropped (#113).
+    detected = {
+        "git_commit": "abc1234", "git_repository": "https://github.com/org/repo.git",
+        "git_dirty": True, "detected_via": "git_directory",
+    }
+    for repo, same in (("https://github.com/org/repo", True), ("https://github.com/org/other", False)):
+        aibom = pp.compile_aibom(
+            discoveries=[], detected_datasets=[], runtime_info={},
+            annotations={"experiment-intent": "training", "git-repository": repo},
+            telemetry=None, detected_provenance=detected,
+        )
+        sc = aibom["source_code"]
+        assert sc["declared_via"] == "annotation"
+        assert sc["git_repository"] == repo
+        assert sc["git_commit"] == ("abc1234" if same else None)
+        assert ("dirty" in sc) is same
 
 
 def test_compile_aibom_no_provenance_source_leaves_declared_via_none():

@@ -231,14 +231,25 @@ def _capture_accelerate_config():
 
 
 def _find_git_dir(start=None):
-    """Walk upward from `start` (default: CWD) looking for a .git directory,
-    mirroring how `git` itself locates the repo root from any subdirectory
-    -- the training script may not run from the exact directory a wrapper
-    script `cd`'d into after cloning."""
+    """Walk upward from `start` (default: CWD) looking for `.git`, mirroring
+    how `git` itself locates the repo root from any subdirectory -- the
+    training script may not run from the exact directory a wrapper script
+    `cd`'d into after cloning. Returns (worktree root, git dir), or None.
+
+    `.git` is a file (`gitdir: <path>`) in a linked worktree or a submodule;
+    walking past it would report the main checkout or the superproject
+    instead (#113)."""
     path = os.path.abspath(start or os.getcwd())
     for _ in range(20):  # bound the walk -- avoid looping forever on a broken/circular mount
-        if os.path.isdir(os.path.join(path, ".git")):
-            return os.path.join(path, ".git")
+        dot_git = os.path.join(path, ".git")
+        if os.path.isdir(dot_git):
+            return path, dot_git
+        if os.path.isfile(dot_git):
+            with open(dot_git) as f:
+                content = f.read().strip()
+            if not content.startswith("gitdir:"):
+                return None
+            return path, os.path.normpath(os.path.join(path, content[len("gitdir:"):].strip()))
         parent = os.path.dirname(path)
         if parent == path:
             return None
@@ -246,26 +257,56 @@ def _find_git_dir(start=None):
     return None
 
 
-def _resolve_git_ref(git_dir, ref):
+def _find_repo():
+    """The repo holding the running script, else the one around the CWD:
+    `cd / && python /app/repo/train.py` has nothing above the CWD (#113)."""
+    main_file = getattr(sys.modules.get("__main__"), "__file__", None)
+    for script in (main_file, sys.argv[0] if sys.argv else None):
+        if script and os.path.isfile(script):
+            found = _find_git_dir(os.path.dirname(os.path.abspath(script)))
+            if found:
+                return found
+    return _find_git_dir()
+
+
+def _git_common_dir(git_dir):
+    """A linked worktree's git dir holds only its own HEAD; refs and config
+    live in the main repo's, named by its `commondir` file."""
+    commondir = os.path.join(git_dir, "commondir")
+    if os.path.isfile(commondir):
+        with open(commondir) as f:
+            return os.path.normpath(os.path.join(git_dir, f.read().strip()))
+    return git_dir
+
+
+def _is_sha(value):
+    """A full SHA-1 or SHA-256 object name, the only thing a resolved ref holds."""
+    return len(value) in (40, 64) and all(c in "0123456789abcdef" for c in value)
+
+
+def _resolve_git_ref(git_dir, ref, _depth=0):
     """Resolve "ref: refs/heads/<branch>" to a commit SHA via the loose ref
     file, falling back to packed-refs (git packs infrequently-updated refs,
     e.g. right after a shallow clone). A detached HEAD's file already
-    contains the SHA directly."""
+    contains the SHA directly. A loose ref can itself be a symref, which is
+    followed; anything that doesn't end in a SHA resolves to None (#113)."""
     ref = ref.strip()
     if not ref.startswith("ref:"):
-        return ref
+        return ref if _is_sha(ref) else None
+    if _depth >= 5:
+        return None
     ref_path = ref[len("ref:"):].strip()
     loose = os.path.join(git_dir, ref_path)
     if os.path.isfile(loose):
         with open(loose) as f:
-            return f.read().strip()
+            return _resolve_git_ref(git_dir, f.read(), _depth + 1)
     packed = os.path.join(git_dir, "packed-refs")
     if os.path.isfile(packed):
         with open(packed) as f:
             for line in f:
                 parts = line.strip().split()
                 if len(parts) == 2 and parts[1] == ref_path:
-                    return parts[0]
+                    return parts[0] if _is_sha(parts[0]) else None
     return None
 
 
@@ -310,7 +351,8 @@ def _redact_git_url(url):
 def _git_remote_url(git_dir):
     """Best-effort read of the "origin" remote URL straight out of
     .git/config, without shelling out to the git binary (which isn't
-    guaranteed to be installed in the training image)."""
+    guaranteed to be installed in the training image). Without an "origin"
+    (`git clone --origin upstream`), the first remote listed (#113)."""
     config_path = os.path.join(git_dir, "config")
     if not os.path.isfile(config_path):
         return None
@@ -318,9 +360,10 @@ def _git_remote_url(git_dir):
         import configparser
         parser = configparser.ConfigParser(strict=False)
         parser.read(config_path)
-        for section in parser.sections():
-            if section.startswith("remote") and "origin" in section:
-                return _redact_git_url(parser.get(section, "url", fallback=None))
+        remotes = [sec for sec in parser.sections() if sec.startswith('remote "')]
+        if remotes:
+            section = 'remote "origin"' if 'remote "origin"' in remotes else remotes[0]
+            return _redact_git_url(parser.get(section, "url", fallback=None))
     except Exception:
         _dbg_exc("_git_remote_url")
     return None
@@ -330,11 +373,13 @@ def _git_dirty(worktree_dir):
     """Best-effort `git status --porcelain` if the git binary happens to be
     installed in the training image (not guaranteed). Returns None -- not
     False -- when it can't be determined, so callers don't misreport a clean
-    tree they never actually checked."""
+    tree they never actually checked. Untracked files don't count (`-uno`):
+    checkpoints and logs written inside the repo aren't changes to the code
+    that ran (#113)."""
     try:
         import subprocess
         result = subprocess.run(
-            ["git", "status", "--porcelain"],
+            ["git", "status", "--porcelain", "-uno"],
             cwd=worktree_dir, capture_output=True, text=True, timeout=10,
         )
         if result.returncode != 0:
@@ -354,26 +399,32 @@ def _capture_git_provenance(check_dirty=True):
     just what the command said it intended to do.
     """
     try:
-        git_dir = _find_git_dir()
-        if not git_dir:
+        found = _find_repo()
+        if not found:
             return
+        worktree, git_dir = found
+        common_dir = _git_common_dir(git_dir)
         head_path = os.path.join(git_dir, "HEAD")
         if not os.path.isfile(head_path):
             return
         with open(head_path) as f:
             head = f.read().strip()
-        commit = _resolve_git_ref(git_dir, head)
+        commit = _resolve_git_ref(common_dir, head)
         if not commit:
             return
         info = {"git_commit": commit}
         if head.startswith("ref:"):
-            info["git_branch"] = head[len("ref:"):].strip().rsplit("/", 1)[-1]
-        remote = _git_remote_url(git_dir)
+            # The whole name after refs/heads/: `feature/foo`, not `foo` (#113).
+            branch = head[len("ref:"):].strip()
+            if branch.startswith("refs/heads/"):
+                branch = branch[len("refs/heads/"):]
+            info["git_branch"] = branch
+        remote = _git_remote_url(common_dir)
         if remote:
             info["git_repository"] = remote
         # `git status` can take up to its 10s timeout; skipped when flushing
         # from a signal handler, where the kubelet's grace period is ticking.
-        dirty = _git_dirty(os.path.dirname(git_dir)) if check_dirty else None
+        dirty = _git_dirty(worktree) if check_dirty else None
         if dirty is not None:
             info["git_dirty"] = dirty
         with _lock:
