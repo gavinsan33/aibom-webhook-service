@@ -40,18 +40,19 @@ class FakeDataset:
     shape that broke identity-only dedup against the DataLoader hook.
     """
 
-    def __init__(self, builder_name, config_name=None, fingerprint="fp-orig"):
+    def __init__(self, builder_name, config_name=None, fingerprint="fp-orig", split=None):
         self.info = FakeDatasetInfo(builder_name=builder_name, config_name=config_name)
+        self.split = split
         self._fingerprint = fingerprint
 
     def map(self, fn):
-        return FakeDataset(self.info.builder_name, self.info.config_name, fingerprint="fp-mapped")
+        return FakeDataset(self.info.builder_name, self.info.config_name, fingerprint="fp-mapped", split=self.split)
 
 
 @pytest.fixture
 def fake_datasets_module(monkeypatch):
     def fake_load_dataset(path, *args, **kwargs):
-        return FakeDataset(builder_name=path, config_name=kwargs.get("name"))
+        return FakeDataset(builder_name=path, config_name=kwargs.get("name"), split=kwargs.get("split"))
 
     module = types.ModuleType("datasets")
     module.load_dataset = fake_load_dataset

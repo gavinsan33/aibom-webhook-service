@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -552,6 +554,14 @@ func (w *Watcher) getInstrumentedPods(job *batchv1.Job) ([]corev1.Pod, error) {
 	return pods.Items, nil
 }
 
+// completionIndex is an Indexed Job pod's index, or MaxInt for any other pod.
+func completionIndex(pod *corev1.Pod) int {
+	if i, err := strconv.Atoi(pod.Annotations["batch.kubernetes.io/job-completion-index"]); err == nil {
+		return i
+	}
+	return math.MaxInt
+}
+
 // podJobName is the name of the Job that owns the pod, "" for a bare pod.
 func podJobName(pod *corev1.Pod) string {
 	if name := pod.Labels["batch.kubernetes.io/job-name"]; name != "" {
@@ -739,11 +749,33 @@ func (w *Watcher) createDataConfigMap(ctx context.Context, namespace, configMapN
 	return nil
 }
 
+var datasetIdentityKeys = []string{
+	"dataset_name", "source", "config_name", "split", "revision",
+	"data_files", "data_dir", "root", "path",
+}
+
+// datasetIdentity is entry's datasetIdentityKeys values re-encoded as JSON,
+// so pods' formatting differences don't matter and a missing key equals null.
+func datasetIdentity(entry json.RawMessage) (string, bool) {
+	var fields map[string]any
+	if err := json.Unmarshal(entry, &fields); err != nil {
+		return "", false
+	}
+	vals := make([]any, len(datasetIdentityKeys))
+	for i, k := range datasetIdentityKeys {
+		vals[i] = fields[k]
+	}
+	key, err := json.Marshal(vals)
+	return string(key), err == nil
+}
+
 // mergeDatasets combines multiple dataset JSON strings into one.
 //
-// Datasets are deduped by (dataset_name, source), the same key
-// runtime_detector.py uses when its processes merge into one file, so N pods
-// loading the same dataset (a JobSet, a torchrun job) produce one entry, not N.
+// Datasets are deduped by datasetIdentityKeys, the same fields
+// runtime_detector.py's _dataset_identity uses when its processes merge into
+// one file, so N pods loading the same dataset (a JobSet, a torchrun job)
+// produce one entry, not N, while two loads of one builder with different
+// files or splits stay separate (#114).
 //
 // runtime_info is first-pod-wins per key, except the git_* keys: those are one
 // observation of one checkout, so the whole group comes from the first pod
@@ -754,15 +786,11 @@ func mergeDatasets(datasets []string) string {
 		Datasets    []json.RawMessage      `json:"datasets,omitempty"`
 		RuntimeInfo map[string]interface{} `json:"runtime_info,omitempty"`
 	}
-	type datasetKey struct {
-		Name   string `json:"dataset_name"`
-		Source string `json:"source"`
-	}
 
 	merged := datasetFile{
 		RuntimeInfo: make(map[string]interface{}),
 	}
-	seen := make(map[datasetKey]bool)
+	seen := make(map[string]bool)
 	gitTaken := false
 
 	for _, raw := range datasets {
@@ -774,8 +802,8 @@ func mergeDatasets(datasets []string) string {
 			continue
 		}
 		for _, entry := range df.Datasets {
-			var key datasetKey
-			if err := json.Unmarshal(entry, &key); err != nil {
+			key, ok := datasetIdentity(entry)
+			if !ok {
 				merged.Datasets = append(merged.Datasets, entry)
 				continue
 			}
@@ -837,6 +865,7 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 		log.Printf("warning: could not read dataset signing key in namespace %s: %v", namespace, err)
 	}
 
+	dsByPod := make(map[string]string, len(pods))
 	for _, pod := range pods {
 		disc, discSig, ds, dsSig, storage, storageSig := extractDataFromPod(&pod, dataCM)
 		if disc != "" && signingKey != nil && !verifySignature(signingKey, disc, discSig) {
@@ -852,10 +881,24 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 			ds = ""
 		}
 		discoveries = append(discoveries, disc)
-		datasets = append(datasets, ds)
+		dsByPod[pod.Name] = ds
 		if storageJSON == "" && storage != "" {
 			storageJSON = storage
 		}
+	}
+	// mergeDatasets keeps the first pod's runtime_info, so order by rank
+	// rather than list order: completion index 0 first, and among retries
+	// the newest attempt (#114).
+	ranked := append([]corev1.Pod(nil), pods...)
+	sort.SliceStable(ranked, func(i, j int) bool {
+		a, b := completionIndex(&ranked[i]), completionIndex(&ranked[j])
+		if a != b {
+			return a < b
+		}
+		return ranked[j].CreationTimestamp.Before(&ranked[i].CreationTimestamp)
+	})
+	for i := range ranked {
+		datasets = append(datasets, dsByPod[ranked[i].Name])
 	}
 	if storageJSON == "" {
 		storageJSON = "{}"
