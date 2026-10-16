@@ -45,6 +45,8 @@ oc get pod <pod-name> -n <namespace> -o jsonpath='{.spec.initContainers[*].name}
 # Should output: aibom-discovery
 ```
 
+These steps need a cluster-admin. `--kube-as-user=system:admin` impersonates one; where impersonation isn't available (ROSA, ARO), log in as a cluster-admin and drop it.
+
 Re-run step 2 whenever the scripts change; a stale `aibom-scripts` ConfigMap can fail pod startup in the namespace. After a workload completes:
 
 Preferred: the `oc aibom` plugin (install [`oc-aibom`](https://github.com/gavinsan33/oc-aibom) first; `aibom` is a plugin subcommand, not a built-in `oc` one), or the console plugin in the web UI:
@@ -73,4 +75,3 @@ Without a published chart, `just deploy`, `just deploy-buildconfig`, and `just s
 - [AIBOM Schema](docs/reference/schema.md): how AIBOMs are stored
 - [Configuration](docs/reference/configuration.md): webhook flags and chart values
 - [Development](docs/reference/development.md): building, `just` recipes, publishing, repo layout
-- [`CLAUDE.md`](CLAUDE.md): implementation rationale and trust model
