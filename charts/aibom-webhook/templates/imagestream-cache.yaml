@@ -1,0 +1,33 @@
+{{- if include "aibom-webhook.cacheImages" . }}
+{{- /*
+Mirror the injected images (discovery init container + sidecar, and postprocess
+Job) into the cluster's internal registry once, with referencePolicy: Local, so
+every workload node pulls them from inside the cluster instead of re-pulling from
+Quay. importPolicy.scheduled keeps the mirror current with the upstream tag. The
+webhook's own image is left pulling from Quay -- it is one long-lived pod, not an
+image injected into every workload. build.enabled builds these same ImageStreams
+from source instead (templates/build.yaml), so cacheImages is skipped there.
+The matching system:image-puller RoleBinding for workload namespaces is created
+by the aibom-workload-namespace chart.
+*/ -}}
+{{- range list
+  (dict "name" "aibom-discovery" "repository" .Values.image.discovery.repository "tag" (include "aibom-webhook.discoveryTag" .))
+  (dict "name" "aibom-postprocess" "repository" .Values.image.postprocess.repository "tag" (include "aibom-webhook.postprocessTag" .)) }}
+---
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: {{ .name }}
+  namespace: {{ include "aibom-webhook.namespace" $ }}
+spec:
+  tags:
+    - name: {{ .tag }}
+      from:
+        kind: DockerImage
+        name: {{ .repository }}:{{ .tag }}
+      referencePolicy:
+        type: Local
+      importPolicy:
+        scheduled: true
+{{- end }}
+{{- end }}

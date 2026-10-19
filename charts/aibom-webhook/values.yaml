@@ -93,6 +93,16 @@ build:
   gitRepo: https://github.com/gavinsan33/aibom-webhook-service.git
   gitRef: main
 
+# Cache the injected images (discovery init container + dataset sidecar, and the
+# postprocess Job) in the cluster's internal registry via ImageStreams with
+# referencePolicy: Local, so every workload node pulls them from inside the
+# cluster instead of re-pulling from Quay (slow, rate-limited) on each new node.
+# OpenShift only (needs the internal registry); no-ops elsewhere. Skipped when
+# build.enabled is set, since that builds the same ImageStreams from source.
+# Set false to pull injected images straight from Quay on every node.
+cacheImages:
+  enabled: true
+
 watcher:
   enabled: true
 

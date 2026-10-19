@@ -31,8 +31,35 @@ image.openshift.io API, which `helm template` without --api-versions can't see.
 {{- end -}}
 {{- end -}}
 
+{{/*
+"true" when the injected images should be served from the cluster's internal
+registry (an OpenShift image cache) instead of pulled from Quay on every node.
+On by default on OpenShift; skipped when build.enabled already produces the same
+in-cluster ImageStreams from source, and empty off OpenShift (no internal
+registry). templates/imagestream-cache.yaml creates the matching ImageStreams.
+*/}}
+{{- define "aibom-webhook.cacheImages" -}}
+{{- if and (include "aibom-webhook.openshift" .) .Values.cacheImages.enabled (not .Values.build.enabled) -}}true{{- end -}}
+{{- end -}}
+
+{{- define "aibom-webhook.internalRegistry" -}}
+image-registry.openshift-image-registry.svc:5000/{{ include "aibom-webhook.namespace" . }}
+{{- end -}}
+
 {{- define "aibom-webhook.discoveryImage" -}}
+{{- if include "aibom-webhook.cacheImages" . -}}
+{{ include "aibom-webhook.internalRegistry" . }}/aibom-discovery:{{ include "aibom-webhook.discoveryTag" . }}
+{{- else -}}
 {{ .Values.image.discovery.repository }}:{{ include "aibom-webhook.discoveryTag" . }}
+{{- end -}}
+{{- end -}}
+
+{{- define "aibom-webhook.postprocessImage" -}}
+{{- if include "aibom-webhook.cacheImages" . -}}
+{{ include "aibom-webhook.internalRegistry" . }}/aibom-postprocess:{{ include "aibom-webhook.postprocessTag" . }}
+{{- else -}}
+{{ .Values.image.postprocess.repository }}:{{ include "aibom-webhook.postprocessTag" . }}
+{{- end -}}
 {{- end -}}
 
 {{/*
