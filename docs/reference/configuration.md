@@ -44,6 +44,7 @@ Set chart values with `--set key=value` or `-f values.yaml` on `helm upgrade --i
 | `gitProvenance.registryLookup` | `true` | When a workload's image has no `image.openshift.io` `Image` object, which is always the case outside OpenShift, the postprocess Job reads its labels from the image's registry for git provenance. Pulls are anonymous, so private images are skipped. Needs egress from the webhook's namespace to the registry. Set `false` to stop these requests. |
 | `build.enabled` | `false` | Builds the webhook and postprocess images in-cluster from source with an OpenShift BuildConfig, for clusters with no route to Quay. `just deploy-buildconfig` sets it. Rendering fails when it is set on a cluster other than OpenShift. |
 | `build.gitRepo` / `build.gitRef` | `https://github.com/gavinsan33/aibom-webhook-service.git` / `main` | What the in-cluster build clones. |
+| `cacheImages.enabled` | `true` | On OpenShift, mirrors the injected images (discovery init container, dataset sidecar, and postprocess Job) into the cluster's internal registry with an `ImageStream` using `referencePolicy: Local`, so workload nodes pull them from inside the cluster instead of re-pulling from Quay on every new node. The injection flags then point at the internal registry. No-op off OpenShift, and skipped when `build.enabled` is set, since that already produces the same ImageStreams from source. The `system:image-puller` RoleBinding that lets workload namespaces pull them is created by the `aibom-workload-namespace` chart. Set `false` to pull from Quay on every node. |
 | `debug.keepPostprocessJobs` | `false` | Keeps finished postprocess Jobs and their input ConfigMaps, in the webhook's namespace, for inspection. Leaves one of each per workload indefinitely. Not for production. |
 | `debug.telemetryAllPods` | `false` | Queries telemetry for every pod even with no detected GPU, for testing on clusters without GPUs. Not for production. |
 
@@ -69,7 +70,7 @@ The webhook binary takes these flags. The chart sets them from the values above,
 | `--dataset-detection` | `true` | Inject dataset detection hooks into application containers |
 | `--enable-watcher` | `true` | Start the Job completion watcher (`watcher.enabled`) |
 | `--postprocess-image` | `busybox:latest` | Image for postprocess Jobs. A placeholder; the chart always overrides it with `image.postprocess`. |
-| `--dataset-sidecar-image` | `python:3.12-slim`, pinned by digest | Image for the dataset-signing sidecar container |
+| `--dataset-sidecar-image` | `python:3.12-slim`, pinned by digest | Image for the dataset-signing sidecar container. The chart overrides the binary default, reusing the discovery image (it has `bash` and `python3` and is already pulled on the node as the pod's init container), so the sidecar needs no extra pull. |
 | `--trusted-watcher-identity` | empty | The webhook's own ServiceAccount username, used to check that a Job claiming to be a postprocess Job was created by the watcher. The chart sets it. When empty the check is off and a warning is logged. |
 | `--trusted-job-controller-identity` | empty | See `webhook.trustedJobControllerIdentity`. |
 | `--prometheus-url` | `https://thanos-querier.openshift-monitoring.svc:9091` | See `prometheus.url`. |
