@@ -104,6 +104,17 @@ _WORKLOAD_CONTAINERS = 'container!="POD", container!="", container!="aibom-datas
 # averaged together -- an 8 GiB app container next to a 50 MiB sidecar would
 # report ~4 GiB of memory. The sums match SERIES_QUERIES' per-run `aggregate`
 # lines. Placeholders: {namespace}, {pod_name}.
+#
+# Gauges (GPU util/mem/power, vLLM queue depth, KV-cache) are read raw, with
+# NO avg_over_time wrapper: compute_metric_stats' max/min reduce these points,
+# so a 5m trailing average flattened real bursts and made "Max GPU util" report
+# e.g. 4% while the SERIES_QUERIES chart showed ~22%. Reading the gauge at each
+# range step lets max/min reflect the true peak/trough the run actually hit.
+# Rate queries (cpu/network/storage/vLLM throughput & latency) keep their [5m]
+# window -- a rate needs a range vector.
+# ponytail: step-sampled, so a spike strictly between two range steps is
+# missed; switch max/min to max_over_time/min_over_time([step]) (as
+# SERIES_QUERIES' {fn} does) if long-run peaks need to be exact.
 TELEMETRY_QUERIES = {
     # Computed directly from dcgm-exporter's own raw metrics (present on any
     # standard DCGM install) rather than a "nerc:"-prefixed recording rule --
@@ -113,15 +124,15 @@ TELEMETRY_QUERIES = {
     # DCGM's own `namespace`/`pod` labels are dcgm-exporter's; the workload's
     # are `exported_namespace`/`exported_pod`.
     "gpu_utilization": {
-        "query": 'avg(avg_over_time(DCGM_FI_DEV_GPU_UTIL{exported_namespace="{namespace}", exported_pod="{pod_name}"}[5m]))',
+        "query": 'avg(DCGM_FI_DEV_GPU_UTIL{exported_namespace="{namespace}", exported_pod="{pod_name}"})',
         "unit": "percent",
     },
     "gpu_memory_used": {
-        "query": 'sum(avg_over_time(DCGM_FI_DEV_FB_USED{exported_namespace="{namespace}", exported_pod="{pod_name}"}[5m]))',
+        "query": 'sum(DCGM_FI_DEV_FB_USED{exported_namespace="{namespace}", exported_pod="{pod_name}"})',
         "unit": "MiB",
     },
     "gpu_power": {
-        "query": 'sum(avg_over_time(DCGM_FI_DEV_POWER_USAGE{exported_namespace="{namespace}", exported_pod="{pod_name}"}[5m]))',
+        "query": 'sum(DCGM_FI_DEV_POWER_USAGE{exported_namespace="{namespace}", exported_pod="{pod_name}"})',
         "unit": "watts",
     },
     # rate()'s [5m] window matches what the pre-segmented-stats avg_* fields
@@ -232,17 +243,17 @@ VLLM_TELEMETRY_QUERIES = {
         "unit": "seconds",
     },
     "num_requests_running": {
-        "query": 'sum(avg_over_time(vllm:num_requests_running{namespace="{namespace}", pod="{pod_name}"}[5m]))',
+        "query": 'sum(vllm:num_requests_running{namespace="{namespace}", pod="{pod_name}"})',
         "unit": "requests",
     },
     "num_requests_waiting": {
-        "query": 'sum(avg_over_time(vllm:num_requests_waiting{namespace="{namespace}", pod="{pod_name}"}[5m]))',
+        "query": 'sum(vllm:num_requests_waiting{namespace="{namespace}", pod="{pod_name}"})',
         "unit": "requests",
     },
     "kv_cache_usage": {
         "query": (
-            '100 * (avg(avg_over_time(vllm:kv_cache_usage_perc{namespace="{namespace}", pod="{pod_name}"}[5m]))'
-            ' or avg(avg_over_time(vllm:gpu_cache_usage_perc{namespace="{namespace}", pod="{pod_name}"}[5m])))'
+            '100 * (avg(vllm:kv_cache_usage_perc{namespace="{namespace}", pod="{pod_name}"})'
+            ' or avg(vllm:gpu_cache_usage_perc{namespace="{namespace}", pod="{pod_name}"}))'
         ),
         "unit": "percent",
     },
