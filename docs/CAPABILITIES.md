@@ -4,7 +4,7 @@ Every field the AIBOM pipeline can populate, how it's detected, and where the de
 
 Three components do detection, in this order in the pipeline:
 
-1. **`aibom-discovery` init container** (`generate_snapshot.py`) — hardware/software facts + benchmarks, captured once at pod startup.
+1. **`aibom-discovery` init container** (`generate_snapshot.py`) — hardware/software facts, captured once at pod startup.
 2. **Runtime hooks** (`runtime_detector.py`, mounted as `sitecustomize.py`) — dataset/model/training objects observed live inside the app container's own Python process.
 3. **Postprocess Job** (`postprocess.py`) — parses container CLI args, reconciles/merges everything above, resolves git provenance, and queries Prometheus for telemetry.
 
@@ -16,7 +16,7 @@ Any field can also be set directly via an `aibom.io/*` annotation, which overrid
 
 Captured once per pod by the discovery init container into `discovery-<pod>.json`, HMAC-signed (see `CLAUDE.md`).
 
-**⚠️ Surfacing note**: `postprocess.py` only ever reads a small, fixed subset of this file — `gpu.gpu_models`/`gpu_count`/`cuda_version`/`gpu_driver_version` and `system.cpu_model`/`cpu_count`/`memory_total_gb`/`numa_node_count`/`kernel_version` — into `environment.*`. Everything else below is genuinely captured (it's in `discovery-<pod>.json`) but is **never read by any downstream code**, so it exists only in the per-workload data ConfigMap, which is deleted once the postprocess Job succeeds (see `CLAUDE.md`'s Postprocess Flow) — it never reaches the final `AIBOM` custom resource. Rows are marked ✅ *surfaced* (→ `environment.<field>`) or ⚠️ *captured only* accordingly.
+**Surfacing note**: `postprocess.py` copies only the rows marked ✅ *surfaced* into `environment.*`. Rows marked ⚠️ *captured only* are still written to `discovery-<pod>.json` but never reach the final `AIBOM`: that file lives in the per-workload data ConfigMap, which is deleted once the postprocess Job succeeds. They're left out because they are node-level tuning, point-in-time readings, or wrong from inside a container. Values of `N/A`/empty are omitted from the AIBOM.
 
 **CPU / memory / kernel**
 
@@ -24,15 +24,16 @@ Captured once per pod by the discovery init container into `discovery-<pod>.json
 |---|---|---|
 | CPU model | `/proc/cpuinfo` (`model name`) | ✅ `environment.cpu_model` |
 | CPU count | `/proc/cpuinfo` processor count | ✅ `environment.cpu_cores` |
-| Cores per socket / threads per core | `lscpu` | ⚠️ captured only |
-| Architecture | `uname -m` | ⚠️ captured only |
-| Current / max / min clock frequency | `/sys/devices/system/cpu/cpu0/cpufreq/*` | ⚠️ captured only |
-| L1d / L1i / L2 / L3 cache size | `lscpu` | ⚠️ captured only |
+| Cores per socket / threads per core | `lscpu` | ✅ `environment.cpu` |
+| Architecture | `uname -m` | ✅ `environment.cpu` |
+| L3 cache size | `lscpu` | ✅ `environment.cpu` |
+| L1d / L1i / L2 cache size | `lscpu` | ⚠️ captured only |
+| Current / max / min clock frequency | `/sys/devices/system/cpu/cpu0/cpufreq/*` | ⚠️ captured only — `cpu0`'s idle floor and boost ceiling, `N/A` on many VMs |
 | Total memory | `/proc/meminfo` (`MemTotal`) | ✅ `environment.memory_gb` |
-| Available / free memory | `/proc/meminfo` (`MemAvailable`/`MemFree`) | ⚠️ captured only |
+| Available / free memory | `/proc/meminfo` (`MemAvailable`/`MemFree`) | ⚠️ captured only — point-in-time reading |
 | NUMA node count | `/sys/devices/system/node/node*` listing | ✅ `environment.numa_nodes` |
 | Kernel version | `uname -r` | ✅ `environment.kernel_version` |
-| Uptime | `/proc/uptime` | ⚠️ captured only |
+| Uptime | `/proc/uptime` | ⚠️ captured only — point-in-time reading |
 
 **GPU**
 
@@ -40,56 +41,45 @@ Captured once per pod by the discovery init container into `discovery-<pod>.json
 |---|---|---|
 | GPU count | `nvidia-smi --query-gpu=name` (line count) | ✅ `environment.gpu_count` |
 | GPU model(s) | `nvidia-smi --query-gpu=name` | ✅ `environment.gpu_type` — only the **first line** of a multi-GPU-model listing; a mixed-model node's other GPU types are dropped |
-| GPU memory per device (VRAM) | `nvidia-smi --query-gpu=memory.total` | ⚠️ captured only |
+| GPU memory per device (VRAM) | `nvidia-smi --query-gpu=memory.total` | ✅ `environment.gpu_memory_mb` (list, one per GPU) |
 | GPU driver version | `nvidia-smi --query-gpu=driver_version` | ✅ `environment.driver_version` |
 | CUDA version | `nvidia-smi` (`CUDA Version` line) | ✅ `environment.cuda_version` |
 
 The discovery init container's own `nvidia.com/gpu` claim — what makes `nvidia-smi` work in it at all, since the NVIDIA Container Toolkit injects the binary and NVML driver library from the node's driver only when the claim is present (see `CLAUDE.md`) — is not detected independently but copied from the pod's **total** `nvidia.com/gpu` allocation (the sum of each container's effective claim), so `nvidia-smi` sees every GPU the pod is scheduled with, not just the first container's.
 
-**Network** — ⚠️ all fields below are captured but never surfaced into the compiled AIBOM:
+**Network**
 
-| Field | Detection |
-|---|---|
-| Interface names | `/sys/class/net` listing |
-| RDMA devices / count | `/sys/class/infiniband` listing |
-| Primary interface MTU | `/sys/class/net/eth0/mtu` |
-| TCP read/write memory buffers | `/proc/sys/net/ipv4/tcp_{rmem,wmem}` |
-| TCP congestion control algorithm | `/proc/sys/net/ipv4/tcp_congestion_control` |
+| Field | Detection | Surfaced? |
+|---|---|---|
+| RDMA devices / count | `/sys/class/infiniband` listing | ✅ `environment.network` |
+| Primary interface MTU | `/sys/class/net/eth0/mtu` | ✅ `environment.network` |
+| Interface names | `/sys/class/net` listing | ⚠️ captured only |
+| TCP read/write memory buffers | `/proc/sys/net/ipv4/tcp_{rmem,wmem}` | ⚠️ captured only — node defaults |
+| TCP congestion control algorithm | `/proc/sys/net/ipv4/tcp_congestion_control` | ⚠️ captured only — node default |
 
-**Storage (hardware)** — ⚠️ all fields below are captured but never surfaced into the compiled AIBOM. (Don't confuse this with the KServe `storage-<pod>.json` file described below, which *is* surfaced — this is disk/block-device hardware info.)
+**Storage (hardware)** (Don't confuse this with the KServe `storage-<pod>.json` file described below, which *is* surfaced — this is disk/block-device hardware info.)
 
-| Field | Detection |
-|---|---|
-| Block devices + size | `lsblk -nd -o NAME,SIZE` (loop devices excluded) |
-| NVMe device count | `ls /dev/nvme*` piped through `grep -c nvme0n` — counts only controller 0's namespaces and partitions, and `/dev` inside an unprivileged container usually has no host NVMe devices at all (#115) |
-| `/tmp` size / available space | `df -h /tmp` |
-| Active I/O scheduler | `/sys/block/sda/queue/scheduler` (hardcoded `sda`; empty on NVMe-only nodes) |
+| Field | Detection | Surfaced? |
+|---|---|---|
+| Block devices + size | `lsblk -nd -o NAME,SIZE` (loop devices excluded) | ✅ `environment.storage` |
+| NVMe device count | `ls /dev/nvme*` piped through `grep -c nvme0n` — counts only controller 0's namespaces and partitions, and `/dev` inside an unprivileged container usually has no host NVMe devices at all (#115) | ⚠️ captured only — unreliable |
+| `/tmp` size / available space | `df -h /tmp` | ⚠️ captured only — overlay size, point-in-time free space |
+| Active I/O scheduler | `/sys/block/sda/queue/scheduler` (hardcoded `sda`; empty on NVMe-only nodes) | ⚠️ captured only — unreliable |
 
-**Kernel / cgroup performance config** — ⚠️ all fields below are captured but never surfaced into the compiled AIBOM:
+**Kernel / cgroup performance config**
 
-| Field | Detection |
-|---|---|
-| CPU governor | `/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor` |
-| NUMA balancing | `/proc/sys/kernel/numa_balancing` |
-| Transparent hugepages | `/sys/kernel/mm/transparent_hugepage/enabled` |
-| Swappiness | `/proc/sys/vm/swappiness` |
-| Dirty ratio / dirty background ratio | `/proc/sys/vm/dirty_ratio`, `dirty_background_ratio` |
-| Max map count | `/proc/sys/vm/max_map_count` |
-| Max open file handles (system-wide) | `/proc/sys/fs/file-max` |
-| Max user processes / open files / stack size / memory size (this container) | `ulimit -u/-n/-s/-m` |
-| cgroup CPU quota / period | `/sys/fs/cgroup/cpu/cpu.cfs_{quota,period}_us` — cgroup v1 path only; always `N/A` on cgroup v2 nodes (OpenShift 4.14+) |
-| cgroup memory limit | `/sys/fs/cgroup/memory/memory.limit_in_bytes` — cgroup v1 path only; always `N/A` on cgroup v2 nodes |
+| Field | Detection | Surfaced? |
+|---|---|---|
+| CPU governor | `/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor` | ✅ `environment.kernel_config` |
+| NUMA balancing | `/proc/sys/kernel/numa_balancing` | ✅ `environment.kernel_config` |
+| Transparent hugepages | `/sys/kernel/mm/transparent_hugepage/enabled` | ✅ `environment.kernel_config` |
+| Max map count | `/proc/sys/vm/max_map_count` | ✅ `environment.kernel_config` |
+| Swappiness, dirty ratio / dirty background ratio, max open file handles (system-wide) | `/proc/sys/vm/*`, `/proc/sys/fs/file-max` | ⚠️ captured only — node tuning with no bearing on the run |
+| Max user processes / open files / stack size / memory size | `ulimit -u/-n/-s/-m` | ⚠️ captured only — these are the discovery init container's limits, not the workload's |
+| cgroup CPU quota / period | `/sys/fs/cgroup/cpu/cpu.cfs_{quota,period}_us` — cgroup v1 path only; always `N/A` on cgroup v2 nodes (OpenShift 4.14+) | ⚠️ captured only — unreliable |
+| cgroup memory limit | `/sys/fs/cgroup/memory/memory.limit_in_bytes` — cgroup v1 path only; always `N/A` on cgroup v2 nodes | ⚠️ captured only — unreliable |
 
 **Pod metadata** — ✅ surfaced into `execution_metadata.pods[]`: `pod_name`/`pod_uid`/`pod_namespace`/`pod_ip`/`node_name`/`start_time` (from downward-API env vars + a capture timestamp).
-
-**Benchmarks** — actually executed, not just read from `/proc`/`/sys` — ⚠️ **all four are captured but never surfaced into the compiled AIBOM** (no `aibom["benchmarks"]` or similar section exists in `postprocess.py`):
-
-| Benchmark | Measures | Method |
-|---|---|---|
-| CPU compute | MFLOPS | tight loop of 10M floating-point ops, timed |
-| Memory bandwidth | write/read MB/s | write then read a 100MB buffer in 8-byte strides, timed |
-| Disk I/O | write/read throughput MB/s | write/read 50×1MB blocks to a temp file with `fsync`, timed |
-| Context switch overhead | avg ms per process spawn | spawn a trivial subprocess 100×, timed |
 
 **InferenceService storage resolution** (KServe only) — ✅ surfaced. Reads `spec.predictor.model.storage.{path,key}` / `storageUri` off the pod's own `InferenceService` object (via its `INFERENCESERVICE_NAME` downward-API env var) and writes `storage-<pod>.json`; consumed by `postprocess.py`'s `detect_model_from_storage` to derive `model.name` (see below). Identification only — doesn't touch the actual bucket.
 
@@ -150,7 +140,7 @@ Every `dataset.auto_detected[]` entry gets `matches_declared` — whether its na
 
 Only the kebab-case spellings above are recognized; vLLM also accepts snake_case (`--max_model_len`), which isn't detected (#108).
 
-⚠️ Also parsed but **never surfaced** into the compiled AIBOM (dropped after the intermediate detection dict): `--served-model-name`, `--max-num-seqs`, `--seed`, `--trust-remote-code`, `--enforce-eager`, `--enable-prefix-caching`, `--port`.
+Also surfaced as `inference.served_model_name`, `max_num_seqs`, `seed`, `trust_remote_code`, `enforce_eager`, `enable_prefix_caching` (no annotation override). `--port` is parsed but not surfaced — a deployment detail.
 
 *trl* (`trl sft`/`trl dpo`-style):
 

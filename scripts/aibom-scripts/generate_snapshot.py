@@ -6,7 +6,6 @@ import signal
 import subprocess
 import sys
 import json
-import time
 import os
 import re
 from datetime import datetime
@@ -21,7 +20,7 @@ except ImportError:
 # starting at all. Every stage that touches something the workload or its
 # image controls (a missing binary, a FIFO on the model PVC, a stalled API
 # call) therefore runs through _run_stage, which turns an exception or a
-# timeout into a warning plus a fallback value so whatever was collected still
+# timeout into a warning plus a None result so whatever was collected still
 # gets written. The mutator's `|| echo ...` wrapper around this script covers
 # the rest (python3 missing, an error before the first stage).
 _STAGE_TIMEOUT_S = 60
@@ -31,9 +30,9 @@ class _StageTimeout(Exception):
     pass
 
 
-def _run_stage(name, fn, on_error=lambda exc: None, timeout_s=None):
+def _run_stage(name, fn, timeout_s=None):
     """Run fn() under a SIGALRM deadline; on any exception (including the
-    timeout) warn and return on_error(exc). SIGALRM interrupts a blocking
+    timeout) warn and return None. SIGALRM interrupts a blocking
     syscall such as open() on a FIFO, which nothing else in-process can."""
     timeout_s = timeout_s or _STAGE_TIMEOUT_S
 
@@ -45,14 +44,10 @@ def _run_stage(name, fn, on_error=lambda exc: None, timeout_s=None):
         return fn()
     except Exception as exc:
         print(f"WARNING: {name} failed, continuing without it: {exc}", file=sys.stderr)
-        return on_error(exc)
+        return None
     finally:
         signal.alarm(0)
         signal.signal(signal.SIGALRM, previous)
-
-
-def _benchmark_error(exc):
-    return {"error": str(exc)}
 
 
 def run_cmd(command):
@@ -61,103 +56,6 @@ def run_cmd(command):
         return out.stdout.strip() if out.returncode == 0 else "Not available"
     except Exception as e:
         return "Not available"
-
-def cpu_benchmark():
-    """Simple CPU compute benchmark - measures MFLOPS"""
-    start = time.time()
-    result = 0.0
-    iterations = 10000000
-    for i in range(iterations):
-        result += i * 1.5 - 0.7
-    elapsed = time.time() - start
-    mflops = (iterations * 2) / (elapsed * 1000000)  # 2 ops per iteration
-    return {
-        "iterations": iterations,
-        "time_seconds": f"{elapsed:.4f}",
-        "mflops": f"{mflops:.2f}"
-    }
-
-def memory_bandwidth_benchmark():
-    """Memory sequential read/write benchmark"""
-    size_mb = 100
-    size_bytes = size_mb * 1024 * 1024
-    data = bytearray(size_bytes)
-
-    # Write test
-    start = time.time()
-    for i in range(0, size_bytes, 8):
-        data[i:i+8] = b'\x00\x01\x02\x03\x04\x05\x06\x07'
-    write_time = time.time() - start
-    write_bw = (size_mb / write_time) if write_time > 0 else 0
-
-    # Read test
-    start = time.time()
-    checksum = 0
-    for i in range(0, size_bytes, 8):
-        checksum += data[i]
-    read_time = time.time() - start
-    read_bw = (size_mb / read_time) if read_time > 0 else 0
-
-    return {
-        "test_size_mb": size_mb,
-        "write_bandwidth_mbps": f"{write_bw:.2f}",
-        "read_bandwidth_mbps": f"{read_bw:.2f}",
-        "write_time_sec": f"{write_time:.4f}",
-        "read_time_sec": f"{read_time:.4f}"
-    }
-
-def disk_io_benchmark():
-    """Disk I/O benchmark using /tmp"""
-    test_file = "/tmp/io_bench_test.dat"
-    size_mb = 50
-    block_size = 1024 * 1024  # 1MB blocks
-
-    try:
-        # Write test
-        start = time.time()
-        with open(test_file, 'wb') as f:
-            for _ in range(size_mb):
-                f.write(os.urandom(block_size))
-            f.flush()
-            os.fsync(f.fileno())
-        write_time = time.time() - start
-        write_bw = (size_mb / write_time) if write_time > 0 else 0
-
-        # Read test
-        start = time.time()
-        with open(test_file, 'rb') as f:
-            while f.read(block_size):
-                pass
-        read_time = time.time() - start
-        read_bw = (size_mb / read_time) if read_time > 0 else 0
-
-        # Cleanup
-        os.remove(test_file)
-
-        return {
-            "test_size_mb": size_mb,
-            "write_bandwidth_mbps": f"{write_bw:.2f}",
-            "read_bandwidth_mbps": f"{read_bw:.2f}",
-            "write_time_sec": f"{write_time:.4f}",
-            "read_time_sec": f"{read_time:.4f}"
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-def context_switch_benchmark():
-    """Measure context switch overhead using subprocess spawning"""
-    iterations = 100
-    start = time.time()
-    for _ in range(iterations):
-        subprocess.run(['true'], capture_output=True)
-    elapsed = time.time() - start
-    avg_per_switch = (elapsed / iterations) * 1000  # milliseconds
-
-    return {
-        "iterations": iterations,
-        "total_time_sec": f"{elapsed:.4f}",
-        "avg_per_spawn_ms": f"{avg_per_switch:.4f}"
-    }
 
 print("Collecting static system information...")
 
@@ -180,10 +78,10 @@ snapshot = {
         "cpu_current_freq_mhz": run_cmd("cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null | awk '{print $1/1000}' || echo 'N/A'"),
         "cpu_max_freq_mhz": run_cmd("cat /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq 2>/dev/null | awk '{print $1/1000}' || echo 'N/A'"),
         "cpu_min_freq_mhz": run_cmd("cat /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq 2>/dev/null | awk '{print $1/1000}' || echo 'N/A'"),
-        "cache_l1d": run_cmd("lscpu | grep 'L1d cache' | awk '{print $NF}' 2>/dev/null || echo 'N/A'"),
-        "cache_l1i": run_cmd("lscpu | grep 'L1i cache' | awk '{print $NF}' 2>/dev/null || echo 'N/A'"),
-        "cache_l2": run_cmd("lscpu | grep 'L2 cache' | awk '{print $NF}' 2>/dev/null || echo 'N/A'"),
-        "cache_l3": run_cmd("lscpu | grep 'L3 cache' | awk '{print $NF}' 2>/dev/null || echo 'N/A'"),
+        "cache_l1d": run_cmd("lscpu | grep 'L1d cache' | head -1 | sed -E 's/^[^:]*: *//; s/ *\\(.*//' 2>/dev/null || echo 'N/A'"),
+        "cache_l1i": run_cmd("lscpu | grep 'L1i cache' | head -1 | sed -E 's/^[^:]*: *//; s/ *\\(.*//' 2>/dev/null || echo 'N/A'"),
+        "cache_l2": run_cmd("lscpu | grep 'L2 cache' | head -1 | sed -E 's/^[^:]*: *//; s/ *\\(.*//' 2>/dev/null || echo 'N/A'"),
+        "cache_l3": run_cmd("lscpu | grep 'L3 cache' | head -1 | sed -E 's/^[^:]*: *//; s/ *\\(.*//' 2>/dev/null || echo 'N/A'"),
         "memory_total_gb": run_cmd("grep MemTotal /proc/meminfo | awk '{printf \"%.2f\", $2/1024/1024}'"),
         "memory_available_gb": run_cmd("grep MemAvailable /proc/meminfo | awk '{printf \"%.2f\", $2/1024/1024}'"),
         "memory_free_gb": run_cmd("grep MemFree /proc/meminfo | awk '{printf \"%.2f\", $2/1024/1024}'"),
@@ -234,24 +132,6 @@ snapshot = {
         "cgroup_memory_limit_bytes": run_cmd("cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo 'N/A'")
     }
 }
-
-# Dynamic Benchmarks
-print("Running CPU compute benchmark...")
-snapshot["benchmarks"] = {
-    "cpu_compute": _run_stage("CPU benchmark", cpu_benchmark, _benchmark_error)
-}
-
-print("Running memory bandwidth benchmark...")
-snapshot["benchmarks"]["memory_bandwidth"] = _run_stage(
-    "memory bandwidth benchmark", memory_bandwidth_benchmark, _benchmark_error)
-
-print("Running disk I/O benchmark...")
-snapshot["benchmarks"]["disk_io"] = _run_stage("disk I/O benchmark", disk_io_benchmark, _benchmark_error)
-
-print("Running context switch benchmark...")
-snapshot["benchmarks"]["context_switch"] = _run_stage(
-    "context switch benchmark", context_switch_benchmark, _benchmark_error)
-
 
 def _write_local_snapshot():
     # Write JSON locally for debugging/parity with prior behavior
@@ -441,7 +321,6 @@ pod_namespace = os.environ.get("POD_NAMESPACE", "")
 configmap_name = _run_stage(
     "ConfigMap name lookup",
     lambda: k8s_api.resolve_data_configmap_name() if k8s_api else "",
-    lambda exc: "",
 )
 
 # Canonical (sorted-key, no incidental whitespace) serialization: this exact
