@@ -21,10 +21,13 @@ metadata:
   namespace: {{ include "aibom-webhook.namespace" $ }}
 spec:
   tags:
-    - name: {{ .tag }}
+    # Quoted: an all-digit tag (e.g. a short SHA like 3237251) is otherwise
+    # parsed as an integer, and the ImageStream's typed server-side apply
+    # rejects .spec.tags[].name that isn't a string.
+    - name: {{ .tag | quote }}
       from:
         kind: DockerImage
-        name: {{ .repository }}:{{ .tag }}
+        name: {{ printf "%s:%s" .repository .tag | quote }}
       referencePolicy:
         type: Local
       importPolicy:
