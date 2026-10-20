@@ -85,6 +85,19 @@ jobs:
       - name: Publish charts
         run: just chart-push --version=${{ steps.version.outputs.version }} --repo=$REGISTRY --out=dist
 
+      # Generate the community chart-verifier reports for exactly this version, so
+      # their chart digest matches the charts just published. Uploaded as workflow
+      # artifacts to hand to the OpenShift Helm catalog PR (charts/community/...),
+      # not committed back -- that submission is a separate manual step.
+      - name: Generate community chart-verifier reports
+        run: just chart-verify --version=${{ steps.version.outputs.version }} --out=reports
+
+      - name: Upload chart-verifier reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: chart-verifier-reports-${{ steps.version.outputs.version }}
+          path: reports/*-report.yaml
+
       - name: Add the charts to the Helm repository on gh-pages
         run: |
           git config user.name "github-actions[bot]"
