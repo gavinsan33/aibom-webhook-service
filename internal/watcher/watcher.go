@@ -941,6 +941,15 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 		// a real and common case, not a zero value.
 		MemoryLimitBytes *int64 `json:"memory_limit_bytes,omitempty"`
 		CPULimitMillis   *int64 `json:"cpu_limit_millis,omitempty"`
+		// GPULimit is the container's effective nvidia.com/gpu claim (limit if
+		// set, else request) -- what the scheduler placed the pod against, known
+		// at pod-creation time like the cpu/memory limits above. postprocess.py
+		// sums it per pod for an authoritative gpu_count, preferred over the
+		// in-pod discovery container's nvidia-smi count, which can miscount (a
+		// driver-error line read as a device, #115), reflects only the share
+		// that one container was handed, and -- unlike this claim -- is set from
+		// inside the workload. nil when the container claims no GPU.
+		GPULimit *int64 `json:"gpu_limit,omitempty"`
 		// RestartCount/LastTerminatedReason/LastExitCode come from the
 		// container's previous termination (LastTerminationState). With
 		// restartPolicy OnFailure a container that was OOM-killed and then
@@ -1010,6 +1019,14 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 			if cpu, ok := c.Resources.Limits[corev1.ResourceCPU]; ok {
 				v := cpu.MilliValue()
 				ci.CPULimitMillis = &v
+			}
+			gpuResource := corev1.ResourceName("nvidia.com/gpu")
+			if gpu, ok := c.Resources.Limits[gpuResource]; ok && gpu.Value() > 0 {
+				v := gpu.Value()
+				ci.GPULimit = &v
+			} else if gpu, ok := c.Resources.Requests[gpuResource]; ok && gpu.Value() > 0 {
+				v := gpu.Value()
+				ci.GPULimit = &v
 			}
 			containers = append(containers, ci)
 		}
