@@ -395,6 +395,82 @@ def test_compile_aibom_redacts_annotation_and_detected_repository():
         assert "SECRET" not in json.dumps(aibom)
 
 
+def test_pod_gpu_count_sums_claims():
+    containers = [
+        {"pod_name": "p1", "gpu_limit": 2},
+        {"pod_name": "p1", "gpu_limit": 2},
+        {"pod_name": "p1"},            # no GPU claim -> ignored
+        {"pod_name": "other", "gpu_limit": 8},
+    ]
+    assert pp.pod_gpu_count("p1", containers) == 4
+    assert pp.pod_gpu_count("none", containers) is None
+    assert pp.pod_gpu_count("p1", None) is None
+
+
+def test_compile_aibom_prefers_pod_spec_gpu_count_over_nvidia_smi(monkeypatch):
+    # Discovery's in-pod nvidia-smi miscounts (reports 1); the pod-spec claim (4)
+    # is authoritative. DCGM off so gpu_type still comes from discovery.
+    monkeypatch.setattr(pp, "_dcgm_gpu_hardware", lambda pod: {})
+    discoveries = [{
+        "pod_metadata": {"name": "p1", "uid": "u1"},
+        "gpu": {"gpu_count": "1", "gpu_models": "NVIDIA A100"},
+        "system": {},
+    }]
+    containers = [
+        {"pod_name": "p1", "gpu_limit": 2},
+        {"pod_name": "p1", "gpu_limit": 2},
+    ]
+    aibom = pp.compile_aibom(
+        discoveries=discoveries, detected_datasets=[], runtime_info={}, annotations={},
+        telemetry=None, containers=containers,
+    )
+    assert aibom["environment"]["gpu_count"] == 4
+    assert aibom["environment"]["gpu_type"] == "NVIDIA A100"
+
+
+def test_compile_aibom_falls_back_to_discovery_gpu_count_without_claim(monkeypatch):
+    monkeypatch.setattr(pp, "_dcgm_gpu_hardware", lambda pod: {})
+    discoveries = [{
+        "pod_metadata": {"name": "p1"},
+        "gpu": {"gpu_count": "8"},
+        "system": {},
+    }]
+    aibom = pp.compile_aibom(
+        discoveries=discoveries, detected_datasets=[], runtime_info={}, annotations={},
+        telemetry=None, containers=[],
+    )
+    assert aibom["environment"]["gpu_count"] == "8"
+
+
+def test_dcgm_gpu_hardware_parses_models_and_memory(monkeypatch):
+    monkeypatch.setattr(pp, "JOB_NAMESPACE", "ns")
+    response = {"status": "success", "data": {"result": [
+        {"metric": {"gpu": "1", "modelName": "NVIDIA A100-SXM4-40GB"}, "value": [1.7e9, "40960"]},
+        {"metric": {"gpu": "0", "modelName": "NVIDIA A100-SXM4-40GB"}, "value": [1.7e9, "40960"]},
+    ]}}
+    monkeypatch.setattr(pp, "query_prometheus_instant", lambda promql, t: response)
+    hw = pp._dcgm_gpu_hardware("p1")
+    assert hw["gpu_models"] == "NVIDIA A100-SXM4-40GB\nNVIDIA A100-SXM4-40GB"
+    assert hw["gpu_memory_mb"] == [40960, 40960]  # ordered by gpu index (0, then 1)
+
+
+def test_dcgm_gpu_hardware_empty_when_no_series(monkeypatch):
+    monkeypatch.setattr(pp, "JOB_NAMESPACE", "ns")
+    monkeypatch.setattr(pp, "query_prometheus_instant",
+                        lambda promql, t: {"status": "success", "data": {"result": []}})
+    assert pp._dcgm_gpu_hardware("p1") == {}
+
+
+def test_dcgm_gpu_hardware_degrades_quietly_on_error(monkeypatch):
+    monkeypatch.setattr(pp, "JOB_NAMESPACE", "ns")
+
+    def raising(promql, t):
+        raise RuntimeError("thanos down")
+
+    monkeypatch.setattr(pp, "query_prometheus_instant", raising)
+    assert pp._dcgm_gpu_hardware("p1") == {}
+
+
 def test_load_datasets_redacts_runtime_info_repository(tmp_path, monkeypatch):
     (tmp_path / "dataset.json").write_text(json.dumps(
         {"datasets": [], "runtime_info": {"git_repository": "https://u:SECRET@github.com/org/repo"}}
