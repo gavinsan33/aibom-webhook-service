@@ -25,7 +25,9 @@ spec:
           parallelism: 1
           completions: 1
           backoffLimit: 0
-          activeDeadlineSeconds: 900
+          # Longer than the other examples': the image is ~38 GB, so an
+          # uncached pull alone takes minutes before the server even starts.
+          activeDeadlineSeconds: 1800
           template:
             spec:
               restartPolicy: Never
@@ -54,12 +56,18 @@ spec:
                   ports:
                     - containerPort: 30000
                       name: http
+                  # Not /health: SGLang's /health runs a one-token generation,
+                  # which regularly outlasts a probe's 1 s default timeout, so
+                  # the pod could take minutes to go Ready (or never, before
+                  # the Job's deadline). /v1/models is served only once the
+                  # engine is up and generates nothing.
                   readinessProbe:
                     httpGet:
-                      path: /health
+                      path: /v1/models
                       port: 30000
                     initialDelaySeconds: 30
                     periodSeconds: 10
+                    timeoutSeconds: 5
                   resources:
                     requests:
                       nvidia.com/gpu: "1"
