@@ -1,29 +1,30 @@
 {{- if .Values.vllmMetrics.enabled }}
-# Tells OpenShift's user-workload-monitoring Prometheus to scrape vLLM's own
-# /metrics endpoint (TTFT, ITL, queue depth, KV-cache usage -- see CLAUDE.md's
-# Inference Performance Telemetry section) on every instrumented pod in this
-# namespace, so postprocess.py's vLLM queries have something to read from
-# Thanos Querier in the first place. Without this, vLLM's metrics are only
-# ever visible in-process on the pod's own :8000/metrics -- nothing scrapes
-# them into Prometheus at all, the same way DCGM_FI_DEV_GPU_UTIL wouldn't
-# exist in Prometheus without nvidia-gpu-operator's own ServiceMonitor.
+# Tells OpenShift's user-workload-monitoring Prometheus to scrape each serving
+# engine's own /metrics endpoint (TTFT, ITL, queue depth, KV-cache usage -- see
+# CLAUDE.md's Inference Performance Telemetry section) on every instrumented pod
+# in this namespace, so postprocess.py's serving-engine queries have something
+# to read from Thanos Querier in the first place. Without this, those metrics
+# are only ever visible in-process on the pod's own port -- nothing scrapes them
+# into Prometheus at all, the same way DCGM_FI_DEV_GPU_UTIL wouldn't exist in
+# Prometheus without nvidia-gpu-operator's own ServiceMonitor.
 #
-# A PodMonitor, not a ServiceMonitor: KServe's predictor Service only
-# exposes port 80, not the vLLM container's own serving port, so scraping
-# via the Service wouldn't reach it. A PodMonitor scrapes pod IPs directly.
+# A PodMonitor, not a ServiceMonitor: KServe's predictor Service only exposes
+# port 80, not the engine container's own serving port, so scraping via the
+# Service wouldn't reach it. A PodMonitor scrapes pod IPs directly.
 #
 # Selector is the same aibom.io/instrumented=true label the webhook already
-# stamps on every qualifying pod (mutator.go) -- not a vLLM-specific label,
-# since telling "is this actually vLLM" apart from any other instrumented
-# workload at admission time would require duplicating postprocess.py's own
-# CLI-detection logic in the Go mutator. Port 8000 is vLLM's own upstream
-# default (`vllm serve`'s --port), not just this project's example
-# convention, so scrape targets that aren't vLLM either don't listen on that
-# port at all (scrape just fails, harmless) or coincidentally do and expose
-# unrelated Prometheus-format metrics -- low-probability, and even then
-# postprocess.py's vllm: metrics never match anything else. A workload that
-# runs vLLM on a non-default --port isn't scraped; there's no per-workload
-# override for this yet (see #86).
+# stamps on every qualifying pod (mutator.go) -- not an engine-specific label,
+# since telling which engine (if any) a pod runs at admission time would require
+# duplicating postprocess.py's own CLI-detection logic in the Go mutator.
+#
+# One endpoint per supported engine's upstream default port (vLLM/llm-d 8000,
+# TGI 80, SGLang 30000, LMDeploy 23333) -- each is each engine's own default,
+# not just a convention here. A pod that isn't that engine simply doesn't listen
+# on the port (the scrape fails, harmless), and even if something unrelated does,
+# postprocess.py's prefixed metric names (vllm:/sglang:/lmdeploy:/tgi_) match
+# nothing else. A workload that overrides a port isn't scraped; there's no
+# per-workload override yet (see #86). TGI/SGLang need their metrics flag
+# (--enable-metrics / TGI exposes them by default) for anything to be there.
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
@@ -34,7 +35,16 @@ spec:
     matchLabels:
       aibom.io/instrumented: "true"
   podMetricsEndpoints:
-    - targetPort: 8000
+    - targetPort: 8000   # vLLM / llm-d
+      path: /metrics
+      interval: 30s
+    - targetPort: 80     # TGI
+      path: /metrics
+      interval: 30s
+    - targetPort: 30000  # SGLang
+      path: /metrics
+      interval: 30s
+    - targetPort: 23333  # LMDeploy
       path: /metrics
       interval: 30s
 {{- end }}
