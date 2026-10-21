@@ -2,9 +2,11 @@
 # Mirrors vllm-inference.yaml: a server + a guidellm OpenAI-http client that
 # drives traffic and then deletes the server Job so postprocessing fires.
 # The only real differences from the vLLM example are the server image/command
-# and the port (TGI's own default is 80). TGI exposes Prometheus metrics on
-# /metrics on that same port by default (no flag needed), which the
-# aibom-serving-metrics PodMonitor scrapes.
+# and the port. TGI's own default is 80, but OpenShift's restricted SCC runs
+# pods as a random non-root UID with no NET_BIND_SERVICE, so it can't bind a
+# port below 1024; this uses 8080 (KServe's TGI runtime does the same). TGI
+# exposes Prometheus metrics on /metrics on that same port by default (no flag
+# needed), which the aibom-serving-metrics PodMonitor scrapes.
 #
 # Adjust image tag / model for your cluster as needed.
 apiVersion: jobset.x-k8s.io/v1alpha2
@@ -37,10 +39,20 @@ spec:
                   command:
                     - text-generation-launcher
                     - --model-id=Qwen/Qwen2.5-0.5B-Instruct
-                    - --port=80
+                    - --port=8080
+                  # The router writes its tokenizer to ./out, and the image's
+                  # WORKDIR (/usr/src) isn't writable by a random UID.
+                  workingDir: /tmp
                   env:
                     - name: HOME
                       value: /tmp
+                    # The image defaults its HF cache to /data, which is owned
+                    # by root; OpenShift's restricted SCC runs with a random UID
+                    # and gets "Permission denied: '/data'" on download.
+                    - name: HF_HOME
+                      value: /tmp/hf
+                    - name: HUGGINGFACE_HUB_CACHE
+                      value: /tmp/hf/hub
                     - name: HF_TOKEN
                       valueFrom:
                         secretKeyRef:
@@ -48,12 +60,12 @@ spec:
                           key: HF_TOKEN
                           optional: true
                   ports:
-                    - containerPort: 80
+                    - containerPort: 8080
                       name: http
                   readinessProbe:
                     httpGet:
                       path: /health
-                      port: 80
+                      port: 8080
                     initialDelaySeconds: 30
                     periodSeconds: 10
                   resources:
@@ -83,7 +95,7 @@ spec:
                   command:
                     - guidellm
                     - run
-                    - --backend=kind=openai_http,target=http://aibom-tgi-benchmark-server-0-0.aibom-tgi-benchmark.project-gavin-test.svc.cluster.local:80
+                    - --backend=kind=openai_http,target=http://aibom-tgi-benchmark-server-0-0.aibom-tgi-benchmark.project-gavin-test.svc.cluster.local:8080
                     - --data=kind=synthetic_text,prompt_tokens=256,output_tokens=128
                     - --profile=kind=sweep
                     - --constraint=kind=max_duration,seconds=30
