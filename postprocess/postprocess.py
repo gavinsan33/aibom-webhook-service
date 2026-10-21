@@ -188,83 +188,143 @@ TELEMETRY_QUERIES = {
     },
 }
 
-# vLLM's own serving-level metrics (TTFT, ITL, queue depth, KV-cache usage,
-# throughput) -- see CLAUDE.md's Inference Performance Telemetry section.
-# Collected separately from TELEMETRY_QUERIES above and only for pods where
-# detected_model.serving_engine == "vllm" (main()); these are entirely
-# distinct series vLLM exposes on its own /metrics endpoint (confirmed
-# against a live vllm 0.17 server), not DCGM/cAdvisor, and land in
-# aibom["inference"]["performance"] rather than resource_utilization -- a
-# serving-level SLO ("were requests queueing, was the KV cache thrashing")
+# A serving engine's own serving-level metrics (TTFT, ITL, queue depth,
+# KV-cache usage, throughput) -- see CLAUDE.md's Inference Performance Telemetry
+# section. Collected separately from TELEMETRY_QUERIES above and only for pods
+# where detected_model.serving_engine is one we have queries for (main()); these
+# are series the engine exposes on its own /metrics endpoint (not DCGM/cAdvisor)
+# and land in aibom["inference"]["performance"] rather than resource_utilization
+# -- a serving-level SLO ("were requests queueing, was the KV cache thrashing")
 # is a different question than a hardware-utilization one.
 #
-# vLLM's own metrics carry no pod/namespace label at all (just `engine` and
-# `model_name`) -- the `namespace`/`pod` filters below only work because
-# the aibom-vllm-metrics PodMonitor (charts/aibom-workload-namespace) scrapes
-# it, and Prometheus's own target-discovery relabeling is what attaches
-# those labels, the same mechanism the cAdvisor container_* queries above
-# rely on, not anything vLLM itself provides.
+# The engine's own metrics carry no pod/namespace label (vLLM emits just
+# `engine`/`model_name`) -- the `namespace`/`pod` filters only work because the
+# aibom-serving-metrics PodMonitor (charts/aibom-workload-namespace) scrapes the
+# engine's port and Prometheus's target-discovery relabeling attaches those
+# labels, the same mechanism the cAdvisor container_* queries above rely on.
+#
+# All four engines expose the same metric *shapes* -- TTFT/ITL histograms,
+# running/waiting gauges, a KV-cache gauge, prompt/generation token counters --
+# differing only in metric names, so the queries are generated from a per-engine
+# name table (SERVING_ENGINE_METRICS) by _build_serving_queries rather than
+# hand-written four times. Names confirmed against each engine's own docs
+# (vLLM 0.17 live server; HF TGI metrics reference; SGLang production_metrics;
+# LMDeploy metrics source), not guessed. TGI is the odd one: different names and
+# no TTFT/KV-cache/prompt-throughput metric at all, so it reports a subset.
 #
 # TTFT/ITL are histograms; sum-rate-over-count-rate gives the average latency
-# per time window, reusing compute_metric_stats' min/max/avg/p95/segments
-# reduction exactly like every gauge metric above. That "p95" is honestly a
-# p95 of the *windowed average* latency, not a true per-request percentile
-# (which would need histogram_quantile() over the bucket series) -- a known
-# simplification to keep this consistent with the rest of TELEMETRY_QUERIES
-# rather than a second, differently-shaped stats structure for just these
-# two metrics. A workload with zero completed requests in a given 5m window
-# divides 0/0 (NaN); parse_range_response drops NaN samples rather than
-# propagating them into min/max/avg.
+# per time window, reduced by compute_metric_stats' min/max/avg/p95/segments
+# like every gauge metric. That "p95" is honestly a p95 of the *windowed
+# average* latency, not a true per-request percentile (which would need
+# histogram_quantile() over the bucket series) -- a known simplification. A
+# window with zero completed requests divides 0/0 (NaN); parse_range_response
+# drops NaN samples rather than propagating them into min/max/avg.
 #
-# Two metrics were renamed in newer vLLM releases; the pre-rename name is
-# tried via `or` so older servers still report them: inter_token_latency_seconds
-# was time_per_output_token_seconds, and kv_cache_usage_perc was
-# gpu_cache_usage_perc. Both sides are aggregated to an empty label set, so
-# when a server exports both names `or` keeps only the new one.
+# Where a metric was renamed across releases, both names are tried via `or` so
+# older servers still report (vLLM: inter_token_latency_seconds was
+# time_per_output_token_seconds, kv_cache_usage_perc was gpu_cache_usage_perc).
+# Both sides aggregate to an empty label set, so `or` keeps only the new one.
 #
-# kv_cache_usage_perc is a 0-1 fraction despite its name; it's multiplied by
-# 100 here so the stored value matches its "percent" unit.
-VLLM_TELEMETRY_QUERIES = {
-    "time_to_first_token_seconds": {
-        "query": (
-            'sum(rate(vllm:time_to_first_token_seconds_sum{namespace="{namespace}", pod="{pod_name}"}[5m]))'
-            ' / sum(rate(vllm:time_to_first_token_seconds_count{namespace="{namespace}", pod="{pod_name}"}[5m]))'
-        ),
-        "unit": "seconds",
+# A KV-cache gauge is a 0-1 fraction despite its name; `scale: 100` multiplies
+# it so the stored value matches its "percent" unit.
+#
+# kind: "hist" (sum/count rate ratio), "gauge" (instant value / _over_time),
+# "counter" (rate of a _total). agg (gauge only): sum across series, or avg.
+SERVING_ENGINE_METRICS = {
+    "vllm": {
+        "time_to_first_token_seconds": {"kind": "hist", "names": ["vllm:time_to_first_token_seconds"], "unit": "seconds"},
+        "inter_token_latency_seconds": {"kind": "hist", "names": ["vllm:inter_token_latency_seconds", "vllm:time_per_output_token_seconds"], "unit": "seconds"},
+        "num_requests_running": {"kind": "gauge", "names": ["vllm:num_requests_running"], "agg": "sum", "unit": "requests"},
+        "num_requests_waiting": {"kind": "gauge", "names": ["vllm:num_requests_waiting"], "agg": "sum", "unit": "requests"},
+        "kv_cache_usage": {"kind": "gauge", "names": ["vllm:kv_cache_usage_perc", "vllm:gpu_cache_usage_perc"], "agg": "avg", "scale": 100, "unit": "percent"},
+        "prompt_throughput": {"kind": "counter", "names": ["vllm:prompt_tokens_total"], "unit": "tokens_per_sec"},
+        "generation_throughput": {"kind": "counter", "names": ["vllm:generation_tokens_total"], "unit": "tokens_per_sec"},
     },
-    "inter_token_latency_seconds": {
-        "query": (
-            '(sum(rate(vllm:inter_token_latency_seconds_sum{namespace="{namespace}", pod="{pod_name}"}[5m]))'
-            ' / sum(rate(vllm:inter_token_latency_seconds_count{namespace="{namespace}", pod="{pod_name}"}[5m])))'
-            ' or (sum(rate(vllm:time_per_output_token_seconds_sum{namespace="{namespace}", pod="{pod_name}"}[5m]))'
-            ' / sum(rate(vllm:time_per_output_token_seconds_count{namespace="{namespace}", pod="{pod_name}"}[5m])))'
-        ),
-        "unit": "seconds",
+    # LMDeploy mirrors vLLM's metric names under an lmdeploy: prefix.
+    "lmdeploy": {
+        "time_to_first_token_seconds": {"kind": "hist", "names": ["lmdeploy:time_to_first_token_seconds"], "unit": "seconds"},
+        "inter_token_latency_seconds": {"kind": "hist", "names": ["lmdeploy:time_per_output_token_seconds"], "unit": "seconds"},
+        "num_requests_running": {"kind": "gauge", "names": ["lmdeploy:num_requests_running"], "agg": "sum", "unit": "requests"},
+        "num_requests_waiting": {"kind": "gauge", "names": ["lmdeploy:num_requests_waiting"], "agg": "sum", "unit": "requests"},
+        "kv_cache_usage": {"kind": "gauge", "names": ["lmdeploy:gpu_cache_usage_perc"], "agg": "avg", "scale": 100, "unit": "percent"},
+        "prompt_throughput": {"kind": "counter", "names": ["lmdeploy:prompt_tokens_total"], "unit": "tokens_per_sec"},
+        "generation_throughput": {"kind": "counter", "names": ["lmdeploy:generation_tokens_total"], "unit": "tokens_per_sec"},
     },
-    "num_requests_running": {
-        "query": 'sum(vllm:num_requests_running{namespace="{namespace}", pod="{pod_name}"})',
-        "unit": "requests",
+    "sglang": {
+        "time_to_first_token_seconds": {"kind": "hist", "names": ["sglang:time_to_first_token_seconds"], "unit": "seconds"},
+        "inter_token_latency_seconds": {"kind": "hist", "names": ["sglang:request_time_per_output_token_seconds"], "unit": "seconds"},
+        "num_requests_running": {"kind": "gauge", "names": ["sglang:num_running_reqs"], "agg": "sum", "unit": "requests"},
+        "num_requests_waiting": {"kind": "gauge", "names": ["sglang:num_queue_reqs"], "agg": "sum", "unit": "requests"},
+        # token_usage is a 0-1 fraction of the KV-cache pool in use.
+        "kv_cache_usage": {"kind": "gauge", "names": ["sglang:token_usage"], "agg": "avg", "scale": 100, "unit": "percent"},
+        "prompt_throughput": {"kind": "counter", "names": ["sglang:prompt_tokens_total"], "unit": "tokens_per_sec"},
+        "generation_throughput": {"kind": "counter", "names": ["sglang:generation_tokens_total"], "unit": "tokens_per_sec"},
     },
-    "num_requests_waiting": {
-        "query": 'sum(vllm:num_requests_waiting{namespace="{namespace}", pod="{pod_name}"})',
-        "unit": "requests",
-    },
-    "kv_cache_usage": {
-        "query": (
-            '100 * (avg(vllm:kv_cache_usage_perc{namespace="{namespace}", pod="{pod_name}"})'
-            ' or avg(vllm:gpu_cache_usage_perc{namespace="{namespace}", pod="{pod_name}"}))'
-        ),
-        "unit": "percent",
-    },
-    "prompt_throughput": {
-        "query": 'sum(rate(vllm:prompt_tokens_total{namespace="{namespace}", pod="{pod_name}"}[5m]))',
-        "unit": "tokens_per_sec",
-    },
-    "generation_throughput": {
-        "query": 'sum(rate(vllm:generation_tokens_total{namespace="{namespace}", pod="{pod_name}"}[5m]))',
-        "unit": "tokens_per_sec",
+    # TGI exposes no TTFT, KV-cache, or prompt-throughput metric; it reports only
+    # what it has. Its names don't share vLLM's shape (no colon prefix, different
+    # suffixes), which is exactly why the table carries names per engine.
+    "tgi": {
+        "inter_token_latency_seconds": {"kind": "hist", "names": ["tgi_request_mean_time_per_token_duration"], "unit": "seconds"},
+        "num_requests_running": {"kind": "gauge", "names": ["tgi_batch_current_size"], "agg": "sum", "unit": "requests"},
+        "num_requests_waiting": {"kind": "gauge", "names": ["tgi_queue_size"], "agg": "sum", "unit": "requests"},
+        "generation_throughput": {"kind": "counter", "names": ["tgi_request_generated_tokens_sum"], "unit": "tokens_per_sec"},
     },
 }
+
+
+def _build_serving_queries(metrics, series):
+    """Generate the PromQL query dict for one engine's metric table, in either
+    the per-pod stats shape (series=False) or the by-pod time-series shape
+    (series=True). Reproduces the hand-verified vLLM queries exactly (see
+    test_build_serving_queries_reproduces_vllm) so the generator inherits their
+    confirmed correctness for every engine. {namespace}/{pod_name}/{pod_regex}/
+    {fn}/{win} stay as literal placeholders for later substitution."""
+    if series:
+        fltr, by, sp = '{namespace="{namespace}", pod=~"{pod_regex}"}', " by (pod)", " "
+    else:
+        fltr, by, sp = '{namespace="{namespace}", pod="{pod_name}"}', "", ""
+    sumfn = "sum" + by
+    out = {}
+    for key, d in metrics.items():
+        kind, names, unit = d["kind"], d["names"], d["unit"]
+        if kind == "hist":
+            terms = [
+                sumfn + sp + "(rate(" + n + "_sum" + fltr + "[5m]))"
+                " / " + sumfn + sp + "(rate(" + n + "_count" + fltr + "[5m]))"
+                for n in names
+            ]
+            query = terms[0] if len(terms) == 1 else " or ".join("(" + t + ")" for t in terms)
+            info = {"query": query, "unit": unit}
+            if series:
+                info["aggregation"] = "avg"
+        elif kind == "gauge":
+            agg = d["agg"]
+            if series:
+                terms = ["{fn}" + by + sp + "({fn}_over_time(" + n + fltr + "[{win}s]))" for n in names]
+            else:
+                terms = [agg + "(" + n + fltr + ")" for n in names]
+            query = " or ".join(terms)
+            if len(terms) > 1:
+                query = "(" + query + ")"
+            if d.get("scale"):
+                query = str(d["scale"]) + " * " + query
+            info = {"query": query, "unit": unit}
+            if series:
+                info["aggregation"] = agg
+                info["gauge"] = True
+        else:  # counter
+            query = sumfn + sp + "(rate(" + names[0] + fltr + "[5m]))"
+            info = {"query": query, "unit": unit}
+            if series:
+                info["aggregation"] = "sum"
+        out[key] = info
+    return out
+
+
+SERVING_TELEMETRY_QUERIES = {e: _build_serving_queries(m, series=False) for e, m in SERVING_ENGINE_METRICS.items()}
+SERVING_SERIES_QUERIES = {e: _build_serving_queries(m, series=True) for e, m in SERVING_ENGINE_METRICS.items()}
+# Back-compat aliases: vLLM was the only engine before multi-engine support.
+VLLM_TELEMETRY_QUERIES = SERVING_TELEMETRY_QUERIES["vllm"]
 
 # ---------------------------------------------------------------------------
 # Persisted telemetry time series (see CLAUDE.md's Telemetry Time Series)
@@ -355,56 +415,7 @@ SERIES_QUERIES = {
     },
 }
 
-VLLM_SERIES_QUERIES = {
-    "time_to_first_token_seconds": {
-        "query": (
-            'sum by (pod) (rate(vllm:time_to_first_token_seconds_sum{namespace="{namespace}", pod=~"{pod_regex}"}[5m]))'
-            ' / sum by (pod) (rate(vllm:time_to_first_token_seconds_count{namespace="{namespace}", pod=~"{pod_regex}"}[5m]))'
-        ),
-        "unit": "seconds", "aggregation": "avg",
-    },
-    "inter_token_latency_seconds": {
-        "query": (
-            '(sum by (pod) (rate(vllm:inter_token_latency_seconds_sum{namespace="{namespace}", pod=~"{pod_regex}"}[5m]))'
-            ' / sum by (pod) (rate(vllm:inter_token_latency_seconds_count{namespace="{namespace}", pod=~"{pod_regex}"}[5m])))'
-            ' or (sum by (pod) (rate(vllm:time_per_output_token_seconds_sum{namespace="{namespace}", pod=~"{pod_regex}"}[5m]))'
-            ' / sum by (pod) (rate(vllm:time_per_output_token_seconds_count{namespace="{namespace}", pod=~"{pod_regex}"}[5m])))'
-        ),
-        "unit": "seconds", "aggregation": "avg",
-    },
-    "num_requests_running": {
-        "query": (
-            '{fn} by (pod) ({fn}_over_time(vllm:num_requests_running{namespace="{namespace}", '
-            'pod=~"{pod_regex}"}[{win}s]))'
-        ),
-        "unit": "requests", "aggregation": "sum", "gauge": True,
-    },
-    "num_requests_waiting": {
-        "query": (
-            '{fn} by (pod) ({fn}_over_time(vllm:num_requests_waiting{namespace="{namespace}", '
-            'pod=~"{pod_regex}"}[{win}s]))'
-        ),
-        "unit": "requests", "aggregation": "sum", "gauge": True,
-    },
-    "kv_cache_usage": {
-        "query": (
-            # Pre-rename fallback and 0-1 -> percent scaling: see VLLM_TELEMETRY_QUERIES.
-            '100 * ({fn} by (pod) ({fn}_over_time(vllm:kv_cache_usage_perc{namespace="{namespace}", '
-            'pod=~"{pod_regex}"}[{win}s]))'
-            ' or {fn} by (pod) ({fn}_over_time(vllm:gpu_cache_usage_perc{namespace="{namespace}", '
-            'pod=~"{pod_regex}"}[{win}s])))'
-        ),
-        "unit": "percent", "aggregation": "avg", "gauge": True,
-    },
-    "prompt_throughput": {
-        "query": 'sum by (pod) (rate(vllm:prompt_tokens_total{namespace="{namespace}", pod=~"{pod_regex}"}[5m]))',
-        "unit": "tokens_per_sec", "aggregation": "sum",
-    },
-    "generation_throughput": {
-        "query": 'sum by (pod) (rate(vllm:generation_tokens_total{namespace="{namespace}", pod=~"{pod_regex}"}[5m]))',
-        "unit": "tokens_per_sec", "aggregation": "sum",
-    },
-}
+VLLM_SERIES_QUERIES = SERVING_SERIES_QUERIES["vllm"]
 
 SERIES_SCHEMA_VERSION = 1
 SERIES_OBJECT_KIND = "AIBOMTelemetry"
@@ -911,7 +922,15 @@ def detect_vllm_from_command(command):
     return None if args is None else _parse_vllm_args(args)
 
 
-_VLLM_IMAGE_RE = re.compile(r"(?:^|/)vllm-openai$|(?:^|/)vllm/[^/]+$")
+# llm-d is a distributed-inference platform whose model-server pods run vLLM as
+# the actual engine, on vLLM's own :8000/metrics with vLLM's own `vllm:` metric
+# names -- so an llm-d pod is reported (and its telemetry collected) as vLLM.
+# Its images carry `llm-d` as a path segment (e.g. ghcr.io/llm-d/llm-d-cuda-dev)
+# and set `vllm serve` as the ENTRYPOINT, so this only matters for the args-only
+# case; a pod that spells out `vllm serve ...` in its command already matches
+# _vllm_server_args. A command-level trl/other invocation still wins over this,
+# since image matching is only the entrypoint fallback.
+_VLLM_IMAGE_RE = re.compile(r"(?:^|/)vllm-openai$|(?:^|/)vllm/[^/]+$|(?:^|/)llm-d[^/]*$")
 
 
 def _strip_tag_digest(ref):
@@ -937,6 +956,123 @@ def _detect_vllm_from_entrypoint_args(container):
     if args[:1] == ["serve"]:
         args = args[1:]
     return _parse_vllm_args(args) if args else None
+
+
+# ---------------------------------------------------------------------------
+# Other serving engines (TGI, SGLang, LMDeploy)
+#
+# Same shape as the vLLM detector: find the server invocation in the (possibly
+# shell-wrapped) command, parse the flags that map onto AIBOM fields, and emit
+# `serving_engine` + `model_name` (+ a few shared flags). The output keys match
+# vLLM's (model_name/dtype/quantization/tensor_parallel_size/...) so the model
+# and inference sections and experiment_intent inference pick them up unchanged.
+# Each flag map is intentionally small -- the model name is what matters most
+# (it drives model.name, quantization-from-name, and intent); engine-specific
+# tuning flags beyond the shared ones aren't exhaustively mapped.
+# ---------------------------------------------------------------------------
+
+def _parse_server_args(args, engine, arg_map, positional_model=False):
+    parsed, positional = _parse_flags(args, arg_map, "-")
+    result = {"serving_engine": engine, **parsed}
+    if positional_model and "model_name" not in result and positional and not _has_unexpanded_var(positional):
+        result["model_name"] = positional
+    if "quantization" not in result and "model_name" in result:
+        quant = detect_quantization_from_name(result["model_name"])
+        if quant:
+            result.update(quant)
+    return result
+
+
+# TGI: `text-generation-launcher --model-id <m> ...` (the official image's own
+# ENTRYPOINT, so KServe-style args-only specs are common -- handled below).
+_TGI_ARG_MAP = {
+    "--model-id": ("model_name", str),
+    "--quantize": ("quantization", str),
+    "--dtype": ("dtype", str),
+    "--num-shard": ("tensor_parallel_size", int),
+    "--max-total-tokens": ("max_model_len", int),
+}
+
+
+def _tgi_server_args(tokens):
+    for seg in _invocation_segments(tokens):
+        for i, tok in enumerate(seg):
+            if os.path.basename(tok) == "text-generation-launcher":
+                return seg[i + 1:]
+    return None
+
+
+def detect_tgi_from_command(command):
+    args = _tgi_server_args(command)
+    return None if args is None else _parse_server_args(args, "tgi", _TGI_ARG_MAP)
+
+
+# SGLang: `python -m sglang.launch_server --model-path <m> ...`.
+_SGLANG_ARG_MAP = {
+    "--model-path": ("model_name", str),
+    "--served-model-name": ("served_model_name", str),
+    "--dtype": ("dtype", str),
+    "--quantization": ("quantization", str),
+    "--tp-size": ("tensor_parallel_size", int),
+    "--tp": ("tensor_parallel_size", int),
+    "--dp-size": ("data_parallel_size", int),
+    "--dp": ("data_parallel_size", int),
+    "--context-length": ("max_model_len", int),
+}
+
+
+def _sglang_server_args(tokens):
+    for seg in _invocation_segments(tokens):
+        for i, tok in enumerate(seg):
+            if i > 0 and seg[i - 1] == "-m" and (tok == "sglang.launch_server" or tok.startswith("sglang.launch_server")):
+                return seg[i + 1:]
+    return None
+
+
+def detect_sglang_from_command(command):
+    args = _sglang_server_args(command)
+    return None if args is None else _parse_server_args(args, "sglang", _SGLANG_ARG_MAP)
+
+
+# LMDeploy: `lmdeploy serve api_server <model> ...` (model is positional).
+_LMDEPLOY_ARG_MAP = {
+    "--model-name": ("served_model_name", str),
+    "--dtype": ("dtype", str),
+    "--tp": ("tensor_parallel_size", int),
+    "--session-len": ("max_model_len", int),
+}
+
+
+def _lmdeploy_server_args(tokens):
+    for seg in _invocation_segments(tokens):
+        for i, tok in enumerate(seg):
+            is_bin = os.path.basename(tok) == "lmdeploy"
+            is_mod = i > 0 and seg[i - 1] == "-m" and tok == "lmdeploy"
+            if (is_bin or is_mod) and seg[i + 1:i + 3] == ["serve", "api_server"]:
+                return seg[i + 3:]
+    return None
+
+
+def detect_lmdeploy_from_command(command):
+    args = _lmdeploy_server_args(command)
+    return None if args is None else _parse_server_args(args, "lmdeploy", _LMDEPLOY_ARG_MAP, positional_model=True)
+
+
+# TGI's image sets text-generation-launcher as ENTRYPOINT, so a KServe-style
+# predictor often sets only `args`, with no launcher token to match on -- same
+# args-only case _detect_vllm_from_entrypoint_args handles for vLLM. (SGLang and
+# LMDeploy images expect an explicit command, so they have no entrypoint-only
+# fallback.)
+_TGI_IMAGE_RE = re.compile(r"(?:^|/)text-generation-inference$|(?:^|/)tgi$")
+
+
+def _detect_tgi_from_entrypoint_args(container):
+    if container.get("command") or not container.get("image"):
+        return None
+    if not _TGI_IMAGE_RE.search(_strip_tag_digest(container["image"])):
+        return None
+    args = list(container.get("args") or [])
+    return _parse_server_args(args, "tgi", _TGI_ARG_MAP) if args else None
 
 
 # ---------------------------------------------------------------------------
@@ -1241,8 +1377,12 @@ def detect_model_from_containers(containers):
         if model_result is None:
             model_result = (
                 detect_vllm_from_command(tokens)
+                or detect_tgi_from_command(tokens)
+                or detect_sglang_from_command(tokens)
+                or detect_lmdeploy_from_command(tokens)
                 or detect_trl_from_command(tokens)
                 or _detect_vllm_from_entrypoint_args(container)
+                or _detect_tgi_from_entrypoint_args(container)
             )
         if parallel_result is None:
             parallel_result = detect_parallelization_from_command(tokens)
@@ -2150,15 +2290,17 @@ def collect_telemetry(discoveries, containers=None):
     return telemetry_summary
 
 
-def collect_vllm_telemetry(discoveries, containers=None):
-    """Collects vLLM's own serving-level metrics (see VLLM_TELEMETRY_QUERIES)
-    for each pod, mirroring collect_telemetry's per-pod loop and retry logic
-    but querying a disjoint set of series. Callers should only invoke this
-    when detected_model.serving_engine == "vllm" -- there's no cheap way to
-    tell from discovery.json alone whether a given pod is actually running
-    vLLM, and querying vllm: metrics for a pod that isn't just costs a few
-    empty Prometheus queries, so the guard belongs at the caller (main()),
-    not here."""
+def collect_vllm_telemetry(discoveries, containers=None, engine="vllm"):
+    """Collects a serving engine's own serving-level metrics (see
+    SERVING_TELEMETRY_QUERIES) for each pod, mirroring collect_telemetry's
+    per-pod loop and retry logic but querying a disjoint set of series.
+    `engine` selects the per-engine query set. Callers should only invoke this
+    when detected_model.serving_engine is one we have queries for -- there's no
+    cheap way to tell from discovery.json alone whether a given pod is actually
+    running that engine, and querying its metrics for a pod that isn't just
+    costs a few empty Prometheus queries, so the guard belongs at the caller
+    (main()), not here."""
+    queries = SERVING_TELEMETRY_QUERIES[engine]
     print(f"  Processing {len(discoveries)} pod(s)")
 
     telemetry_summary = {
@@ -2187,7 +2329,7 @@ def collect_vllm_telemetry(discoveries, containers=None):
 
         metrics = {
             name: _substitute_pod_query(info["query"], pod_name)
-            for name, info in VLLM_TELEMETRY_QUERIES.items()
+            for name, info in queries.items()
         }
 
         pod_telemetry = {
@@ -2200,7 +2342,7 @@ def collect_vllm_telemetry(discoveries, containers=None):
         }
 
         pod_telemetry["metrics"] = _collect_metrics_with_retry(
-            VLLM_TELEMETRY_QUERIES, metrics, stats_start_ms, end_ms
+            queries, metrics, stats_start_ms, end_ms
         )
 
         telemetry_summary["pods"].append(pod_telemetry)
@@ -2404,7 +2546,7 @@ def _fit_series_doc(doc, max_bytes):
     return encoded
 
 
-def collect_telemetry_series(telemetry, vllm_telemetry):
+def collect_telemetry_series(telemetry, vllm_telemetry, engine="vllm"):
     """Builds the downsampled time-series document persisted alongside the
     AIBOM (see CLAUDE.md's Telemetry Time Series). Returns the encoded JSON
     string, or None if nothing came back. Never raises for missing data --
@@ -2435,9 +2577,10 @@ def collect_telemetry_series(telemetry, vllm_telemetry):
     metrics.update(_collect_series_metrics(
         SERIES_QUERIES, JOB_NAMESPACE, [p.get("pod_name") for p in resource_pods], start_ms, end_ms, step
     ))
-    metrics.update(_collect_series_metrics(
-        VLLM_SERIES_QUERIES, JOB_NAMESPACE, [p.get("pod_name") for p in vllm_pods], start_ms, end_ms, step
-    ))
+    if vllm_pods and engine in SERVING_SERIES_QUERIES:
+        metrics.update(_collect_series_metrics(
+            SERVING_SERIES_QUERIES[engine], JOB_NAMESPACE, [p.get("pod_name") for p in vllm_pods], start_ms, end_ms, step
+        ))
     if not metrics:
         return None
 
@@ -2990,13 +3133,15 @@ def compile_aibom(
             **{k: dm.get(k) for k in _VLLM_EXTRA_KEYS},
         }
 
-        # vLLM serving-level SLOs (TTFT, ITL, queue depth, KV-cache usage,
+        # Serving-level SLOs (TTFT, ITL, queue depth, KV-cache usage,
         # throughput) -- a distinct top-level section from
         # resource_utilization since these describe the application's own
         # behavior, not the hardware underneath it (see CLAUDE.md's
-        # Inference Performance Telemetry section). Only populated for vLLM
-        # today (the only serving engine VLLM_TELEMETRY_QUERIES covers, and
-        # the only one detect_model_from_containers recognizes at all).
+        # Inference Performance Telemetry section). Populated for any engine in
+        # SERVING_TELEMETRY_QUERIES (vLLM/llm-d, SGLang, LMDeploy, TGI); the
+        # units below are the same canonical set across engines, so a metric a
+        # given engine doesn't export is simply absent from the pod telemetry
+        # and skipped here (e.g. TGI has no TTFT/KV-cache/prompt-throughput).
         if vllm_telemetry and vllm_telemetry.get("pods"):
             vllm_unit_map = {
                 "time_to_first_token_seconds": (None, "seconds"),
@@ -3328,24 +3473,25 @@ def main():
     telemetry = None
     vllm_telemetry = None
     series_encoded = None
+    serving_engine = (detected_model or {}).get("serving_engine")
     if PROMETHEUS_URL:
         print("--- Phase 1: Telemetry Collection ---")
         try:
             telemetry = collect_telemetry(discoveries, containers)
         except Exception as e:
             print(f"WARNING: Telemetry collection failed: {e}", file=sys.stderr)
-        if (detected_model or {}).get("serving_engine") == "vllm":
-            print("--- Phase 1b: vLLM Telemetry Collection ---")
+        if serving_engine in SERVING_TELEMETRY_QUERIES:
+            print(f"--- Phase 1b: {serving_engine} Telemetry Collection ---")
             try:
-                vllm_telemetry = collect_vllm_telemetry(discoveries, containers)
+                vllm_telemetry = collect_vllm_telemetry(discoveries, containers, serving_engine)
             except Exception as e:
-                print(f"WARNING: vLLM telemetry collection failed: {e}", file=sys.stderr)
+                print(f"WARNING: {serving_engine} telemetry collection failed: {e}", file=sys.stderr)
         # Runs after the stats collection above (and its retries), so the
         # backend has had the longest chance to ingest the run's final scrapes.
         if telemetry or vllm_telemetry:
             print("--- Phase 1c: Telemetry Time Series ---")
             try:
-                series_encoded = collect_telemetry_series(telemetry, vllm_telemetry)
+                series_encoded = collect_telemetry_series(telemetry, vllm_telemetry, serving_engine or "vllm")
             except Exception as e:
                 print(f"WARNING: telemetry series collection failed: {e}", file=sys.stderr)
         print()
