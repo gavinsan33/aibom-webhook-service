@@ -232,6 +232,15 @@ def test_serving_query_sets_consistent_across_engines():
         assert set(pp.SERVING_TELEMETRY_QUERIES[engine]) <= set(pp.SERVING_TELEMETRY_QUERIES["vllm"])
     assert pp.SERVING_TELEMETRY_QUERIES["lmdeploy"]["kv_cache_usage"]["query"].startswith("100 * ")
     assert "tgi_request_mean_time_per_token_duration_sum" in pp.SERVING_TELEMETRY_QUERIES["tgi"]["inter_token_latency_seconds"]["query"]
+    # TGI's prompt tokens come from the input-length histogram's _sum, and it
+    # has no TTFT or KV-cache metric to query.
+    assert pp.SERVING_TELEMETRY_QUERIES["tgi"]["prompt_throughput"]["query"] == (
+        'sum(rate(tgi_request_input_length_sum{namespace="{namespace}", pod="{pod_name}"}[5m]))'
+    )
+    assert set(pp.SERVING_TELEMETRY_QUERIES["vllm"]) - set(pp.SERVING_TELEMETRY_QUERIES["tgi"]) == {
+        "time_to_first_token_seconds",
+        "kv_cache_usage",
+    }
 
 
 def test_collect_vllm_telemetry_uses_selected_engine(monkeypatch):
