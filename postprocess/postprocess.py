@@ -210,7 +210,7 @@ TELEMETRY_QUERIES = {
 # hand-written four times. Names confirmed against each engine's own docs
 # (vLLM 0.17 live server; HF TGI metrics reference; SGLang production_metrics;
 # LMDeploy metrics source), not guessed. TGI is the odd one: different names and
-# no TTFT/KV-cache/prompt-throughput metric at all, so it reports a subset.
+# no TTFT or KV-cache metric at all, so it reports a subset.
 #
 # TTFT/ITL are histograms; sum-rate-over-count-rate gives the average latency
 # per time window, reduced by compute_metric_stats' min/max/avg/p95/segments
@@ -260,13 +260,19 @@ SERVING_ENGINE_METRICS = {
         "prompt_throughput": {"kind": "counter", "names": ["sglang:prompt_tokens_total"], "unit": "tokens_per_sec"},
         "generation_throughput": {"kind": "counter", "names": ["sglang:generation_tokens_total"], "unit": "tokens_per_sec"},
     },
-    # TGI exposes no TTFT, KV-cache, or prompt-throughput metric; it reports only
-    # what it has. Its names don't share vLLM's shape (no colon prefix, different
-    # suffixes), which is exactly why the table carries names per engine.
+    # TGI exposes no TTFT or KV-cache metric; it reports only what it has. It
+    # times queueing and prefill separately (tgi_request_queue_duration per
+    # request, tgi_batch_forward_duration per batch), but their sum isn't a
+    # per-request TTFT, so none is synthesized. Its token counts are histograms
+    # of tokens per request, so the _sum series is the cumulative token count
+    # that vLLM's _total counters are. Names don't share vLLM's shape (no colon
+    # prefix, different suffixes), which is exactly why the table carries names
+    # per engine.
     "tgi": {
         "inter_token_latency_seconds": {"kind": "hist", "names": ["tgi_request_mean_time_per_token_duration"], "unit": "seconds"},
         "num_requests_running": {"kind": "gauge", "names": ["tgi_batch_current_size"], "agg": "sum", "unit": "requests"},
         "num_requests_waiting": {"kind": "gauge", "names": ["tgi_queue_size"], "agg": "sum", "unit": "requests"},
+        "prompt_throughput": {"kind": "counter", "names": ["tgi_request_input_length_sum"], "unit": "tokens_per_sec"},
         "generation_throughput": {"kind": "counter", "names": ["tgi_request_generated_tokens_sum"], "unit": "tokens_per_sec"},
     },
 }
@@ -3141,7 +3147,7 @@ def compile_aibom(
         # SERVING_TELEMETRY_QUERIES (vLLM/llm-d, SGLang, LMDeploy, TGI); the
         # units below are the same canonical set across engines, so a metric a
         # given engine doesn't export is simply absent from the pod telemetry
-        # and skipped here (e.g. TGI has no TTFT/KV-cache/prompt-throughput).
+        # and skipped here (e.g. TGI has no TTFT or KV-cache metric).
         if vllm_telemetry and vllm_telemetry.get("pods"):
             vllm_unit_map = {
                 "time_to_first_token_seconds": (None, "seconds"),
