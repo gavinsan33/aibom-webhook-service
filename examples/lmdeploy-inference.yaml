@@ -1,0 +1,172 @@
+# LMDeploy serving example.
+# Mirrors vllm-inference.yaml: a server + a guidellm OpenAI-http client that
+# drives traffic and then deletes the server Job so postprocessing fires.
+# Differences from the vLLM example: the server image/command and the port
+# (LMDeploy's own default is 23333). The model is positional after
+# `serve api_server`. --enable-metrics is required for LMDeploy to expose its
+# lmdeploy: Prometheus metrics on /metrics, which the aibom-serving-metrics
+# PodMonitor scrapes.
+#
+# Adjust image tag / model for your cluster as needed.
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: aibom-lmdeploy-benchmark
+  namespace: project-gavin-test
+spec:
+  replicatedJobs:
+    - name: server
+      replicas: 1
+      template:
+        metadata:
+          annotations:
+            aibom.io/experiment-intent: inference
+            aibom.io/experiment-name: lmdeploy-benchmark
+        spec:
+          parallelism: 1
+          completions: 1
+          backoffLimit: 0
+          activeDeadlineSeconds: 900
+          template:
+            spec:
+              restartPolicy: Never
+              tolerations:
+                - operator: Exists
+              containers:
+                - name: server
+                  image: openmmlab/lmdeploy:latest
+                  command:
+                    - lmdeploy
+                    - serve
+                    - api_server
+                    - Qwen/Qwen2.5-0.5B-Instruct
+                    - --server-port=23333
+                    - --enable-metrics
+                  env:
+                    - name: HOME
+                      value: /tmp
+                    - name: HF_TOKEN
+                      valueFrom:
+                        secretKeyRef:
+                          name: hf-token-secret
+                          key: HF_TOKEN
+                          optional: true
+                  ports:
+                    - containerPort: 23333
+                      name: http
+                  readinessProbe:
+                    httpGet:
+                      path: /health
+                      port: 23333
+                    initialDelaySeconds: 30
+                    periodSeconds: 10
+                  resources:
+                    requests:
+                      nvidia.com/gpu: "1"
+                    limits:
+                      nvidia.com/gpu: "1"
+
+    - name: client
+      replicas: 1
+      template:
+        spec:
+          parallelism: 1
+          completions: 1
+          backoffLimit: 0
+          activeDeadlineSeconds: 900
+          template:
+            spec:
+              restartPolicy: Never
+              serviceAccountName: aibom-lmdeploy-benchmark-client
+              tolerations:
+                - operator: Exists
+              initContainers:
+                - name: benchmark
+                  image: ghcr.io/vllm-project/guidellm@sha256:e3ad2371bfa8e42f2c3d1251b62d0d9c9706c27ae2143c8c048eb5fc6aebb558
+                  imagePullPolicy: Always
+                  command:
+                    - guidellm
+                    - run
+                    - --backend=kind=openai_http,target=http://aibom-lmdeploy-benchmark-server-0-0.aibom-lmdeploy-benchmark.project-gavin-test.svc.cluster.local:23333
+                    - --data=kind=synthetic_text,prompt_tokens=256,output_tokens=128
+                    - --profile=kind=sweep
+                    - --constraint=kind=max_duration,seconds=30
+                    - --output=kind=json
+                  env:
+                    - name: HOME
+                      value: /tmp
+              containers:
+                - name: delete-server-job
+                  image: docker.io/curlimages/curl:8.11.0
+                  command:
+                    - sh
+                    - -c
+                    - |
+                      TOKEN=/var/run/secrets/kubernetes.io/serviceaccount/token
+                      CACERT=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+                      NS=project-gavin-test
+                      curl -sf -X DELETE --cacert "$CACERT" \
+                        -H "Authorization: Bearer $(cat $TOKEN)" \
+                        "https://kubernetes.default.svc/apis/batch/v1/namespaces/$NS/jobs/aibom-lmdeploy-benchmark-server-0?propagationPolicy=Background"
+                      curl -sf -X DELETE --cacert "$CACERT" \
+                        -H "Authorization: Bearer $(cat $TOKEN)" \
+                        "https://kubernetes.default.svc/apis/rbac.authorization.k8s.io/v1/namespaces/$NS/rolebindings/aibom-lmdeploy-benchmark-client"
+                      curl -sf -X DELETE --cacert "$CACERT" \
+                        -H "Authorization: Bearer $(cat $TOKEN)" \
+                        "https://kubernetes.default.svc/apis/rbac.authorization.k8s.io/v1/namespaces/$NS/roles/aibom-lmdeploy-benchmark-client"
+                      curl -sf -X DELETE --cacert "$CACERT" \
+                        -H "Authorization: Bearer $(cat $TOKEN)" \
+                        "https://kubernetes.default.svc/api/v1/namespaces/$NS/serviceaccounts/aibom-lmdeploy-benchmark-client"
+                  resources:
+                    requests:
+                      cpu: "100m"
+                      memory: "128Mi"
+                    limits:
+                      cpu: "200m"
+                      memory: "256Mi"
+      dependsOn:
+        - name: server
+          status: Ready
+  successPolicy:
+    operator: All
+    targetReplicatedJobs:
+      - client
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aibom-lmdeploy-benchmark-client
+  namespace: project-gavin-test
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: aibom-lmdeploy-benchmark-client
+  namespace: project-gavin-test
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    resourceNames: ["aibom-lmdeploy-benchmark-server-0"]
+    verbs: ["delete"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    resourceNames: ["aibom-lmdeploy-benchmark-client"]
+    verbs: ["delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    resourceNames: ["aibom-lmdeploy-benchmark-client"]
+    verbs: ["delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: aibom-lmdeploy-benchmark-client
+  namespace: project-gavin-test
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: aibom-lmdeploy-benchmark-client
+subjects:
+  - kind: ServiceAccount
+    name: aibom-lmdeploy-benchmark-client
+    namespace: project-gavin-test
