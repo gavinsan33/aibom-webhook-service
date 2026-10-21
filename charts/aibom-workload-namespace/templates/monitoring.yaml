@@ -22,7 +22,10 @@
 # not just a convention here. A pod that isn't that engine simply doesn't listen
 # on the port (the scrape fails, harmless), and even if something unrelated does,
 # postprocess.py's prefixed metric names (vllm:/sglang:/lmdeploy:/tgi_) match
-# nothing else. A workload that overrides a port isn't scraped; there's no
+# nothing else. TGI also gets 8080: its default 80 can't be bound under
+# OpenShift's restricted SCC (random non-root UID, no NET_BIND_SERVICE), so on
+# OpenShift it runs on 8080 the way KServe's TGI runtime does. A workload that
+# overrides a port to anything else isn't scraped; there's no
 # per-workload override yet (see #86). TGI/SGLang need their metrics flag
 # (--enable-metrics / TGI exposes them by default) for anything to be there.
 apiVersion: monitoring.coreos.com/v1
@@ -39,6 +42,9 @@ spec:
       path: /metrics
       interval: 30s
     - targetPort: 80     # TGI
+      path: /metrics
+      interval: 30s
+    - targetPort: 8080   # TGI under a restricted SCC (can't bind 80)
       path: /metrics
       interval: 30s
     - targetPort: 30000  # SGLang
