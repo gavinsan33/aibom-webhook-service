@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -2254,5 +2255,101 @@ func TestOnJobEvent_IgnoresPostprocessLabelOutsideOwnNamespace(t *testing.T) {
 	}
 	if got.Annotations[AnnotationAIBOMCollected] != "" {
 		t.Error("spoofing job must not be collected")
+	}
+}
+
+// A same-named rerun that starts while the previous run is still being
+// postprocessed writes into the same data ConfigMap with the same workload
+// identity. The previous run's collection must leave both for the rerun;
+// deleting them lost the rerun's discovery data (no GPU, so no telemetry).
+func TestCollectAIBOM_LeavesDataForSameNamedRerun(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	ppJob, ppPod, inputs := newAIBOMPostprocessFixtures("train-job", "test-ns")
+	ppJob.Annotations = map[string]string{AnnotationPostprocessTriggerKind: "Job", AnnotationPostprocessTriggerUID: "first-run"}
+	rerun := completedJob("train-job", "test-ns")
+	rerun.Status.Conditions = nil
+	rerun.UID = "second-run"
+	workloadCM := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: aibomdata.ConfigMapName("train-job"), Namespace: "test-ns"}}
+	identityName := aibomdata.WorkloadIdentityName("train-job")
+	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: identityName, Namespace: "test-ns"}}
+	client := fake.NewSimpleClientset(ns, ppJob, ppPod, inputs, rerun, workloadCM, sa)
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "aibom-postprocess:latest"})
+	startWatcher(t, w)
+
+	w.collectAIBOM(context.TODO(), ppJob)
+
+	if _, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), workloadCM.Name, metav1.GetOptions{}); err != nil {
+		t.Errorf("the rerun's data configmap should be left in place, got err=%v", err)
+	}
+	if _, err := client.CoreV1().ServiceAccounts("test-ns").Get(context.TODO(), identityName, metav1.GetOptions{}); err != nil {
+		t.Errorf("the rerun's workload identity should be left in place, got err=%v", err)
+	}
+	// The postprocess Job's own leftovers are still cleaned up.
+	if _, err := client.BatchV1().Jobs("aibom-system").Get(context.TODO(), ppJob.Name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("expected postprocess job to be deleted after collection, got err=%v", err)
+	}
+}
+
+// The usual case: the Job that was postprocessed is still there (finished,
+// not deleted), so it isn't a rerun and cleanup goes ahead.
+func TestCollectAIBOM_CleansUpWhenTriggerUnchanged(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	ppJob, ppPod, inputs := newAIBOMPostprocessFixtures("train-job", "test-ns")
+	ppJob.Annotations = map[string]string{AnnotationPostprocessTriggerKind: "Job", AnnotationPostprocessTriggerUID: "first-run"}
+	original := completedJob("train-job", "test-ns")
+	original.UID = "first-run"
+	workloadCM := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: aibomdata.ConfigMapName("train-job"), Namespace: "test-ns"}}
+	client := fake.NewSimpleClientset(ns, ppJob, ppPod, inputs, original, workloadCM)
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "aibom-postprocess:latest"})
+	startWatcher(t, w)
+
+	w.collectAIBOM(context.TODO(), ppJob)
+
+	if _, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), workloadCM.Name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("workload data configmap should be deleted after collection, got err=%v", err)
+	}
+}
+
+// A rerun that finishes while the previous run's postprocess Job is still
+// running must wait rather than reuse that Job's name: before, the create hit
+// AlreadyExists, was treated as success, and the rerun got no AIBOM -- after
+// first overwriting the running Job's inputs ConfigMap.
+func TestCreatePostprocessJob_WaitsForEarlierRunsPostprocessJob(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	job := completedJob("train-job", "test-ns")
+	job.UID = "second-run"
+	job.Finalizers = []string{finalizerName}
+	pod := instrumentedPod("train-job", "test-ns")
+	running, _, runningInputs := newAIBOMPostprocessFixtures("train-job", "test-ns")
+	running.Status.Conditions = nil
+	running.Annotations = map[string]string{AnnotationPostprocessTriggerKind: "Job", AnnotationPostprocessTriggerUID: "first-run"}
+	runningInputs.Data = map[string]string{"annotations.json": "first run"}
+	client := fake.NewSimpleClientset(ns, job, pod, running, runningInputs)
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "aibom-postprocess:latest"})
+
+	if err := w.createPostprocessJob(context.TODO(), job); !errors.Is(err, errPostprocessBusy) {
+		t.Fatalf("createPostprocessJob err = %v, want errPostprocessBusy", err)
+	}
+	cm, err := client.CoreV1().ConfigMaps("aibom-system").Get(context.TODO(), runningInputs.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get inputs configmap: %v", err)
+	}
+	if cm.Data["annotations.json"] != "first run" {
+		t.Error("the running postprocess job's inputs configmap was overwritten")
+	}
+
+	// Through onJobEvent: the finalizer stays (so the next resync retries) and
+	// the wait isn't counted against maxPostprocessRetries.
+	startWatcher(t, w)
+	w.onJobEvent(job)
+	got, err := client.BatchV1().Jobs("test-ns").Get(context.TODO(), "train-job", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if !hasFinalizer(got) {
+		t.Error("finalizer should be kept while waiting for the earlier postprocess job")
+	}
+	if n := postprocessRetryCount(got.Annotations); n != 0 {
+		t.Errorf("waiting should not count as a retry, got %d", n)
 	}
 }

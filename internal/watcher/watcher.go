@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	stderrors "errors"
 	"fmt"
 	"log"
 	"math"
@@ -87,6 +88,23 @@ const (
 	// controller removes it, along with the data ConfigMap it owns (#112).
 	failedPostprocessTTLSeconds = int32(24 * 60 * 60)
 )
+
+// AnnotationPostprocessTriggerKind/UID record, on a postprocess Job, which
+// object it was made for (Job or Pod, and its UID). Names repeat across runs
+// -- the data ConfigMap, workload identity and postprocess Job are all named
+// after the workload -- so the UID is what tells one run from a same-named
+// rerun (see existingPostprocessJob, triggerReplaced).
+const (
+	AnnotationPostprocessTriggerKind = "aibom.io/postprocess-trigger-kind"
+	AnnotationPostprocessTriggerUID  = "aibom.io/postprocess-trigger-uid"
+)
+
+// errPostprocessBusy means a postprocess Job for an earlier run of the same
+// workload name is still running. Postprocess Job names are derived from the
+// workload name, so the new run has to wait for it to be collected; callers
+// retry on the next resync without counting it against maxPostprocessRetries,
+// since the earlier Job's telemetry retries alone can outlast that budget.
+var errPostprocessBusy = stderrors.New("postprocess job for an earlier run of this workload is still running")
 
 // Config bundles the watcher's postprocess-related settings — grouped into a struct
 // rather than same-typed positional arguments in New(), which would otherwise be
@@ -278,6 +296,10 @@ func (w *Watcher) onJobEvent(obj interface{}) {
 	}
 
 	if err := w.createPostprocessJob(context.TODO(), job); err != nil {
+		if stderrors.Is(err, errPostprocessBusy) {
+			log.Printf("waiting to postprocess %s/%s: %v", job.Namespace, job.Name, err)
+			return
+		}
 		log.Printf("failed to create postprocess job for %s/%s: %v", job.Namespace, job.Name, err)
 		retries := postprocessRetryCount(job.Annotations) + 1
 		if retries >= maxPostprocessRetries {
@@ -373,6 +395,10 @@ func (w *Watcher) onPodEvent(obj interface{}) {
 	}
 
 	if err := w.createPostprocessJobForPod(context.TODO(), pod); err != nil {
+		if stderrors.Is(err, errPostprocessBusy) {
+			log.Printf("waiting to postprocess pod %s/%s: %v", pod.Namespace, pod.Name, err)
+			return
+		}
 		log.Printf("failed to create postprocess job for pod %s/%s: %v", pod.Namespace, pod.Name, err)
 		retries := postprocessRetryCount(pod.Annotations) + 1
 		if retries >= maxPostprocessRetries {
@@ -1040,7 +1066,7 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 // data gathered from the given pods. It does not patch AnnotationPostprocess back onto
 // the trigger resource — callers must do that themselves, since the trigger's kind
 // (Job vs Pod) determines which client to patch with.
-func (w *Watcher) createPostprocessJobCore(ctx context.Context, namespace, triggerName string, pods []corev1.Pod, annotations map[string]string, jobResults map[string]string) (string, error) {
+func (w *Watcher) createPostprocessJobCore(ctx context.Context, namespace, triggerName, triggerKind string, triggerUID types.UID, pods []corev1.Pod, annotations map[string]string, jobResults map[string]string) (string, error) {
 	postprocessName := aibomdata.PostprocessJobName(namespace, triggerName)
 	// configMapName is the workload's own data ConfigMap, in its namespace,
 	// that its pods wrote into. inputsName is the merged copy the postprocess
@@ -1048,7 +1074,16 @@ func (w *Watcher) createPostprocessJobCore(ctx context.Context, namespace, trigg
 	configMapName := aibomdata.ConfigMapName(triggerName)
 	inputsName := aibomdata.PostprocessInputsConfigMapName(postprocessName)
 
-	w.removeStaleFailedPostprocessJob(ctx, namespace, triggerName, postprocessName, inputsName)
+	// Checked before the inputs are built: writing them would overwrite the
+	// inputs ConfigMap a running postprocess Job for an earlier run mounts.
+	otherRun, sameRun := w.existingPostprocessJob(ctx, namespace, triggerName, triggerUID, postprocessName, inputsName)
+	if otherRun {
+		return "", errPostprocessBusy
+	}
+	if sameRun {
+		// A repeat event for a run that's already being postprocessed.
+		return postprocessName, nil
+	}
 
 	discoveries, datasets, containersJSON, storageJSON := w.buildPostprocessInputs(ctx, namespace, configMapName, pods, jobResults)
 
@@ -1075,6 +1110,10 @@ func (w *Watcher) createPostprocessJobCore(ctx context.Context, namespace, trigg
 			Labels: map[string]string{
 				LabelPostprocessFor:       triggerName,
 				LabelPostprocessNamespace: namespace,
+			},
+			Annotations: map[string]string{
+				AnnotationPostprocessTriggerKind: triggerKind,
+				AnnotationPostprocessTriggerUID:  string(triggerUID),
 			},
 		},
 		Spec: batchv1.JobSpec{
@@ -1215,34 +1254,45 @@ func (w *Watcher) ownDataConfigMap(ctx context.Context, owner *batchv1.Job, conf
 	}
 }
 
-// removeStaleFailedPostprocessJob deletes a failed postprocess Job that
-// collectAIBOM kept for inspection, along with its data ConfigMap, when the
-// same workload name is postprocessed again. Without it the new Job's create
-// would hit AlreadyExists and be silently skipped, so a rerun inside the
-// retention window would never get an AIBOM. Only a Job that finished Failed
-// is touched; one still running is left alone.
-func (w *Watcher) removeStaleFailedPostprocessJob(ctx context.Context, namespace, triggerName, postprocessName, inputsName string) {
+// existingPostprocessJob looks for a postprocess Job already holding this
+// workload's postprocess Job name. A failed one that collectAIBOM kept for
+// inspection is deleted, along with its inputs ConfigMap, so the new Job's
+// create doesn't hit AlreadyExists and get skipped (a rerun inside the
+// retention window would otherwise never get an AIBOM). Otherwise it reports
+// whether the existing Job belongs to another run (otherRun: a different
+// trigger UID) or to this one (sameRun: a repeat event). A Job with no
+// trigger UID predates the annotation and is taken to be this run's, which is
+// how it was treated before. A list error is logged and reported as neither.
+func (w *Watcher) existingPostprocessJob(ctx context.Context, namespace, triggerName string, triggerUID types.UID, postprocessName, inputsName string) (otherRun, sameRun bool) {
 	existing, err := w.clientset.BatchV1().Jobs(w.namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: fmt.Sprintf("%s=%s,%s=%s", LabelPostprocessFor, triggerName, LabelPostprocessNamespace, namespace),
 	})
 	if err != nil {
-		log.Printf("warning: could not check for a stale postprocess job for %s/%s: %v", namespace, triggerName, err)
-		return
+		log.Printf("warning: could not check for an existing postprocess job for %s/%s: %v", namespace, triggerName, err)
+		return false, false
 	}
 	for i := range existing.Items {
 		old := &existing.Items[i]
-		if old.Name != postprocessName || jobResult(old) != string(batchv1.JobFailed) {
+		if old.Name != postprocessName {
 			continue
 		}
-		log.Printf("removing failed postprocess job %s/%s left from an earlier run before recreating it", w.namespace, old.Name)
-		background := metav1.DeletePropagationBackground
-		if err := w.clientset.BatchV1().Jobs(w.namespace).Delete(ctx, old.Name, metav1.DeleteOptions{PropagationPolicy: &background}); err != nil && !errors.IsNotFound(err) {
-			log.Printf("warning: could not delete stale postprocess job %s/%s: %v", w.namespace, old.Name, err)
+		if jobResult(old) == string(batchv1.JobFailed) {
+			log.Printf("removing failed postprocess job %s/%s left from an earlier run before recreating it", w.namespace, old.Name)
+			background := metav1.DeletePropagationBackground
+			if err := w.clientset.BatchV1().Jobs(w.namespace).Delete(ctx, old.Name, metav1.DeleteOptions{PropagationPolicy: &background}); err != nil && !errors.IsNotFound(err) {
+				log.Printf("warning: could not delete stale postprocess job %s/%s: %v", w.namespace, old.Name, err)
+			}
+			if err := w.clientset.CoreV1().ConfigMaps(w.namespace).Delete(ctx, inputsName, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+				log.Printf("warning: could not delete stale postprocess inputs configmap %s/%s: %v", w.namespace, inputsName, err)
+			}
+			continue
 		}
-		if err := w.clientset.CoreV1().ConfigMaps(w.namespace).Delete(ctx, inputsName, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
-			log.Printf("warning: could not delete stale postprocess inputs configmap %s/%s: %v", w.namespace, inputsName, err)
+		if uid := old.Annotations[AnnotationPostprocessTriggerUID]; uid != "" && uid != string(triggerUID) {
+			return true, false
 		}
+		return false, true
 	}
+	return false, false
 }
 
 func (w *Watcher) createPostprocessJob(ctx context.Context, job *batchv1.Job) error {
@@ -1293,7 +1343,7 @@ func (w *Watcher) createPostprocessJob(ctx context.Context, job *batchv1.Job) er
 		}
 	}
 
-	postprocessName, err := w.createPostprocessJobCore(ctx, job.Namespace, job.Name, pods, annotations, jobResults)
+	postprocessName, err := w.createPostprocessJobCore(ctx, job.Namespace, job.Name, "Job", job.UID, pods, annotations, jobResults)
 	if err != nil {
 		return err
 	}
@@ -1314,7 +1364,7 @@ func (w *Watcher) createPostprocessJob(ctx context.Context, job *batchv1.Job) er
 func (w *Watcher) createPostprocessJobForPod(ctx context.Context, pod *corev1.Pod) error {
 	annotations := collectAIBOMAnnotations(pod.Annotations)
 
-	postprocessName, err := w.createPostprocessJobCore(ctx, pod.Namespace, pod.Name, []corev1.Pod{*pod}, annotations, nil)
+	postprocessName, err := w.createPostprocessJobCore(ctx, pod.Namespace, pod.Name, "Pod", pod.UID, []corev1.Pod{*pod}, annotations, nil)
 	if err != nil {
 		return err
 	}
@@ -1357,9 +1407,17 @@ func (w *Watcher) collectAIBOM(ctx context.Context, job *batchv1.Job) {
 	}
 
 	// The workload's own data ConfigMap has been merged into the inputs
-	// ConfigMap by now, so it's done either way.
-	w.deleteWorkloadDataConfigMap(ctx, workloadNamespace, originalJobName)
-	w.deleteWorkloadIdentity(ctx, workloadNamespace, originalJobName)
+	// ConfigMap by now, so it's done either way -- unless a same-named rerun
+	// has started since. Both are named after the workload, so the rerun's
+	// pods are already writing into that ConfigMap with that identity, and
+	// deleting them would lose its discovery data and break its dataset
+	// sidecar. Its own collection cleans them up instead.
+	if w.triggerReplaced(job, workloadNamespace, originalJobName) {
+		log.Printf("a newer %s/%s exists; leaving its data configmap and workload identity for its own postprocess", workloadNamespace, originalJobName)
+	} else {
+		w.deleteWorkloadDataConfigMap(ctx, workloadNamespace, originalJobName)
+		w.deleteWorkloadIdentity(ctx, workloadNamespace, originalJobName)
+	}
 
 	// A failed postprocess Job is the only record of why no AIBOM was made: its
 	// pod logs and its inputs ConfigMap are what you'd inspect or retry from, so
@@ -1380,6 +1438,34 @@ func (w *Watcher) collectAIBOM(ctx context.Context, job *batchv1.Job) {
 	if err := w.clientset.CoreV1().ConfigMaps(job.Namespace).Delete(ctx, configMapName, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
 		log.Printf("warning: could not delete postprocess inputs configmap %s/%s: %v", job.Namespace, configMapName, err)
 	}
+}
+
+// triggerReplaced reports whether the object a postprocess Job was made for
+// has been replaced by a same-named one with a different UID: a rerun of the
+// Job (or a JobSet recreating a child Job that was deleted while the JobSet
+// was still active). Read from the informer cache, so a replacement created
+// in the last moment before this check can be missed; its pods would not have
+// written anything yet. A Job with no recorded trigger predates the
+// annotations and is never treated as replaced.
+func (w *Watcher) triggerReplaced(ppJob *batchv1.Job, namespace, name string) bool {
+	uid := ppJob.Annotations[AnnotationPostprocessTriggerUID]
+	if uid == "" {
+		return false
+	}
+	var current metav1.Object
+	var err error
+	switch ppJob.Annotations[AnnotationPostprocessTriggerKind] {
+	case "Job":
+		current, err = w.factory.Batch().V1().Jobs().Lister().Jobs(namespace).Get(name)
+	case "Pod":
+		current, err = w.podFactory.Core().V1().Pods().Lister().Pods(namespace).Get(name)
+	default:
+		return false
+	}
+	if err != nil {
+		return false
+	}
+	return string(current.GetUID()) != uid
 }
 
 func (w *Watcher) deleteWorkloadDataConfigMap(ctx context.Context, namespace, triggerName string) {
