@@ -199,15 +199,19 @@ spec:
               curl -sf -X DELETE --cacert "$CACERT" \
                 -H "Authorization: Bearer $(cat $TOKEN)" \
                 "https://kubernetes.default.svc/apis/serving.kserve.io/v1beta1/namespaces/$NS/inferenceservices/aibom-vllm-granite-rhoai"
+              # Then this Job's own RBAC, best-effort: deleting the RoleBinding
+              # revokes the very token making these calls, so whatever comes
+              # after it gets a 403. Anything left over is removed by
+              # examples/cleanup.sh.
               curl -sf -X DELETE --cacert "$CACERT" \
                 -H "Authorization: Bearer $(cat $TOKEN)" \
-                "https://kubernetes.default.svc/apis/rbac.authorization.k8s.io/v1/namespaces/$NS/rolebindings/aibom-vllm-granite-rhoai-client"
+                "https://kubernetes.default.svc/apis/rbac.authorization.k8s.io/v1/namespaces/$NS/rolebindings/aibom-vllm-granite-rhoai-client" || true
               curl -sf -X DELETE --cacert "$CACERT" \
                 -H "Authorization: Bearer $(cat $TOKEN)" \
-                "https://kubernetes.default.svc/apis/rbac.authorization.k8s.io/v1/namespaces/$NS/roles/aibom-vllm-granite-rhoai-client"
+                "https://kubernetes.default.svc/apis/rbac.authorization.k8s.io/v1/namespaces/$NS/roles/aibom-vllm-granite-rhoai-client" || true
               curl -sf -X DELETE --cacert "$CACERT" \
                 -H "Authorization: Bearer $(cat $TOKEN)" \
-                "https://kubernetes.default.svc/api/v1/namespaces/$NS/serviceaccounts/aibom-vllm-granite-rhoai-client"
+                "https://kubernetes.default.svc/api/v1/namespaces/$NS/serviceaccounts/aibom-vllm-granite-rhoai-client" || true
           resources:
             requests:
               cpu: "100m"
