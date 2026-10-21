@@ -186,12 +186,12 @@ Covers both code baked into the image and code cloned at runtime, in precedence 
 | Source | What it reads | `declared_via` |
 |---|---|---|
 | `aibom.io/git-*` annotations | user-supplied | `annotation` |
-| `.git`-directory read (`runtime_detector.py`) | walks up from CWD for `.git`, resolves `HEAD` (loose ref or `packed-refs`), reads `origin` URL from `.git/config`, best-effort `git status --porcelain` for a dirty-tree flag | `git_directory` |
-| CLI-parsed `git clone`/`checkout` (`postprocess.py`) | regex-scans container command/args (through `sh -c` flattening) for `git clone <url>` + optional `git checkout <ref>`/`--branch <ref>`; a 7–40 char hex token is treated as a commit, else a branch | `cli_arg` |
-| OpenShift BuildConfig image labels | `image.openshift.io` `Image` object (looked up by image **digest**, not tag) — `io.openshift.build.commit.id`/`.ref`/`.source-location` | `openshift_build_label` |
+| `.git`-directory read (`runtime_detector.py`) | walks up from the running script's directory, then the CWD, for `.git` (a directory, or a worktree/submodule `gitdir:` file), resolves `HEAD` (loose ref or `packed-refs`, must end in a full SHA), reads the `origin` URL (else the first remote) from `.git/config`, best-effort `git status --porcelain -uno` for a dirty-tree flag (untracked files don't count) | `git_directory` |
+| CLI-parsed `git clone`/`checkout` (`postprocess.py`) | container command/args (through `sh -c` flattening): `git clone <url>` and any later `git checkout`/`switch` on that clone | `cli_arg` |
+| OpenShift BuildConfig image labels | `image.openshift.io` `Image` object (looked up by image **digest**, not tag) — `io.openshift.build.commit.id`/`.ref`/`.source-location`; ignored if it disagrees with the OCI revision label | `openshift_build_label` |
 | OCI-standard image labels | same `Image` object — `org.opencontainers.image.revision`/`.source` (no branch equivalent) | `oci_image_label` |
 
-`source_code.dirty` is surfaced independently whenever the `.git`-directory tier resolved it, regardless of which tier won identity. This is identification, not tamper-evident provenance — see `CLAUDE.md` for the full caveats.
+A source missing a field (a `.git` with no remote) is filled from the next one down, and annotations are filled from detection, only when the two don't name a different commit or repository; any `aibom.io/git-*` annotation makes `declared_via` `annotation`. `source_code.dirty` is surfaced when the `.git`-directory tier's checkout is the one reported. This is identification, not tamper-evident provenance — see `CLAUDE.md` for the full caveats.
 
 ---
 
