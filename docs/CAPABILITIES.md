@@ -155,6 +155,16 @@ Also surfaced as `inference.served_model_name`, `max_num_seqs`, `seed`, `trust_r
 | `--num_train_epochs` | `training.epochs` |
 | `--seed` | `training.random_seed` |
 
+*Other serving engines* — each identified from its own server command, setting `inference.serving_engine` and `model.name` (plus tensor-parallel size, max length, dtype, quantization where given). `model.name` also feeds quantization-from-name and the inference `experiment_intent`.
+
+| Engine | Invocation | Model flag |
+|---|---|---|
+| TGI | `text-generation-launcher ...` (also the image's ENTRYPOINT, args-only) | `--model-id` |
+| SGLang | `python -m sglang.launch_server ...` | `--model-path` |
+| LMDeploy | `lmdeploy serve api_server <model> ...` | positional |
+
+**llm-d** runs vLLM as its engine, so it's detected as vLLM (by command, or by `llm-d` image name for args-only pods) and reports `serving_engine: vllm`.
+
 **Quantization from model name** (regex, applied as a fallback wherever no explicit flag/config gave a method) — recognizes `AWQ`, `GPTQ` (+ int4/int8 variants), `INT4`/`INT8`, `FP4`/`FP8` (incl. `NVFP4`/`MXFP4`), `bitsandbytes`/`NF4`, `Marlin`, `GGUF`/`GGML`, `AQLM`, `EXL2`, `SqueezeLLM`, `HQQ`, `QuIP`, `EETQ`, `AutoRound` — extracting both method and bit width where the name encodes one.
 
 **KServe InferenceService storage model detection** — for predictors with no CLI model flag, `model.name` comes from the `InferenceService`'s declared storage, by scheme (then run through the same quantization-from-name regex). Recorded in `model.name_declared_via`:
@@ -222,6 +232,6 @@ In the AIBOM itself, each metric is recorded as summary statistics (`resource_ut
 These are explicit non-goals, not gaps waiting to close:
 
 - Per-request sampling params (e.g. a benchmark client's temperature) set after a vLLM server is already running.
-- Other serving engines (TGI, SGLang, TensorRT-LLM) or fine-tuning tools (Axolotl, LLaMA-Factory).
+- TensorRT-LLM/Triton serving, or fine-tuning tools beyond trl (Axolotl, LLaMA-Factory). vLLM/llm-d, TGI, SGLang, and LMDeploy *are* detected.
 - `pip install git+...`'s PEP 610 `direct_url.json`.
 - Verification that a declared git commit/dataset/model actually matches what's on disk or in a bucket — every "detection" above is identification, not an attestation.
