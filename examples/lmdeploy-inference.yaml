@@ -3,11 +3,13 @@
 # drives traffic and then deletes the server Job so postprocessing fires.
 # Differences from the vLLM example: the server image/command and the port
 # (LMDeploy's own default is 23333). The model is positional after
-# `serve api_server`. --enable-metrics is required for LMDeploy to expose its
-# lmdeploy: Prometheus metrics on /metrics, which the aibom-serving-metrics
-# PodMonitor scrapes.
+# `serve api_server`. LMDeploy exposes its lmdeploy: Prometheus metrics on
+# /metrics by default (0.18 replaced --enable-metrics with an opt-out
+# --disable-metrics, and rejects the old flag), which the aibom-serving-metrics
+# PodMonitor scrapes. Releases before that need --enable-metrics instead.
 #
-# Adjust image tag / model for your cluster as needed.
+# The image is pinned by digest (LMDeploy 0.18.0) so a new :latest can't change
+# the CLI under the example. Adjust image / model for your cluster as needed.
 apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
 metadata:
@@ -34,14 +36,13 @@ spec:
                 - operator: Exists
               containers:
                 - name: server
-                  image: openmmlab/lmdeploy:latest
+                  image: docker.io/openmmlab/lmdeploy@sha256:90bd451a49b56f68d953f0b49d6011b0419e043ececa0265c1e3cdb920748f4f
                   command:
                     - lmdeploy
                     - serve
                     - api_server
                     - Qwen/Qwen2.5-0.5B-Instruct
                     - --server-port=23333
-                    - --enable-metrics
                   env:
                     - name: HOME
                       value: /tmp
