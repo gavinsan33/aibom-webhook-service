@@ -26,8 +26,9 @@
 # OpenShift's restricted SCC (random non-root UID, no NET_BIND_SERVICE), so on
 # OpenShift it runs on 8080 the way KServe's TGI runtime does. A workload that
 # overrides a port to anything else isn't scraped; there's no
-# per-workload override yet (see #86). TGI/SGLang need their metrics flag
-# (--enable-metrics / TGI exposes them by default) for anything to be there.
+# per-workload override yet (see #86). SGLang needs --enable-metrics (and
+# LMDeploy before 0.18) for anything to be there; TGI and LMDeploy 0.18+
+# expose metrics by default.
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
