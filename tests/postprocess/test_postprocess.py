@@ -98,6 +98,151 @@ def test_detect_vllm_returns_none_for_empty_command():
 
 
 # ---------------------------------------------------------------------------
+# Other serving engines: TGI, SGLang, LMDeploy, llm-d (all share the vLLM
+# detection shape; here we check the engine is identified, the model name is
+# pulled out, and non-matching commands return None)
+# ---------------------------------------------------------------------------
+
+
+def test_detect_tgi_from_command():
+    result = pp.detect_tgi_from_command(
+        ["text-generation-launcher", "--model-id", "bigscience/bloom-560m", "--num-shard", "2", "--quantize", "bitsandbytes"]
+    )
+    assert result["serving_engine"] == "tgi"
+    assert result["model_name"] == "bigscience/bloom-560m"
+    assert result["tensor_parallel_size"] == 2
+    assert result["quantization"] == "bitsandbytes"
+
+
+def test_detect_tgi_through_shell_wrapper():
+    # `detect_model_from_containers` flattens the sh -c wrapper before detection.
+    result = pp.detect_model_from_containers(
+        [{"command": ["sh", "-c", "pip install x && text-generation-launcher --model-id org/m --max-total-tokens 4096"]}]
+    )
+    assert result["serving_engine"] == "tgi"
+    assert result["model_name"] == "org/m"
+    assert result["max_model_len"] == 4096
+
+
+def test_detect_tgi_entrypoint_only_image():
+    container = {"image": "ghcr.io/huggingface/text-generation-inference:3.0", "args": ["--model-id", "org/m"]}
+    result = pp._detect_tgi_from_entrypoint_args(container)
+    assert result == {"serving_engine": "tgi", "model_name": "org/m"}
+
+
+def test_detect_sglang_from_command():
+    result = pp.detect_sglang_from_command(
+        ["python", "-m", "sglang.launch_server", "--model-path", "Qwen/Qwen2.5-7B", "--tp-size", "4", "--context-length", "8192"]
+    )
+    assert result["serving_engine"] == "sglang"
+    assert result["model_name"] == "Qwen/Qwen2.5-7B"
+    assert result["tensor_parallel_size"] == 4
+    assert result["max_model_len"] == 8192
+
+
+def test_detect_lmdeploy_positional_model():
+    result = pp.detect_lmdeploy_from_command(
+        ["lmdeploy", "serve", "api_server", "internlm/internlm2-chat-7b", "--tp", "2", "--session-len", "4096"]
+    )
+    assert result["serving_engine"] == "lmdeploy"
+    assert result["model_name"] == "internlm/internlm2-chat-7b"
+    assert result["tensor_parallel_size"] == 2
+    assert result["max_model_len"] == 4096
+
+
+def test_detect_lmdeploy_quantization_from_name():
+    result = pp.detect_lmdeploy_from_command(["lmdeploy", "serve", "api_server", "org/Llama-3-8B-AWQ"])
+    assert result["quantization_method"] == "awq"
+
+
+def test_new_engines_return_none_for_unrelated_commands():
+    for fn in (pp.detect_tgi_from_command, pp.detect_sglang_from_command, pp.detect_lmdeploy_from_command):
+        assert fn(["python", "train.py"]) is None
+        assert fn([]) is None
+        assert fn(None) is None
+    # `lmdeploy chat` / `lmdeploy serve gradio` aren't the api_server.
+    assert pp.detect_lmdeploy_from_command(["lmdeploy", "chat", "org/m"]) is None
+
+
+def test_llm_d_image_detected_as_vllm_engine():
+    container = {"image": "ghcr.io/llm-d/llm-d-cuda-dev:latest", "args": ["--model", "org/m"]}
+    result = pp._detect_vllm_from_entrypoint_args(container)
+    assert result["serving_engine"] == "vllm"
+    assert result["model_name"] == "org/m"
+
+
+def test_detect_model_from_containers_identifies_each_engine():
+    cases = {
+        "tgi": [{"command": ["text-generation-launcher", "--model-id", "org/m"]}],
+        "sglang": [{"command": ["python", "-m", "sglang.launch_server", "--model-path", "org/m"]}],
+        "lmdeploy": [{"command": ["lmdeploy", "serve", "api_server", "org/m"]}],
+    }
+    for engine, containers in cases.items():
+        assert pp.detect_model_from_containers(containers)["serving_engine"] == engine
+
+
+# ---------------------------------------------------------------------------
+# Per-engine serving telemetry query generation
+# ---------------------------------------------------------------------------
+
+
+def test_build_serving_queries_reproduces_vllm():
+    """The generator must reproduce the hand-verified vLLM queries byte-for-byte
+    -- this is what lets every other engine inherit their confirmed correctness.
+    If this breaks, the generated PromQL for all four engines is suspect."""
+    stats = pp.SERVING_TELEMETRY_QUERIES["vllm"]
+    assert stats["time_to_first_token_seconds"]["query"] == (
+        'sum(rate(vllm:time_to_first_token_seconds_sum{namespace="{namespace}", pod="{pod_name}"}[5m]))'
+        ' / sum(rate(vllm:time_to_first_token_seconds_count{namespace="{namespace}", pod="{pod_name}"}[5m]))'
+    )
+    assert stats["inter_token_latency_seconds"]["query"] == (
+        '(sum(rate(vllm:inter_token_latency_seconds_sum{namespace="{namespace}", pod="{pod_name}"}[5m]))'
+        ' / sum(rate(vllm:inter_token_latency_seconds_count{namespace="{namespace}", pod="{pod_name}"}[5m])))'
+        ' or (sum(rate(vllm:time_per_output_token_seconds_sum{namespace="{namespace}", pod="{pod_name}"}[5m]))'
+        ' / sum(rate(vllm:time_per_output_token_seconds_count{namespace="{namespace}", pod="{pod_name}"}[5m])))'
+    )
+    assert stats["num_requests_running"]["query"] == 'sum(vllm:num_requests_running{namespace="{namespace}", pod="{pod_name}"})'
+    assert stats["kv_cache_usage"]["query"] == (
+        '100 * (avg(vllm:kv_cache_usage_perc{namespace="{namespace}", pod="{pod_name}"})'
+        ' or avg(vllm:gpu_cache_usage_perc{namespace="{namespace}", pod="{pod_name}"}))'
+    )
+    assert stats["prompt_throughput"]["query"] == 'sum(rate(vllm:prompt_tokens_total{namespace="{namespace}", pod="{pod_name}"}[5m]))'
+
+    series = pp.SERVING_SERIES_QUERIES["vllm"]
+    assert series["time_to_first_token_seconds"]["query"] == (
+        'sum by (pod) (rate(vllm:time_to_first_token_seconds_sum{namespace="{namespace}", pod=~"{pod_regex}"}[5m]))'
+        ' / sum by (pod) (rate(vllm:time_to_first_token_seconds_count{namespace="{namespace}", pod=~"{pod_regex}"}[5m]))'
+    )
+    assert series["num_requests_running"]["query"] == (
+        '{fn} by (pod) ({fn}_over_time(vllm:num_requests_running{namespace="{namespace}", pod=~"{pod_regex}"}[{win}s]))'
+    )
+    assert series["num_requests_running"]["gauge"] is True
+    assert series["num_requests_running"]["aggregation"] == "sum"
+    assert series["kv_cache_usage"]["query"] == (
+        '100 * ({fn} by (pod) ({fn}_over_time(vllm:kv_cache_usage_perc{namespace="{namespace}", pod=~"{pod_regex}"}[{win}s]))'
+        ' or {fn} by (pod) ({fn}_over_time(vllm:gpu_cache_usage_perc{namespace="{namespace}", pod=~"{pod_regex}"}[{win}s])))'
+    )
+
+
+def test_serving_query_sets_consistent_across_engines():
+    # Same canonical metric keys everywhere (TGI is a documented subset), and
+    # stats/series sets always match within an engine.
+    for engine in pp.SERVING_ENGINE_METRICS:
+        assert set(pp.SERVING_TELEMETRY_QUERIES[engine]) == set(pp.SERVING_SERIES_QUERIES[engine])
+        assert set(pp.SERVING_TELEMETRY_QUERIES[engine]) <= set(pp.SERVING_TELEMETRY_QUERIES["vllm"])
+    assert pp.SERVING_TELEMETRY_QUERIES["lmdeploy"]["kv_cache_usage"]["query"].startswith("100 * ")
+    assert "tgi_request_mean_time_per_token_duration_sum" in pp.SERVING_TELEMETRY_QUERIES["tgi"]["inter_token_latency_seconds"]["query"]
+
+
+def test_collect_vllm_telemetry_uses_selected_engine(monkeypatch):
+    seen = []
+    monkeypatch.setattr(pp, "query_prometheus_range", lambda q, *a, **k: seen.append(q) or None)
+    pp.collect_vllm_telemetry([_serving_discovery()], engine="sglang")
+    assert any("sglang:" in q for q in seen)
+    assert not any("vllm:" in q for q in seen)
+
+
+# ---------------------------------------------------------------------------
 # KServe InferenceService storage-path detection (S3/MinIO data-connection)
 # ---------------------------------------------------------------------------
 
@@ -2464,7 +2609,7 @@ def main_env(monkeypatch):
     monkeypatch.setattr(pp, "load_storage", lambda: {})
     monkeypatch.setattr(pp, "collect_telemetry", lambda discoveries, containers=None: {"pods": []})
     encoded = json.dumps({"window": {"start": 1, "end": 2, "step_seconds": 15}, "metrics": {}})
-    monkeypatch.setattr(pp, "collect_telemetry_series", lambda t, v: encoded)
+    monkeypatch.setattr(pp, "collect_telemetry_series", lambda t, v, e="vllm": encoded)
     monkeypatch.setattr(pp, "sign_aibom", lambda aibom: (None, None))
 
     def fake_create(ns, group, version, plural, body):
@@ -2545,7 +2690,7 @@ def test_main_creates_aibom_without_reference_when_series_object_create_fails(ma
 
 def test_main_skips_series_object_when_no_series(main_env, monkeypatch):
     calls, _, _ = main_env
-    monkeypatch.setattr(pp, "collect_telemetry_series", lambda t, v: None)
+    monkeypatch.setattr(pp, "collect_telemetry_series", lambda t, v, e="vllm": None)
     pp.main()
     assert [c[:2] for c in calls] == [("create", "aiboms")]
 
