@@ -163,9 +163,11 @@ Also surfaced as `inference.served_model_name`, `max_num_seqs`, `seed`, `trust_r
 | SGLang | `python -m sglang.launch_server ...` | `--model-path` |
 | LMDeploy | `lmdeploy serve api_server <model> ...` | positional |
 
+**llm-d** runs vLLM as its engine, so its model-server pods report `serving_engine: vllm`: by command (`vllm serve`, which its CUDA image needs), or by image name for args-only pods on its `llm-d-xpu`/`llm-d-cpu`/`llm-d-rocm` images.
+
 **Flag coverage is not uniform across engines.** vLLM is the reference and parses the full flag set below; the others map only the fields that have a clear per-engine equivalent. Engine-specific tuning flags beyond these are intentionally not mapped — the model name is the field that matters most.
 
-| AIBOM field | vLLM | TGI | SGLang | LMDeploy |
+| AIBOM field | vLLM / llm-d | TGI | SGLang | LMDeploy |
 |---|---|---|---|---|
 | `model.name` | `--model` | `--model-id` | `--model-path` | positional |
 | `model.dtype` | `--dtype` | `--dtype` | `--dtype` | `--dtype` |
@@ -179,7 +181,7 @@ Also surfaced as `inference.served_model_name`, `max_num_seqs`, `seed`, `trust_r
 
 Quantization also falls back to the model-name regex when no flag sets it, for every engine. Fields with `—` have no mapped flag for that engine; a server that sets one is simply not reflected in that field.
 
-**Args-only (ENTRYPOINT) detection** exists only for vLLM and TGI, whose images ship a fixed server ENTRYPOINT (`vllm serve`, `text-generation-launcher`). SGLang and LMDeploy images expect an explicit command, so a KServe-style predictor that sets only `args` with no `command` for those two isn't detected — launch them with an explicit `command`.
+**Args-only (ENTRYPOINT) detection** exists only for vLLM/llm-d and TGI, whose images ship a fixed server ENTRYPOINT (`vllm serve`, `text-generation-launcher`). SGLang and LMDeploy images expect an explicit command, so a KServe-style predictor that sets only `args` with no `command` for those two isn't detected — launch them with an explicit `command`.
 
 **Quantization from model name** (regex, applied as a fallback wherever no explicit flag/config gave a method) — recognizes `AWQ`, `GPTQ` (+ int4/int8 variants), `INT4`/`INT8`, `FP4`/`FP8` (incl. `NVFP4`/`MXFP4`), `bitsandbytes`/`NF4`, `Marlin`, `GGUF`/`GGML`, `AQLM`, `EXL2`, `SqueezeLLM`, `HQQ`, `QuIP`, `EETQ`, `AutoRound` — extracting both method and bit width where the name encodes one.
 
@@ -264,6 +266,6 @@ For a pod whose `serving_engine` is detected (see *Other serving engines* above)
 These are explicit non-goals, not gaps waiting to close:
 
 - Per-request sampling params (e.g. a benchmark client's temperature) set after a vLLM server is already running.
-- TensorRT-LLM/Triton serving, or fine-tuning tools beyond trl (Axolotl, LLaMA-Factory). vLLM, TGI, SGLang, and LMDeploy *are* detected.
+- TensorRT-LLM/Triton serving, or fine-tuning tools beyond trl (Axolotl, LLaMA-Factory). vLLM/llm-d, TGI, SGLang, and LMDeploy *are* detected.
 - `pip install git+...`'s PEP 610 `direct_url.json`.
 - Verification that a declared git commit/dataset/model actually matches what's on disk or in a bucket — every "detection" above is identification, not an attestation.

@@ -928,7 +928,18 @@ def detect_vllm_from_command(command):
     return None if args is None else _parse_vllm_args(args)
 
 
-_VLLM_IMAGE_RE = re.compile(r"(?:^|/)vllm-openai$|(?:^|/)vllm/[^/]+$")
+# llm-d's xpu/cpu/rocm model-server images set vLLM's api_server module as
+# their ENTRYPOINT, so an args-only pod on one of them is vLLM too. Its CUDA
+# and AWS images don't (their ENTRYPOINT is NVIDIA's generic wrapper), so pods
+# on those spell out `vllm serve` and are matched by command instead. Only these
+# names match: the same org also publishes the routing sidecar
+# (llm-d-router-disagg-sidecar), the scheduler/endpoint picker, the inference
+# simulator and an SGLang image (llm-d-xpu-sglang), and none of them is vLLM
+# (#165).
+_VLLM_IMAGE_RE = re.compile(
+    r"(?:^|/)vllm-openai$|(?:^|/)vllm/[^/]+$"
+    r"|(?:^|/)llm-d-(?:xpu|cpu|rocm)(?:-dev)?$"
+)
 
 
 def _strip_tag_digest(ref):
