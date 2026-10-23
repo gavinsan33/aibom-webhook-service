@@ -38,6 +38,11 @@ type Handler struct {
 	// for every Job admission -- see its doc comment and config.Config's
 	// TrustedWatcherIdentity field.
 	TrustedWatcherIdentity string
+
+	// SystemNamespace is the namespace this webhook runs in, where the
+	// trusted aibom-postprocess ServiceAccount lives -- see
+	// ValidateSigningPublicKeyConfigMap.
+	SystemNamespace string
 }
 
 func NewHandler(mutator *Mutator, trustedWatcherIdentity string) *Handler {
@@ -190,7 +195,7 @@ func (h *Handler) handleConfigMapAdmission(req *admissionv1.AdmissionRequest) *a
 		return allowResponse("failed to unmarshal configmap")
 	}
 
-	if reason := ValidateSigningPublicKeyConfigMap(&cm, req.UserInfo.Username); reason != "" {
+	if reason := ValidateSigningPublicKeyConfigMap(&cm, req.UserInfo.Username, h.SystemNamespace); reason != "" {
 		log.Printf("denying configmap write %s/%s: %s (requester %q)", cm.Namespace, cm.Name, reason, req.UserInfo.Username)
 		return denyResponse(reason)
 	}

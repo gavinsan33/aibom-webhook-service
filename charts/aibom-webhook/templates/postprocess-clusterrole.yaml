@@ -1,9 +1,7 @@
 {{- if include "aibom-webhook.openshift" . }}
 # Cluster-scoped: OpenShift's image.openshift.io/v1 Image object has no
-# namespace, so it can't be granted via a namespaced Role (see
-# aibom-workload-namespace's rbac.yaml, which binds this from each workload
-# namespace's own aibom-postprocess ServiceAccount). Installed once here,
-# alongside the other cluster-level RBAC, rather than per-namespace.
+# namespace, so it can't be granted via a namespaced Role. Bound to the
+# aibom-postprocess ServiceAccount in this namespace by postprocess.yaml.
 #
 # Read-only and limited to Images: lets the postprocess Job resolve the
 # io.openshift.build.commit.* labels an OpenShift BuildConfig bakes onto an

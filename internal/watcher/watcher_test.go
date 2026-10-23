@@ -1,11 +1,15 @@
 package watcher
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"reflect"
 	"strings"
@@ -253,7 +257,7 @@ func TestIsJobFinished(t *testing.T) {
 
 func TestIsNamespaceEnabled(t *testing.T) {
 	client := fake.NewSimpleClientset(enabledNamespace("enabled-ns"), disabledNamespace("disabled-ns"))
-	w := New(client, Config{PostprocessImage: "busybox:latest"})
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "busybox:latest"})
 	startWatcher(t, w)
 
 	if !w.isNamespaceEnabled("enabled-ns") {
@@ -286,13 +290,13 @@ func TestOnJobEvent_CreatesPostprocessJob(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, job, pod, dataConfigMap)
-	w := New(client, Config{PostprocessImage: "aibom-postprocess:latest"})
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "aibom-postprocess:latest"})
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
 
 	// Verify ConfigMap was created
-	cm, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), "train-job-aibom-postprocess-data", metav1.GetOptions{})
+	cm, err := client.CoreV1().ConfigMaps("aibom-system").Get(context.TODO(), inputsName("test-ns", "train-job"), metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("configmap not created: %v", err)
 	}
@@ -301,7 +305,7 @@ func TestOnJobEvent_CreatesPostprocessJob(t *testing.T) {
 	}
 
 	// Verify postprocess Job was created
-	ppJob, err := client.BatchV1().Jobs("test-ns").Get(context.TODO(), "train-job-aibom-postprocess", metav1.GetOptions{})
+	ppJob, err := client.BatchV1().Jobs("aibom-system").Get(context.TODO(), ppName("test-ns", "train-job"), metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("postprocess job not created: %v", err)
 	}
@@ -365,8 +369,8 @@ func TestOnJobEvent_CreatesPostprocessJob(t *testing.T) {
 	if len(ppJob.Spec.Template.Spec.Volumes) != 3 {
 		t.Fatalf("expected 3 volumes, got %d", len(ppJob.Spec.Template.Spec.Volumes))
 	}
-	if ppJob.Spec.Template.Spec.Volumes[0].ConfigMap.Name != "train-job-aibom-postprocess-data" {
-		t.Errorf("volume configmap name = %q, want %q", ppJob.Spec.Template.Spec.Volumes[0].ConfigMap.Name, "train-job-aibom-postprocess-data")
+	if ppJob.Spec.Template.Spec.Volumes[0].ConfigMap.Name != inputsName("test-ns", "train-job") {
+		t.Errorf("volume configmap name = %q, want %q", ppJob.Spec.Template.Spec.Volumes[0].ConfigMap.Name, inputsName("test-ns", "train-job"))
 	}
 	serviceCAVolume := ppJob.Spec.Template.Spec.Volumes[1]
 	if serviceCAVolume.ConfigMap.Name != serviceCAConfigMapName {
@@ -376,8 +380,8 @@ func TestOnJobEvent_CreatesPostprocessJob(t *testing.T) {
 		t.Error("service-ca volume should be optional")
 	}
 	signingVolume := ppJob.Spec.Template.Spec.Volumes[2]
-	if signingVolume.Secret.SecretName != aibomdata.CompiledSigningKeySecretName {
-		t.Errorf("signing key volume secret name = %q, want %q", signingVolume.Secret.SecretName, aibomdata.CompiledSigningKeySecretName)
+	if signingVolume.Secret.SecretName != aibomdata.CompiledSigningKeySecretName("test-ns") {
+		t.Errorf("signing key volume secret name = %q, want %q", signingVolume.Secret.SecretName, aibomdata.CompiledSigningKeySecretName("test-ns"))
 	}
 	if signingVolume.Secret.Optional == nil || !*signingVolume.Secret.Optional {
 		t.Error("compiled signing key volume should be optional")
@@ -385,8 +389,8 @@ func TestOnJobEvent_CreatesPostprocessJob(t *testing.T) {
 
 	// Verify original job annotated
 	updatedJob, _ := client.BatchV1().Jobs("test-ns").Get(context.TODO(), "train-job", metav1.GetOptions{})
-	if updatedJob.Annotations[AnnotationPostprocess] != "train-job-aibom-postprocess" {
-		t.Errorf("annotation %s = %q, want %q", AnnotationPostprocess, updatedJob.Annotations[AnnotationPostprocess], "train-job-aibom-postprocess")
+	if updatedJob.Annotations[AnnotationPostprocess] != ppName("test-ns", "train-job") {
+		t.Errorf("annotation %s = %q, want %q", AnnotationPostprocess, updatedJob.Annotations[AnnotationPostprocess], ppName("test-ns", "train-job"))
 	}
 }
 
@@ -400,12 +404,12 @@ func TestOnJobEvent_WithAnnotations(t *testing.T) {
 	pod := instrumentedPod("train-job", "test-ns")
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, Config{PostprocessImage: "aibom-postprocess:latest"})
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "aibom-postprocess:latest"})
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
 
-	cm, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), "train-job-aibom-postprocess-data", metav1.GetOptions{})
+	cm, err := client.CoreV1().ConfigMaps("aibom-system").Get(context.TODO(), inputsName("test-ns", "train-job"), metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("configmap not created: %v", err)
 	}
@@ -423,12 +427,12 @@ func TestOnJobEvent_NonEnabledNamespace_Skips(t *testing.T) {
 	pod := instrumentedPod("train-job", "disabled-ns")
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, Config{PostprocessImage: "busybox:latest"})
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "busybox:latest"})
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
 
-	_, err := client.BatchV1().Jobs("disabled-ns").Get(context.TODO(), "train-job-aibom-postprocess", metav1.GetOptions{})
+	_, err := client.BatchV1().Jobs("aibom-system").Get(context.TODO(), ppName("disabled-ns", "train-job"), metav1.GetOptions{})
 	if err == nil {
 		t.Error("postprocess job should not have been created in disabled namespace")
 	}
@@ -441,12 +445,12 @@ func TestOnJobEvent_IncompleteJob_Skips(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, job)
-	w := New(client, Config{PostprocessImage: "busybox:latest"})
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "busybox:latest"})
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
 
-	_, err := client.BatchV1().Jobs("test-ns").Get(context.TODO(), "running-job-aibom-postprocess", metav1.GetOptions{})
+	_, err := client.BatchV1().Jobs("aibom-system").Get(context.TODO(), ppName("test-ns", "running-job"), metav1.GetOptions{})
 	if err == nil {
 		t.Error("postprocess job should not have been created for incomplete job")
 	}
@@ -459,7 +463,7 @@ func TestOnJobEvent_AlreadyPostprocessed_Skips(t *testing.T) {
 	pod := instrumentedPod("train-job", "test-ns")
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, Config{PostprocessImage: "busybox:latest"})
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "busybox:latest"})
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -488,12 +492,12 @@ func TestOnJobEvent_NoInstrumentedPods_Skips(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, Config{PostprocessImage: "busybox:latest"})
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "busybox:latest"})
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
 
-	_, err := client.BatchV1().Jobs("test-ns").Get(context.TODO(), "plain-job-aibom-postprocess", metav1.GetOptions{})
+	_, err := client.BatchV1().Jobs("aibom-system").Get(context.TODO(), ppName("test-ns", "plain-job"), metav1.GetOptions{})
 	if err == nil {
 		t.Error("postprocess job should not have been created for non-instrumented job")
 	}
@@ -518,12 +522,12 @@ func TestOnJobEvent_NoGPU_Skips(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, Config{PostprocessImage: "busybox:latest"})
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "busybox:latest"})
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
 
-	_, err := client.BatchV1().Jobs("test-ns").Get(context.TODO(), "cpu-job-aibom-postprocess", metav1.GetOptions{})
+	_, err := client.BatchV1().Jobs("aibom-system").Get(context.TODO(), ppName("test-ns", "cpu-job"), metav1.GetOptions{})
 	if err == nil {
 		t.Error("postprocess job should not have been created for non-GPU job")
 	}
@@ -536,7 +540,7 @@ func TestOnJobEvent_PostprocessJob_Skips(t *testing.T) {
 	pod := instrumentedPod("train-job-aibom-postprocess", "test-ns")
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, Config{PostprocessImage: "busybox:latest"})
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "busybox:latest"})
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -557,7 +561,7 @@ func TestFinalizerAddedToGPUJob(t *testing.T) {
 	pod := instrumentedPod("gpu-job", "test-ns")
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, Config{PostprocessImage: "busybox:latest"})
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "busybox:latest"})
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -570,7 +574,7 @@ func TestFinalizerAddedToGPUJob(t *testing.T) {
 		t.Error("finalizer should have been added to GPU job")
 	}
 
-	_, err = client.BatchV1().Jobs("test-ns").Get(context.TODO(), "gpu-job-aibom-postprocess", metav1.GetOptions{})
+	_, err = client.BatchV1().Jobs("aibom-system").Get(context.TODO(), ppName("test-ns", "gpu-job"), metav1.GetOptions{})
 	if err == nil {
 		t.Error("postprocess job should not be created before job completes")
 	}
@@ -597,7 +601,7 @@ func TestFinalizerNotAddedToNonGPUJob(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, Config{PostprocessImage: "busybox:latest"})
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "busybox:latest"})
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -626,12 +630,12 @@ func TestPostprocessOnDeletion(t *testing.T) {
 	pod := instrumentedPod("server-job", "test-ns")
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, Config{PostprocessImage: "aibom-postprocess:latest"})
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "aibom-postprocess:latest"})
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
 
-	ppJob, err := client.BatchV1().Jobs("test-ns").Get(context.TODO(), "server-job-aibom-postprocess", metav1.GetOptions{})
+	ppJob, err := client.BatchV1().Jobs("aibom-system").Get(context.TODO(), ppName("test-ns", "server-job"), metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("postprocess job not created on deletion: %v", err)
 	}
@@ -639,7 +643,7 @@ func TestPostprocessOnDeletion(t *testing.T) {
 		t.Errorf("label %s = %q, want %q", LabelPostprocessFor, ppJob.Labels[LabelPostprocessFor], "server-job")
 	}
 
-	cm, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), "server-job-aibom-postprocess-data", metav1.GetOptions{})
+	cm, err := client.CoreV1().ConfigMaps("aibom-system").Get(context.TODO(), inputsName("test-ns", "server-job"), metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("configmap not created: %v", err)
 	}
@@ -675,7 +679,7 @@ func TestFinalizerAddedToAnnotatedJob(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, Config{PostprocessImage: "busybox:latest"})
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "busybox:latest"})
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -695,7 +699,7 @@ func TestPodFinalizerAddedToGPUPod(t *testing.T) {
 	pod := instrumentedBarePod("predictor-pod", "test-ns")
 
 	client := fake.NewSimpleClientset(ns, pod)
-	w := New(client, Config{PostprocessImage: "busybox:latest"})
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "busybox:latest"})
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
@@ -708,7 +712,7 @@ func TestPodFinalizerAddedToGPUPod(t *testing.T) {
 		t.Error("finalizer should have been added to GPU pod")
 	}
 
-	_, err = client.BatchV1().Jobs("test-ns").Get(context.TODO(), "predictor-pod-aibom-postprocess", metav1.GetOptions{})
+	_, err = client.BatchV1().Jobs("aibom-system").Get(context.TODO(), ppName("test-ns", "predictor-pod"), metav1.GetOptions{})
 	if err == nil {
 		t.Error("postprocess job should not be created before pod is deleted")
 	}
@@ -745,12 +749,12 @@ func TestPostprocessReadsStorageInfoFromDiscoveryData(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, pod, dataConfigMap)
-	w := New(client, Config{PostprocessImage: "aibom-postprocess:latest"})
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "aibom-postprocess:latest"})
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
 
-	cm, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), pod.Name+"-aibom-postprocess-data", metav1.GetOptions{})
+	cm, err := client.CoreV1().ConfigMaps("aibom-system").Get(context.TODO(), inputsName("test-ns", pod.Name), metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("data configmap not found: %v", err)
 	}
@@ -835,12 +839,12 @@ func TestPostprocessDropsForgedDiscoveryData(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, pod, dataConfigMap, secret)
-	w := New(client, Config{PostprocessImage: "aibom-postprocess:latest"})
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "aibom-postprocess:latest"})
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
 
-	cm, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), pod.Name+"-aibom-postprocess-data", metav1.GetOptions{})
+	cm, err := client.CoreV1().ConfigMaps("aibom-system").Get(context.TODO(), inputsName("test-ns", pod.Name), metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("data configmap not found: %v", err)
 	}
@@ -874,12 +878,12 @@ func TestPostprocessKeepsValidlySignedDiscoveryData(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, pod, dataConfigMap, secret)
-	w := New(client, Config{PostprocessImage: "aibom-postprocess:latest"})
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "aibom-postprocess:latest"})
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
 
-	cm, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), pod.Name+"-aibom-postprocess-data", metav1.GetOptions{})
+	cm, err := client.CoreV1().ConfigMaps("aibom-system").Get(context.TODO(), inputsName("test-ns", pod.Name), metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("data configmap not found: %v", err)
 	}
@@ -912,12 +916,12 @@ func TestPostprocessKeepsUnverifiedDiscoveryWhenNoSigningKeyConfigured(t *testin
 
 	// Deliberately no discoverySigningSecret in the fake clientset.
 	client := fake.NewSimpleClientset(ns, pod, dataConfigMap)
-	w := New(client, Config{PostprocessImage: "aibom-postprocess:latest"})
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "aibom-postprocess:latest"})
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
 
-	cm, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), pod.Name+"-aibom-postprocess-data", metav1.GetOptions{})
+	cm, err := client.CoreV1().ConfigMaps("aibom-system").Get(context.TODO(), inputsName("test-ns", pod.Name), metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("data configmap not found: %v", err)
 	}
@@ -954,12 +958,12 @@ func TestPostprocessDropsForgedStorageData(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, pod, dataConfigMap, secret)
-	w := New(client, Config{PostprocessImage: "aibom-postprocess:latest"})
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "aibom-postprocess:latest"})
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
 
-	cm, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), pod.Name+"-aibom-postprocess-data", metav1.GetOptions{})
+	cm, err := client.CoreV1().ConfigMaps("aibom-system").Get(context.TODO(), inputsName("test-ns", pod.Name), metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("data configmap not found: %v", err)
 	}
@@ -992,12 +996,12 @@ func TestPostprocessKeepsValidlySignedStorageData(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, pod, dataConfigMap, secret)
-	w := New(client, Config{PostprocessImage: "aibom-postprocess:latest"})
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "aibom-postprocess:latest"})
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
 
-	cm, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), pod.Name+"-aibom-postprocess-data", metav1.GetOptions{})
+	cm, err := client.CoreV1().ConfigMaps("aibom-system").Get(context.TODO(), inputsName("test-ns", pod.Name), metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("data configmap not found: %v", err)
 	}
@@ -1028,12 +1032,12 @@ func TestPostprocessKeepsUnverifiedStorageWhenNoSigningKeyConfigured(t *testing.
 
 	// Deliberately no discoverySigningSecret in the fake clientset.
 	client := fake.NewSimpleClientset(ns, pod, dataConfigMap)
-	w := New(client, Config{PostprocessImage: "aibom-postprocess:latest"})
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "aibom-postprocess:latest"})
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
 
-	cm, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), pod.Name+"-aibom-postprocess-data", metav1.GetOptions{})
+	cm, err := client.CoreV1().ConfigMaps("aibom-system").Get(context.TODO(), inputsName("test-ns", pod.Name), metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("data configmap not found: %v", err)
 	}
@@ -1079,12 +1083,12 @@ func TestPostprocessDropsForgedDatasetData(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, pod, dataConfigMap, secret)
-	w := New(client, Config{PostprocessImage: "aibom-postprocess:latest"})
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "aibom-postprocess:latest"})
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
 
-	cm, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), pod.Name+"-aibom-postprocess-data", metav1.GetOptions{})
+	cm, err := client.CoreV1().ConfigMaps("aibom-system").Get(context.TODO(), inputsName("test-ns", pod.Name), metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("data configmap not found: %v", err)
 	}
@@ -1116,12 +1120,12 @@ func TestPostprocessKeepsValidlySignedDatasetData(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, pod, dataConfigMap, secret)
-	w := New(client, Config{PostprocessImage: "aibom-postprocess:latest"})
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "aibom-postprocess:latest"})
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
 
-	cm, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), pod.Name+"-aibom-postprocess-data", metav1.GetOptions{})
+	cm, err := client.CoreV1().ConfigMaps("aibom-system").Get(context.TODO(), inputsName("test-ns", pod.Name), metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("data configmap not found: %v", err)
 	}
@@ -1152,12 +1156,12 @@ func TestPostprocessKeepsUnverifiedDatasetWhenNoSigningKeyConfigured(t *testing.
 
 	// Deliberately no datasetSigningSecret in the fake clientset.
 	client := fake.NewSimpleClientset(ns, pod, dataConfigMap)
-	w := New(client, Config{PostprocessImage: "aibom-postprocess:latest"})
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "aibom-postprocess:latest"})
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
 
-	cm, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), pod.Name+"-aibom-postprocess-data", metav1.GetOptions{})
+	cm, err := client.CoreV1().ConfigMaps("aibom-system").Get(context.TODO(), inputsName("test-ns", pod.Name), metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("data configmap not found: %v", err)
 	}
@@ -1181,12 +1185,12 @@ func TestPostprocessDefaultsStorageInfoWhenAbsent(t *testing.T) {
 	pod.DeletionTimestamp = &now
 
 	client := fake.NewSimpleClientset(ns, pod)
-	w := New(client, Config{PostprocessImage: "aibom-postprocess:latest"})
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "aibom-postprocess:latest"})
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
 
-	cm, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), pod.Name+"-aibom-postprocess-data", metav1.GetOptions{})
+	cm, err := client.CoreV1().ConfigMaps("aibom-system").Get(context.TODO(), inputsName("test-ns", pod.Name), metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("data configmap not found: %v", err)
 	}
@@ -1210,7 +1214,7 @@ func TestPodFinalizerNotAddedToNonGPUPod(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, pod)
-	w := New(client, Config{PostprocessImage: "busybox:latest"})
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "busybox:latest"})
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
@@ -1239,7 +1243,7 @@ func TestPodFinalizerAddedToAnnotatedPod(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, pod)
-	w := New(client, Config{PostprocessImage: "busybox:latest"})
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "busybox:latest"})
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
@@ -1262,12 +1266,12 @@ func TestPostprocessOnPodDeletion(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, pod)
-	w := New(client, Config{PostprocessImage: "aibom-postprocess:latest"})
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "aibom-postprocess:latest"})
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
 
-	ppJob, err := client.BatchV1().Jobs("test-ns").Get(context.TODO(), "predictor-pod-aibom-postprocess", metav1.GetOptions{})
+	ppJob, err := client.BatchV1().Jobs("aibom-system").Get(context.TODO(), ppName("test-ns", "predictor-pod"), metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("postprocess job not created on pod deletion: %v", err)
 	}
@@ -1275,7 +1279,7 @@ func TestPostprocessOnPodDeletion(t *testing.T) {
 		t.Errorf("label %s = %q, want %q", LabelPostprocessFor, ppJob.Labels[LabelPostprocessFor], "predictor-pod")
 	}
 
-	cm, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), "predictor-pod-aibom-postprocess-data", metav1.GetOptions{})
+	cm, err := client.CoreV1().ConfigMaps("aibom-system").Get(context.TODO(), inputsName("test-ns", "predictor-pod"), metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("configmap not created: %v", err)
 	}
@@ -1290,8 +1294,8 @@ func TestPostprocessOnPodDeletion(t *testing.T) {
 	if hasPodFinalizer(updated) {
 		t.Error("finalizer should have been removed after postprocess job creation")
 	}
-	if updated.Annotations[AnnotationPostprocess] != "predictor-pod-aibom-postprocess" {
-		t.Errorf("annotation %s = %q, want %q", AnnotationPostprocess, updated.Annotations[AnnotationPostprocess], "predictor-pod-aibom-postprocess")
+	if updated.Annotations[AnnotationPostprocess] != ppName("test-ns", "predictor-pod") {
+		t.Errorf("annotation %s = %q, want %q", AnnotationPostprocess, updated.Annotations[AnnotationPostprocess], ppName("test-ns", "predictor-pod"))
 	}
 }
 
@@ -1304,12 +1308,12 @@ func TestOnPodEvent_JobOwnedPod_Skipped(t *testing.T) {
 	pod.Finalizers = []string{podFinalizerName}
 
 	client := fake.NewSimpleClientset(ns, pod)
-	w := New(client, Config{PostprocessImage: "busybox:latest"})
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "busybox:latest"})
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
 
-	_, err := client.BatchV1().Jobs("test-ns").Get(context.TODO(), "owned-pod-aibom-postprocess", metav1.GetOptions{})
+	_, err := client.BatchV1().Jobs("aibom-system").Get(context.TODO(), ppName("test-ns", "owned-pod"), metav1.GetOptions{})
 	if err == nil {
 		t.Error("postprocess job should not be created for a Job-owned pod via the pod path")
 	}
@@ -1340,7 +1344,7 @@ func TestOnPodEvent_NotInstrumented_Skipped(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(ns, pod)
-	w := New(client, Config{PostprocessImage: "busybox:latest"})
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "busybox:latest"})
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
@@ -1352,14 +1356,15 @@ func TestOnPodEvent_NotInstrumented_Skipped(t *testing.T) {
 }
 
 func newAIBOMPostprocessFixtures(jobName, namespace string) (*batchv1.Job, *corev1.Pod, *corev1.ConfigMap) {
-	ppJob := completedJob(jobName+postprocessSuffix, namespace)
-	ppJob.Labels = map[string]string{LabelPostprocessFor: jobName}
+	name := ppName(namespace, jobName)
+	ppJob := completedJob(name, "aibom-system")
+	ppJob.Labels = map[string]string{LabelPostprocessFor: jobName, LabelPostprocessNamespace: namespace}
 	ppPod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      jobName + postprocessSuffix + "-pod",
-			Namespace: namespace,
+			Name:      name + "-pod",
+			Namespace: "aibom-system",
 			Labels: map[string]string{
-				"batch.kubernetes.io/job-name": jobName + postprocessSuffix,
+				"batch.kubernetes.io/job-name": name,
 			},
 		},
 		Spec: corev1.PodSpec{
@@ -1369,8 +1374,8 @@ func newAIBOMPostprocessFixtures(jobName, namespace string) (*batchv1.Job, *core
 	}
 	dataConfigMap := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      jobName + postprocessSuffix + configMapSuffix,
-			Namespace: namespace,
+			Name:      inputsName(namespace, jobName),
+			Namespace: "aibom-system",
 			Labels:    map[string]string{LabelPostprocessFor: jobName},
 		},
 	}
@@ -1386,16 +1391,16 @@ func TestCollectAIBOM(t *testing.T) {
 	ppJob, ppPod, dataConfigMap := newAIBOMPostprocessFixtures("train-job", "test-ns")
 
 	client := fake.NewSimpleClientset(ns, ppJob, ppPod, dataConfigMap)
-	w := New(client, Config{PostprocessImage: "aibom-postprocess:latest"})
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "aibom-postprocess:latest"})
 	startWatcher(t, w)
 
 	w.onJobEvent(ppJob)
 
-	_, err := client.BatchV1().Jobs("test-ns").Get(context.TODO(), "train-job-aibom-postprocess", metav1.GetOptions{})
+	_, err := client.BatchV1().Jobs("aibom-system").Get(context.TODO(), ppName("test-ns", "train-job"), metav1.GetOptions{})
 	if !apierrors.IsNotFound(err) {
 		t.Errorf("expected postprocess job to be deleted after collection, got err=%v", err)
 	}
-	_, err = client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), "train-job-aibom-postprocess-data", metav1.GetOptions{})
+	_, err = client.CoreV1().ConfigMaps("aibom-system").Get(context.TODO(), inputsName("test-ns", "train-job"), metav1.GetOptions{})
 	if !apierrors.IsNotFound(err) {
 		t.Errorf("expected postprocess data configmap to be deleted after collection, got err=%v", err)
 	}
@@ -1403,17 +1408,17 @@ func TestCollectAIBOM(t *testing.T) {
 	// Guard against double-collection: if a postprocess job somehow still exists
 	// with AnnotationAIBOMCollected already set (e.g. deletion failed), onJobEvent
 	// must not run collectAIBOM a second time.
-	alreadyCollected := completedJob("train-job-aibom-postprocess", "test-ns")
-	alreadyCollected.Labels = map[string]string{LabelPostprocessFor: "train-job"}
+	alreadyCollected := completedJob(ppName("test-ns", "train-job"), "aibom-system")
+	alreadyCollected.Labels = map[string]string{LabelPostprocessFor: "train-job", LabelPostprocessNamespace: "test-ns"}
 	alreadyCollected.Annotations = map[string]string{AnnotationAIBOMCollected: "2026-01-01T00:00:00Z"}
 
 	// Recreate so the second onJobEvent has something to (not) act on.
-	if _, err := client.BatchV1().Jobs("test-ns").Create(context.TODO(), alreadyCollected, metav1.CreateOptions{}); err != nil {
+	if _, err := client.BatchV1().Jobs("aibom-system").Create(context.TODO(), alreadyCollected, metav1.CreateOptions{}); err != nil {
 		t.Fatalf("could not recreate postprocess job: %v", err)
 	}
 	w.onJobEvent(alreadyCollected)
 
-	_, err = client.BatchV1().Jobs("test-ns").Get(context.TODO(), "train-job-aibom-postprocess", metav1.GetOptions{})
+	_, err = client.BatchV1().Jobs("aibom-system").Get(context.TODO(), ppName("test-ns", "train-job"), metav1.GetOptions{})
 	if err != nil {
 		t.Errorf("expected already-collected postprocess job to be left alone, got err=%v", err)
 	}
@@ -1436,7 +1441,7 @@ func TestCollectAIBOM_DeletesWorkloadIdentity(t *testing.T) {
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: identityName, Namespace: "test-ns"}}
 
 	client := fake.NewSimpleClientset(ns, ppJob, ppPod, dataConfigMap, sa, role, roleBinding, secret)
-	w := New(client, Config{PostprocessImage: "aibom-postprocess:latest"})
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "aibom-postprocess:latest"})
 	startWatcher(t, w)
 
 	w.onJobEvent(ppJob)
@@ -1464,26 +1469,26 @@ func TestCollectAIBOM_DebugKeepPostprocessJobs(t *testing.T) {
 	ppJob, ppPod, dataConfigMap := newAIBOMPostprocessFixtures("train-job", "test-ns")
 
 	client := fake.NewSimpleClientset(ns, ppJob, ppPod, dataConfigMap)
-	w := New(client, Config{PostprocessImage: "aibom-postprocess:latest", DebugKeepPostprocessJobs: true})
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "aibom-postprocess:latest", DebugKeepPostprocessJobs: true})
 	startWatcher(t, w)
 
 	w.onJobEvent(ppJob)
 
-	gotJob, err := client.BatchV1().Jobs("test-ns").Get(context.TODO(), "train-job-aibom-postprocess", metav1.GetOptions{})
+	gotJob, err := client.BatchV1().Jobs("aibom-system").Get(context.TODO(), ppName("test-ns", "train-job"), metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("expected postprocess job to survive collection, got err=%v", err)
 	}
 	if gotJob.Annotations[AnnotationAIBOMCollected] == "" {
 		t.Error("expected postprocess job to still be annotated as collected")
 	}
-	if _, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), "train-job-aibom-postprocess-data", metav1.GetOptions{}); err != nil {
+	if _, err := client.CoreV1().ConfigMaps("aibom-system").Get(context.TODO(), inputsName("test-ns", "train-job"), metav1.GetOptions{}); err != nil {
 		t.Errorf("expected postprocess data configmap to survive collection, got err=%v", err)
 	}
 }
 
 func TestJobNameTruncation(t *testing.T) {
 	longName := strings.Repeat("a", 60)
-	result := postprocessJobName(longName)
+	result := ppName("ns", longName)
 
 	if len(result) > maxJobNameLength {
 		t.Errorf("postprocess job name length %d exceeds max %d", len(result), maxJobNameLength)
@@ -1493,14 +1498,14 @@ func TestJobNameTruncation(t *testing.T) {
 		t.Errorf("postprocess job name %q should end with %q", result, postprocessSuffix)
 	}
 
-	shortResult := postprocessJobName("my-job")
-	if shortResult != "my-job-aibom-postprocess" {
-		t.Errorf("postprocess job name = %q, want %q", shortResult, "my-job-aibom-postprocess")
+	shortResult := ppName("ns", "my-job")
+	if !strings.HasPrefix(shortResult, "my-job-") || !strings.HasSuffix(shortResult, postprocessSuffix) {
+		t.Errorf("postprocess job name = %q, want my-job-<hash>%s", shortResult, postprocessSuffix)
 	}
 
 	// Name that would produce a trailing dash after truncation
 	dashName := strings.Repeat("a", 44) + "-"
-	dashResult := postprocessJobName(dashName)
+	dashResult := ppName("ns", dashName)
 	if strings.Contains(dashResult, "--") {
 		t.Errorf("postprocess job name %q should not contain double dash", dashResult)
 	}
@@ -1737,19 +1742,19 @@ func TestCollectAIBOM_KeepsFailedPostprocessJobAndConfigMap(t *testing.T) {
 	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: identityName, Namespace: "test-ns"}}
 
 	client := fake.NewSimpleClientset(ns, ppJob, dataConfigMap, sa)
-	w := New(client, Config{PostprocessImage: "aibom-postprocess:latest"})
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "aibom-postprocess:latest"})
 	startWatcher(t, w)
 
 	w.onJobEvent(ppJob)
 
-	got, err := client.BatchV1().Jobs("test-ns").Get(context.TODO(), "train-job-aibom-postprocess", metav1.GetOptions{})
+	got, err := client.BatchV1().Jobs("aibom-system").Get(context.TODO(), ppName("test-ns", "train-job"), metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("failed postprocess job must be kept for inspection, got err=%v", err)
 	}
 	if got.Annotations[AnnotationAIBOMCollected] == "" {
 		t.Error("kept job must still be marked collected so a resync doesn't collect it again")
 	}
-	if _, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), "train-job-aibom-postprocess-data", metav1.GetOptions{}); err != nil {
+	if _, err := client.CoreV1().ConfigMaps("aibom-system").Get(context.TODO(), inputsName("test-ns", "train-job"), metav1.GetOptions{}); err != nil {
 		t.Errorf("data configmap must be kept so the run can be retried by hand, got err=%v", err)
 	}
 	if _, err := client.CoreV1().ServiceAccounts("test-ns").Get(context.TODO(), identityName, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
@@ -1758,7 +1763,7 @@ func TestCollectAIBOM_KeepsFailedPostprocessJobAndConfigMap(t *testing.T) {
 
 	// A resync must not collect it a second time.
 	w.onJobEvent(got)
-	if _, err := client.BatchV1().Jobs("test-ns").Get(context.TODO(), "train-job-aibom-postprocess", metav1.GetOptions{}); err != nil {
+	if _, err := client.BatchV1().Jobs("aibom-system").Get(context.TODO(), ppName("test-ns", "train-job"), metav1.GetOptions{}); err != nil {
 		t.Errorf("kept job disappeared on resync: %v", err)
 	}
 }
@@ -1774,25 +1779,25 @@ func TestCreatePostprocessJob_SetsTTLAndOwnsConfigMap(t *testing.T) {
 		obj.UID = "pp-uid"
 		return false, obj, nil
 	})
-	w := New(client, Config{PostprocessImage: "aibom-postprocess:latest"})
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "aibom-postprocess:latest"})
 
 	if err := w.createPostprocessJob(context.TODO(), job); err != nil {
 		t.Fatalf("createPostprocessJob: %v", err)
 	}
 
-	pp, err := client.BatchV1().Jobs("test-ns").Get(context.TODO(), "train-job-aibom-postprocess", metav1.GetOptions{})
+	pp, err := client.BatchV1().Jobs("aibom-system").Get(context.TODO(), ppName("test-ns", "train-job"), metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get postprocess job: %v", err)
 	}
 	if pp.Spec.TTLSecondsAfterFinished == nil || *pp.Spec.TTLSecondsAfterFinished != failedPostprocessTTLSeconds {
 		t.Errorf("TTLSecondsAfterFinished = %v, want %d", pp.Spec.TTLSecondsAfterFinished, failedPostprocessTTLSeconds)
 	}
-	cm, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), aibomdata.ConfigMapName("train-job"), metav1.GetOptions{})
+	cm, err := client.CoreV1().ConfigMaps("aibom-system").Get(context.TODO(), inputsName("test-ns", "train-job"), metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get data configmap: %v", err)
 	}
 	if len(cm.OwnerReferences) != 1 || cm.OwnerReferences[0].Kind != "Job" ||
-		cm.OwnerReferences[0].Name != "train-job-aibom-postprocess" || cm.OwnerReferences[0].UID != "pp-uid" {
+		cm.OwnerReferences[0].Name != ppName("test-ns", "train-job") || cm.OwnerReferences[0].UID != "pp-uid" {
 		t.Errorf("data configmap should be owned by the postprocess job, got %+v", cm.OwnerReferences)
 	}
 }
@@ -1804,20 +1809,20 @@ func TestCreatePostprocessJob_ReplacesStaleFailedPostprocessJob(t *testing.T) {
 	stale, staleCM := failedPostprocessFixtures("train-job", "test-ns")
 	staleCM.Data = map[string]string{"annotations.json": "stale"}
 	client := fake.NewSimpleClientset(ns, job, pod, stale, staleCM)
-	w := New(client, Config{PostprocessImage: "aibom-postprocess:latest"})
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "aibom-postprocess:latest"})
 
 	if err := w.createPostprocessJob(context.TODO(), job); err != nil {
 		t.Fatalf("createPostprocessJob: %v", err)
 	}
 
-	pp, err := client.BatchV1().Jobs("test-ns").Get(context.TODO(), "train-job-aibom-postprocess", metav1.GetOptions{})
+	pp, err := client.BatchV1().Jobs("aibom-system").Get(context.TODO(), ppName("test-ns", "train-job"), metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get postprocess job: %v", err)
 	}
 	if jobResult(pp) != "" {
 		t.Errorf("the failed leftover should have been replaced by a fresh job, got conditions %+v", pp.Status.Conditions)
 	}
-	cm, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), aibomdata.ConfigMapName("train-job"), metav1.GetOptions{})
+	cm, err := client.CoreV1().ConfigMaps("aibom-system").Get(context.TODO(), inputsName("test-ns", "train-job"), metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get data configmap: %v", err)
 	}
@@ -1834,13 +1839,13 @@ func TestCreatePostprocessJob_LeavesRunningPostprocessJobAlone(t *testing.T) {
 	running.Status.Conditions = nil
 	running.Annotations = map[string]string{"marker": "original"}
 	client := fake.NewSimpleClientset(ns, job, pod, running)
-	w := New(client, Config{PostprocessImage: "aibom-postprocess:latest"})
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "aibom-postprocess:latest"})
 
 	if err := w.createPostprocessJob(context.TODO(), job); err != nil {
 		t.Fatalf("createPostprocessJob: %v", err)
 	}
 
-	pp, err := client.BatchV1().Jobs("test-ns").Get(context.TODO(), "train-job-aibom-postprocess", metav1.GetOptions{})
+	pp, err := client.BatchV1().Jobs("aibom-system").Get(context.TODO(), ppName("test-ns", "train-job"), metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get postprocess job: %v", err)
 	}
@@ -1860,7 +1865,7 @@ func TestOnJobEvent_OptedOutNamespace_StripsFinalizer(t *testing.T) {
 	job.Finalizers = []string{"other.io/keep", finalizerName}
 
 	client := fake.NewSimpleClientset(disabledNamespace("disabled-ns"), job)
-	w := New(client, Config{PostprocessImage: "busybox:latest"})
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "busybox:latest"})
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -1875,7 +1880,7 @@ func TestOnJobEvent_OptedOutNamespace_StripsFinalizer(t *testing.T) {
 	if len(got.Finalizers) != 1 || got.Finalizers[0] != "other.io/keep" {
 		t.Errorf("other finalizers must be preserved, got %v", got.Finalizers)
 	}
-	if _, err := client.BatchV1().Jobs("disabled-ns").Get(context.TODO(), "train-job-aibom-postprocess", metav1.GetOptions{}); err == nil {
+	if _, err := client.BatchV1().Jobs("aibom-system").Get(context.TODO(), ppName("disabled-ns", "train-job"), metav1.GetOptions{}); err == nil {
 		t.Error("no postprocess job should be created for an opted-out namespace")
 	}
 }
@@ -1893,7 +1898,7 @@ func TestOnPodEvent_OptedOutNamespace_StripsFinalizer(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(disabledNamespace("disabled-ns"), pod)
-	w := New(client, Config{PostprocessImage: "busybox:latest"})
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "busybox:latest"})
 	startWatcher(t, w)
 
 	w.onPodEvent(pod)
@@ -1915,7 +1920,7 @@ func TestOnJobEvent_UnknownNamespace_KeepsFinalizer(t *testing.T) {
 	job.Finalizers = []string{finalizerName}
 
 	client := fake.NewSimpleClientset(job)
-	w := New(client, Config{PostprocessImage: "busybox:latest"})
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "busybox:latest"})
 	startWatcher(t, w)
 
 	w.onJobEvent(job)
@@ -2087,5 +2092,121 @@ func TestBuildPostprocessInputs_RankZeroNewestAttemptFirst(t *testing.T) {
 
 	if want := []string{"job-0-new", "job-0-old", "job-1-a"}; !reflect.DeepEqual(datasets, want) {
 		t.Errorf("dataset merge order = %v, want %v", datasets, want)
+	}
+}
+
+func ppName(namespace, trigger string) string {
+	return aibomdata.PostprocessJobName(namespace, trigger)
+}
+
+func inputsName(namespace, trigger string) string {
+	return aibomdata.PostprocessInputsConfigMapName(ppName(namespace, trigger))
+}
+
+// Postprocess Jobs live in the webhook's namespace, so the same workload name
+// in two namespaces, or names that differ only past the truncation point,
+// must not share a Job (#130).
+func TestPostprocessJobName_DistinguishesNamespacesAndLongNames(t *testing.T) {
+	if ppName("team-a", "train") == ppName("team-b", "train") {
+		t.Error("same workload name in two namespaces produced one postprocess Job name")
+	}
+	long := strings.Repeat("a", 70)
+	if ppName("ns", long+"1") == ppName("ns", long+"2") {
+		t.Error("long names differing past the truncation point produced one postprocess Job name")
+	}
+}
+
+func TestCreatePostprocessJob_GeneratesSigningKeyInOwnNamespace(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	job := completedJob("train-job", "test-ns")
+	client := fake.NewSimpleClientset(ns, job, instrumentedPod("train-job", "test-ns"))
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "aibom-postprocess:latest"})
+
+	if err := w.createPostprocessJob(context.TODO(), job); err != nil {
+		t.Fatalf("createPostprocessJob: %v", err)
+	}
+
+	name := aibomdata.CompiledSigningKeySecretName("test-ns")
+	secret, err := client.CoreV1().Secrets("aibom-system").Get(context.TODO(), name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("signing key not created in the webhook namespace: %v", err)
+	}
+	block, _ := pem.Decode(secret.Data[aibomdata.CompiledSigningKeyDataKey])
+	if block == nil {
+		t.Fatal("signing key is not PEM")
+	}
+	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		t.Fatalf("signing key is not PKCS8: %v", err)
+	}
+	if _, ok := key.(ed25519.PrivateKey); !ok {
+		t.Errorf("signing key is %T, want ed25519.PrivateKey", key)
+	}
+	if _, err := client.CoreV1().Secrets("test-ns").Get(context.TODO(), name, metav1.GetOptions{}); err == nil {
+		t.Error("signing key must not exist in the workload namespace")
+	}
+
+	// A second run reuses the key.
+	if err := w.ensureCompiledSigningKey(context.TODO(), name); err != nil {
+		t.Fatal(err)
+	}
+	again, _ := client.CoreV1().Secrets("aibom-system").Get(context.TODO(), name, metav1.GetOptions{})
+	if !bytes.Equal(again.Data[aibomdata.CompiledSigningKeyDataKey], secret.Data[aibomdata.CompiledSigningKeyDataKey]) {
+		t.Error("signing key was regenerated")
+	}
+}
+
+func TestCollectAIBOM_DeletesWorkloadDataConfigMap(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	ppJob, ppPod, inputs := newAIBOMPostprocessFixtures("train-job", "test-ns")
+	workloadCM := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: aibomdata.ConfigMapName("train-job"), Namespace: "test-ns"}}
+	client := fake.NewSimpleClientset(ns, ppJob, ppPod, inputs, workloadCM)
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "aibom-postprocess:latest"})
+	startWatcher(t, w)
+
+	w.onJobEvent(ppJob)
+
+	if _, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), workloadCM.Name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("workload data configmap should be deleted after collection, got err=%v", err)
+	}
+}
+
+func TestCollectAIBOM_FailedJobPostsEventInWorkloadNamespace(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	ppJob, inputs := failedPostprocessFixtures("train-job", "test-ns")
+	client := fake.NewSimpleClientset(ns, ppJob, inputs)
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "aibom-postprocess:latest"})
+	startWatcher(t, w)
+
+	w.onJobEvent(ppJob)
+
+	events, err := client.CoreV1().Events("test-ns").List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events.Items) != 1 || events.Items[0].Reason != "AIBOMPostprocessFailed" || events.Items[0].InvolvedObject.Name != "train-job" {
+		t.Errorf("want one AIBOMPostprocessFailed event for train-job in test-ns, got %+v", events.Items)
+	}
+}
+
+// A workload Job in an opted-in namespace that claims the label is never
+// treated as one of our postprocess Jobs, even if it carries the namespace
+// label too: only Jobs in the webhook's own namespace are.
+func TestOnJobEvent_IgnoresPostprocessLabelOutsideOwnNamespace(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	spoof := completedJob("spoof", "test-ns")
+	spoof.Labels = map[string]string{LabelPostprocessFor: "victim", LabelPostprocessNamespace: "test-ns"}
+	client := fake.NewSimpleClientset(ns, spoof)
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "aibom-postprocess:latest"})
+	startWatcher(t, w)
+
+	w.onJobEvent(spoof)
+
+	got, err := client.BatchV1().Jobs("test-ns").Get(context.TODO(), "spoof", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("spoofing job must not be deleted: %v", err)
+	}
+	if got.Annotations[AnnotationAIBOMCollected] != "" {
+		t.Error("spoofing job must not be collected")
 	}
 }
