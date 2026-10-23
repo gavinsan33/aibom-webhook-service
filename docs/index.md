@@ -44,3 +44,4 @@ The webhook always fails open (`failurePolicy: Ignore`): if the service is down,
 - [Troubleshooting](user-guide/troubleshooting.md): workloads running uninstrumented.
 - [Detected Fields](CAPABILITIES.md): every field the pipeline can populate and how.
 - [AIBOM Schema](reference/schema.md): how completed AIBOMs are stored.
+- [Signing Keys](reference/signing.md): the per-namespace Secrets, rotation effects, and the GitOps caveat.
