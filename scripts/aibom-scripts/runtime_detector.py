@@ -103,8 +103,12 @@ _dataset_registry = weakref.WeakKeyDictionary()
 # each of those returns a *new* Dataset object, but builder_name/config_name
 # survive the transform, so this catches it as the same underlying dataset.
 # The split is part of the key, so a train DataLoader isn't attached to a
-# later test load (#114). A key two different loads share maps to None and
-# matches nothing.
+# later test load (#114). So is the builder's cache directory, whose name
+# hashes the data_files and revision and which transforms keep writing into,
+# so the same builder/config/split loaded from different files stays apart.
+# (info.download_checksums would be the obvious choice, but it's None for
+# local files.) A key two different loads still share -- e.g. an in-memory
+# dataset with no cache files -- maps to None and matches nothing.
 _hf_dataset_key_registry = {}
 
 
@@ -114,7 +118,11 @@ def _hf_dataset_key(dataset):
     if not builder_name:
         return None
     split = getattr(dataset, "split", None)
-    return (builder_name, getattr(info, "config_name", None), str(split) if split is not None else None)
+    cache_files = getattr(dataset, "cache_files", None)
+    cache_dir = None
+    if isinstance(cache_files, list) and cache_files and isinstance(cache_files[0], dict):
+        cache_dir = os.path.dirname(cache_files[0].get("filename") or "") or None
+    return (builder_name, getattr(info, "config_name", None), str(split) if split is not None else None, cache_dir)
 
 
 def _register_hf_dataset(dataset, entry):

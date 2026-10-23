@@ -342,3 +342,20 @@ def test_an_application_sigterm_handler_is_left_alone(tmp_path):
     # The app exits normally through its own handler, so atexit flushes.
     assert proc.returncode == 0
     assert json.loads(out.read_text())["runtime_info"]["lora_rank"] == 8
+
+
+@pytest.mark.parametrize(
+    "field, a, b",
+    [
+        ("config_name", "en", "de"),
+        ("revision", "v1", "v2"),
+        ("data_files", "a.json", "b.json"),
+        ("data_dir", "/d/a", "/d/b"),
+        ("root", "/r/a", "/r/b"),
+        ("path", "/p/a", "/p/b"),
+    ],
+)
+def test_merge_keeps_entries_apart_per_identity_field(field, a, b):
+    base = {"dataset_name": "d", "source": "s"}
+    merged = rd._merge_output({}, [{**base, field: a}, {**base, field: b}], {})
+    assert len(merged["datasets"]) == 2

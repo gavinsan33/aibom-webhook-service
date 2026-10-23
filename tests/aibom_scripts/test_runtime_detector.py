@@ -225,8 +225,51 @@ def test_dataloader_attaches_to_its_own_split(fake_datasets_module, fake_torch_m
     assert [(e["split"], e["batch_size"]) for e in rd.get_detected_datasets()] == [("train", 8), ("test", 32)]
 
 
+def test_same_builder_different_files_each_keep_their_loader(fake_datasets_module, fake_torch_module):
+    """Same builder/config/split but different source files: the source
+    files are part of the key, so each transformed dataset finds its own
+    entry instead of both being marked ambiguous."""
+    rd.install_hooks()
+    import datasets
+    import torch.utils.data as tud
+
+    a = datasets.load_dataset("json", data_files="a.json", sources=["a.json"])
+    b = datasets.load_dataset("json", data_files="b.json", sources=["b.json"])
+    tud.DataLoader(a.map(lambda x: x), batch_size=4)
+    tud.DataLoader(b.map(lambda x: x), batch_size=8)
+
+    entries = rd.get_detected_datasets()
+    assert [e["batch_size"] for e in entries] == [4, 8]
+
+
+@pytest.mark.parametrize(
+    "first, second",
+    [
+        ({"name": "a"}, {"name": "b"}),
+        ({"split": "train"}, {"split": "test"}),
+        ({"sources": ["x"]}, {"sources": ["y"]}),
+        ({"sources": ["x"]}, {}),
+    ],
+    ids=["config", "split", "sources", "sources-vs-none"],
+)
+def test_hf_dataset_key_differs_per_identity_field(fake_datasets_module, first, second):
+    import datasets
+
+    k1 = rd._hf_dataset_key(datasets.load_dataset("d", **first))
+    k2 = rd._hf_dataset_key(datasets.load_dataset("d", **second))
+    assert k1 != k2
+
+
+def test_hf_dataset_key_survives_transform(fake_datasets_module):
+    import datasets
+
+    ds = datasets.load_dataset("d", name="c", split="train", sources=["x", "y"])
+    assert rd._hf_dataset_key(ds.map(lambda x: x)) == rd._hf_dataset_key(ds)
+
+
 def test_ambiguous_key_records_loader_separately(fake_datasets_module, fake_torch_module):
-    """Two loads with the same key: the loader can't tell which it wraps."""
+    """Two loads with an identical key (no distinguishing source info): the
+    loader can't tell which it wraps."""
     rd.install_hooks()
     import datasets
     import torch.utils.data as tud
