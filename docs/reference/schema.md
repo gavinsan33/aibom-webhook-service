@@ -53,7 +53,7 @@ oc get aibomtel <series-name> -n <namespace> -o jsonpath='{.spec.seriesJson}'
 
 It is owned by the AIBOM, so deleting the AIBOM deletes it. Like the AIBOM's, its `spec` can't be changed after creation. Users who can read AIBOMs can read these too, through the `aibom-view` role the webhook chart adds to `view`, `edit` and `admin`.
 
-**Contents.** `spec.seriesJson` is a JSON string, kept as a string so it can be hashed exactly as stored. It holds one entry per metric that returned data, with the same metric names as `resource_utilization.metrics`, plus the serving-engine metrics under `inference.performance.metrics` for pods with a detected serving engine (vLLM/llm-d, TGI, SGLang, LMDeploy — see [Inference serving metrics](../CAPABILITIES.md#inference-serving-metrics-per-engine)). Each entry has:
+**Contents.** `spec.seriesJson` is a JSON string, kept as a string so it can be hashed exactly as stored. It holds one entry per metric that returned data, with the same metric names as `resource_utilization.metrics`, plus the serving-engine metrics under `inference.performance.metrics` for pods with a detected serving engine (vLLM, TGI, SGLang, LMDeploy — see [Inference serving metrics](../CAPABILITIES.md#inference-serving-metrics-per-engine)). Each entry has:
 
 - `aggregate`: the line for the whole run, summed across pods and containers, or averaged for utilization, KV-cache usage and latency.
 - `aggregate_max`: for gauge metrics, the peak within each point's interval, so a spike shorter than the step still shows.
