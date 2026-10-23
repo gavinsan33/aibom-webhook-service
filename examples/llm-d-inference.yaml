@@ -1,0 +1,243 @@
+# llm-d decode pod, laid out the way llm-d's own charts lay it out
+# (llm-d-modelservice's decode Deployment with routing.proxy enabled):
+#
+#   - the routing sidecar is a native sidecar (an init container with
+#     restartPolicy: Always) listening on 8000, the port the Service targets;
+#   - vLLM moves to 8200 behind it (routing.proxy.targetPort) and declares that
+#     port, which is what the aibom-vllm-metrics PodMonitor scrapes;
+#   - the pod carries llm-d.ai/role: decode, which ends up as
+#     inference.serving_role in the AIBOM.
+#
+# The sidecar proxies every path, /metrics included, through to vLLM, so the
+# PodMonitor drops init-container targets to avoid scraping vLLM twice (see
+# charts/aibom-workload-namespace/templates/monitoring.yaml). Needs
+# vllmMetrics.enabled on the namespace chart for inference.performance.
+#
+# With no prefill pod and no gateway setting the prefill header, the sidecar
+# forwards each request straight to the local vLLM, so this runs without
+# llm-d's scheduler, gateway or NIXL setup. llm-d-cuda's ENTRYPOINT is NVIDIA's
+# generic wrapper, not vLLM, so the command is spelled out (as the chart's
+# vllmServe mode does) and detection goes through `vllm serve`.
+#
+# The pod is owned by a ReplicaSet, so it's instrumented through its GPU
+# request and postprocessed on deletion (aibom.io/log-extraction-pod). The
+# client Job runs a guidellm benchmark through the sidecar, then deletes the
+# Deployment, which deletes the pod and triggers postprocessing.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aibom-llm-d-decode
+  namespace: project-gavin-test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: aibom-llm-d-decode
+  template:
+    metadata:
+      labels:
+        app: aibom-llm-d-decode
+        llm-d.ai/inference-serving: "true"
+        llm-d.ai/role: decode
+      annotations:
+        aibom.io/experiment-intent: inference
+        aibom.io/experiment-name: llm-d-decode-benchmark
+    spec:
+      tolerations:
+        - operator: Exists
+      initContainers:
+        - name: routing-proxy
+          image: ghcr.io/llm-d/llm-d-router-disagg-sidecar:v1.0.0
+          args:
+            - --port=8000
+            - --model-server-port=8200
+            - --kv-connector=nixlv2
+            - --secure-serving=false
+          ports:
+            - name: sidecar
+              containerPort: 8000
+              protocol: TCP
+          restartPolicy: Always
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+      containers:
+        - name: vllm
+          image: ghcr.io/llm-d/llm-d-cuda:v0.9.0
+          command: ["vllm", "serve"]
+          args:
+            - Qwen/Qwen2.5-0.5B-Instruct
+            - --port=8200
+            - --max-model-len=4096
+            - --gpu-memory-utilization=0.6
+          env:
+            - name: HOME
+              value: /tmp
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: HF_TOKEN
+                  optional: true
+          ports:
+            - name: modelserver
+              containerPort: 8200
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /v1/models
+              port: modelserver
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            requests:
+              nvidia.com/gpu: "1"
+            limits:
+              nvidia.com/gpu: "1"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aibom-llm-d-decode
+  namespace: project-gavin-test
+spec:
+  selector:
+    app: aibom-llm-d-decode
+  ports:
+    - name: http
+      port: 8000
+      targetPort: sidecar
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aibom-llm-d-client
+  namespace: project-gavin-test
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: aibom-llm-d-client
+  namespace: project-gavin-test
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: ["aibom-llm-d-decode"]
+    verbs: ["delete"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    resourceNames: ["aibom-llm-d-client"]
+    verbs: ["delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    resourceNames: ["aibom-llm-d-client"]
+    verbs: ["delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: aibom-llm-d-client
+  namespace: project-gavin-test
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: aibom-llm-d-client
+subjects:
+  - kind: ServiceAccount
+    name: aibom-llm-d-client
+    namespace: project-gavin-test
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: aibom-llm-d-client
+  namespace: project-gavin-test
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 900
+  template:
+    spec:
+      restartPolicy: Never
+      serviceAccountName: aibom-llm-d-client
+      tolerations:
+        - operator: Exists
+      initContainers:
+        # Through the sidecar, so this also checks it proxies to vLLM.
+        - name: wait-for-server
+          image: docker.io/curlimages/curl:8.11.0
+          command:
+            - sh
+            - -c
+            - |
+              until curl -sf http://aibom-llm-d-decode.project-gavin-test.svc.cluster.local:8000/v1/models; do
+                echo "waiting for server..."
+                sleep 5
+              done
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+        - name: benchmark
+          image: ghcr.io/vllm-project/guidellm@sha256:e3ad2371bfa8e42f2c3d1251b62d0d9c9706c27ae2143c8c048eb5fc6aebb558
+          imagePullPolicy: Always
+          command:
+            - guidellm
+            - run
+            - --backend=kind=openai_http,target=http://aibom-llm-d-decode.project-gavin-test.svc.cluster.local:8000
+            - --data=kind=synthetic_text,prompt_tokens=256,output_tokens=128
+            - --profile=kind=sweep
+            - --constraint=kind=max_duration,seconds=30
+            - --output=kind=json
+          env:
+            - name: HOME
+              value: /tmp
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "1"
+              memory: "2Gi"
+      containers:
+        - name: delete-deployment
+          image: docker.io/curlimages/curl:8.11.0
+          command:
+            - sh
+            - -c
+            - |
+              TOKEN=/var/run/secrets/kubernetes.io/serviceaccount/token
+              CACERT=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+              NS=project-gavin-test
+              curl -sf -X DELETE --cacert "$CACERT" \
+                -H "Authorization: Bearer $(cat $TOKEN)" \
+                "https://kubernetes.default.svc/apis/apps/v1/namespaces/$NS/deployments/aibom-llm-d-decode"
+              # Then this Job's own RBAC, best-effort: deleting the RoleBinding
+              # revokes the very token making these calls, so whatever comes
+              # after it gets a 403. Anything left over is removed by
+              # examples/cleanup.sh.
+              curl -sf -X DELETE --cacert "$CACERT" \
+                -H "Authorization: Bearer $(cat $TOKEN)" \
+                "https://kubernetes.default.svc/apis/rbac.authorization.k8s.io/v1/namespaces/$NS/rolebindings/aibom-llm-d-client" || true
+              curl -sf -X DELETE --cacert "$CACERT" \
+                -H "Authorization: Bearer $(cat $TOKEN)" \
+                "https://kubernetes.default.svc/apis/rbac.authorization.k8s.io/v1/namespaces/$NS/roles/aibom-llm-d-client" || true
+              curl -sf -X DELETE --cacert "$CACERT" \
+                -H "Authorization: Bearer $(cat $TOKEN)" \
+                "https://kubernetes.default.svc/api/v1/namespaces/$NS/serviceaccounts/aibom-llm-d-client" || true
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"

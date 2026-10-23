@@ -36,6 +36,17 @@ oc apply -f examples/lmdeploy-inference.yaml
 oc logs -n project-gavin-test job/aibom-tgi-benchmark-server-0-aibom-postprocess
 ```
 
+## Example: llm-d Decode Pod
+
+The `examples/llm-d-inference.yaml` file runs a single llm-d decode pod laid out the way llm-d's charts lay it out: the routing sidecar as a native sidecar on port 8000 (where the Service points), vLLM behind it on 8200, and the `llm-d.ai/role: decode` label. With no prefill pod or gateway, the sidecar forwards every request to the local vLLM, so no scheduler or NIXL setup is needed. The pod is owned by a ReplicaSet, so it's instrumented through its GPU request and postprocessed when the client Job deletes the Deployment. The AIBOM reports `serving_engine: vllm` and `inference.serving_role: decode`, and `inference.performance` comes from the PodMonitor's 8200 endpoint (the sidecar's 8000 is skipped, since it proxies `/metrics` to the same vLLM).
+
+```bash
+oc apply -f examples/llm-d-inference.yaml
+
+# The postprocess Job runs in the webhook namespace once the pod is deleted
+oc get aibom -n project-gavin-test
+```
+
 ## Example: vLLM via RHOAI/KServe Model Serving
 
 The `examples/vllm-inference-rhoai.yaml` file deploys the same model as a KServe `InferenceService` — the route Red Hat OpenShift AI's Model Serving UI uses — instead of a raw JobSet. It uses a fully custom predictor container (`spec.predictor.containers`) so vLLM pulls the model directly from Hugging Face Hub, avoiding any dependency on a pre-provisioned S3/PVC model store.
