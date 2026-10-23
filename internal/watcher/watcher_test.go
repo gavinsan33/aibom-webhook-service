@@ -1696,6 +1696,7 @@ type capturedContainer struct {
 	RestartCount         int32  `json:"restart_count"`
 	LastTerminatedReason string `json:"last_terminated_reason"`
 	LastExitCode         *int32 `json:"last_exit_code"`
+	ServingRole          string `json:"serving_role"`
 }
 
 func capturedContainers(t *testing.T, w *Watcher, pods []corev1.Pod, jobResults map[string]string) []capturedContainer {
@@ -1746,7 +1747,7 @@ func TestBuildPostprocessInputs_NoRestartHistoryWhenNeverRestarted(t *testing.T)
 
 	_, _, containersJSON, _ := w.buildPostprocessInputs(context.Background(), "ns", "cm-name", []corev1.Pod{*pod}, nil)
 
-	for _, key := range []string{"restart_count", "last_terminated_reason", "last_exit_code", "job_result"} {
+	for _, key := range []string{"restart_count", "last_terminated_reason", "last_exit_code", "job_result", "serving_role"} {
 		if strings.Contains(containersJSON, key) {
 			t.Errorf("%s should be omitted, got: %s", key, containersJSON)
 		}
@@ -1773,6 +1774,19 @@ func TestBuildPostprocessInputs_TagsEachPodWithItsJobsResult(t *testing.T) {
 		if c.JobResult != want[c.PodName] {
 			t.Errorf("pod %s: job_result = %q, want %q", c.PodName, c.JobResult, want[c.PodName])
 		}
+	}
+}
+
+func TestBuildPostprocessInputs_CapturesLLMDRole(t *testing.T) {
+	decode := instrumentedPod("x", "ns")
+	decode.Name = "ms-decode-0"
+	decode.Labels = map[string]string{LabelInstrumented: "true", "llm-d.ai/role": "decode"}
+	w := &Watcher{clientset: fake.NewSimpleClientset()}
+
+	got := capturedContainers(t, w, []corev1.Pod{*decode}, nil)
+
+	if len(got) != 1 || got[0].ServingRole != "decode" {
+		t.Errorf("serving_role not captured: %+v", got)
 	}
 }
 

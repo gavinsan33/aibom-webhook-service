@@ -163,7 +163,7 @@ Also surfaced as `inference.served_model_name`, `max_num_seqs`, `seed`, `trust_r
 | SGLang | `python -m sglang.launch_server ...` | `--model-path` |
 | LMDeploy | `lmdeploy serve api_server <model> ...` | positional |
 
-**llm-d** runs vLLM as its engine, so its model-server pods report `serving_engine: vllm`: by command (`vllm serve`, which its CUDA image needs), or by image name for args-only pods on its `llm-d-xpu`/`llm-d-cpu`/`llm-d-rocm` images.
+**llm-d** runs vLLM as its engine, so its model-server pods report `serving_engine: vllm`: by command (`vllm serve`, which its CUDA image needs), or by image name for args-only pods on its `llm-d-xpu`/`llm-d-cpu`/`llm-d-rocm` images. A pod's `llm-d.ai/role` label (`prefill`/`decode`/`encode`) is recorded as `execution_metadata.pods[].serving_role` and `inference.serving_role`.
 
 **Flag coverage is not uniform across engines.** vLLM is the reference and parses the full flag set below; the others map only the fields that have a clear per-engine equivalent. Engine-specific tuning flags beyond these are intentionally not mapped — the model name is the field that matters most.
 
