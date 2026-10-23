@@ -1626,6 +1626,52 @@ func TestBuildPostprocessInputs_CapturesResourceLimits(t *testing.T) {
 	}
 }
 
+func TestBuildPostprocessInputs_CapturesGPUClaim(t *testing.T) {
+	// instrumentedPod sets an nvidia.com/gpu limit of 1. A second container with
+	// its own claim must sum, since postprocess.py sums gpu_limit per pod.
+	pod := instrumentedPod("gpu-job", "ns")
+	pod.Spec.Containers = append(pod.Spec.Containers, corev1.Container{
+		Name:  "sidecar",
+		Image: "busybox",
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("2")},
+		},
+	})
+	w := &Watcher{clientset: fake.NewSimpleClientset()}
+
+	_, _, containersJSON, _ := w.buildPostprocessInputs(context.Background(), "ns", "cm-name", []corev1.Pod{*pod}, nil)
+
+	var containers []struct {
+		Name     string `json:"name"`
+		GPULimit *int64 `json:"gpu_limit"`
+	}
+	if err := json.Unmarshal([]byte(containersJSON), &containers); err != nil {
+		t.Fatalf("unmarshal containers.json: %v", err)
+	}
+	byName := map[string]*int64{}
+	for _, c := range containers {
+		byName[c.Name] = c.GPULimit
+	}
+	if byName["training"] == nil || *byName["training"] != 1 {
+		t.Errorf("training gpu_limit = %v, want 1", byName["training"])
+	}
+	if byName["sidecar"] == nil || *byName["sidecar"] != 2 {
+		t.Errorf("sidecar gpu_limit = %v, want 2 (from requests)", byName["sidecar"])
+	}
+}
+
+func TestBuildPostprocessInputs_NoGPUClaimOmitsGPULimit(t *testing.T) {
+	pod := instrumentedPod("cpu-job", "ns")
+	pod.Spec.Containers[0].Resources = corev1.ResourceRequirements{} // drop the GPU claim
+	w := &Watcher{clientset: fake.NewSimpleClientset()}
+
+	_, _, containersJSON, _ := w.buildPostprocessInputs(context.Background(), "ns", "cm-name", []corev1.Pod{*pod}, nil)
+
+	if strings.Contains(containersJSON, "gpu_limit") {
+		t.Errorf("expected no gpu_limit field when the container claims no GPU, got: %s", containersJSON)
+	}
+}
+
 func TestBuildPostprocessInputs_NoResourceLimitsOmitsLimitFields(t *testing.T) {
 	// instrumentedPod only sets an nvidia.com/gpu limit -- no memory/cpu limit.
 	pod := instrumentedPod("no-limits-job", "ns")
