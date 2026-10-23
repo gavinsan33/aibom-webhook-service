@@ -180,6 +180,16 @@
         }
       }
     },
+    "cacheImages": {
+      "type": "object",
+      "description": "Mirror injected images into the cluster's internal registry via ImageStreams (OpenShift only).",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Cache the injected images in the internal registry instead of pulling from Quay on every node."
+        }
+      }
+    },
     "watcher": {
       "type": "object",
       "description": "Job and pod completion watcher.",
