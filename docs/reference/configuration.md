@@ -14,10 +14,10 @@ Set chart values with `--set key=value` or `-f values.yaml` on `helm upgrade --i
 
 | Value | Default | Description |
 |-------|---------|-------------|
-| `image.webhook.repository` / `.tag` | `quay.io/gsanders/aibom-webhook-service` / `latest` | The webhook and watcher image. |
-| `image.postprocess.repository` / `.tag` | `quay.io/gsanders/aibom-postprocess` / `latest` | The image the postprocess Job runs. |
+| `image.webhook.repository` / `.tag` | `quay.io/project-aibom/aibom-webhook-service` / `""` | The webhook and watcher image. An empty tag means the chart's `appVersion`: the release version in a published chart, `latest` from a checkout. |
+| `image.postprocess.repository` / `.tag` | `quay.io/project-aibom/aibom-postprocess` / `""` | The image the postprocess Job runs. The tag defaults the same way. |
 | `image.discovery.repository` / `.tag` | `""` / `""` | The `aibom-discovery` init container's image. It needs only `python3` and `bash`. `nvidia-smi` is injected at runtime by the NVIDIA Container Toolkit on GPU pods. When empty, it is OpenShift AI's `image-registry.openshift-image-registry.svc:5000/redhat-ods-applications/runtime-pytorch:pytorch` where the OpenShift AI API (`datasciencecluster.opendatahub.io/v1`) exists, and `pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime` otherwise. Setting `repository` requires `tag`. |
-| `image.pullPolicy` | `Always` | Pull policy for the webhook and postprocess images. |
+| `image.pullPolicy` | `""` | Pull policy for the webhook image. Empty leaves it to Kubernetes: `IfNotPresent` for a release tag, `Always` for `latest`. |
 
 ### Webhook and admission
 
@@ -64,11 +64,11 @@ The webhook binary takes these flags. The chart sets them from the values above,
 | `--tls-cert` | `/certs/tls.crt` | Path to the TLS certificate |
 | `--tls-key` | `/certs/tls.key` | Path to the TLS private key |
 | `--port` | `8443` | Server port |
-| `--discovery-image` | `pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime` | Image for the discovery init container. The chart always sets it from `image.discovery`. |
+| `--discovery-image` | `pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime`, pinned by digest | Image for the discovery init container. The chart always sets it from `image.discovery`. |
 | `--dataset-detection` | `true` | Inject dataset detection hooks into application containers |
 | `--enable-watcher` | `true` | Start the Job completion watcher (`watcher.enabled`) |
 | `--postprocess-image` | `busybox:latest` | Image for postprocess Jobs. A placeholder; the chart always overrides it with `image.postprocess`. |
-| `--dataset-sidecar-image` | `python:3.12-slim` | Image for the dataset-signing sidecar container |
+| `--dataset-sidecar-image` | `python:3.12-slim`, pinned by digest | Image for the dataset-signing sidecar container |
 | `--trusted-watcher-identity` | empty | The webhook's own ServiceAccount username, used to check that a Job claiming to be a postprocess Job was created by the watcher. The chart sets it. When empty the check is off and a warning is logged. |
 | `--trusted-job-controller-identity` | empty | See `webhook.trustedJobControllerIdentity`. |
 | `--prometheus-url` | `https://thanos-querier.openshift-monitoring.svc:9091` | See `prometheus.url`. |

@@ -32,7 +32,7 @@ spec:
   output:
     to:
       kind: ImageStreamTag
-      name: aibom-webhook-service:{{ .Values.image.webhook.tag }}
+      name: aibom-webhook-service:{{ include "aibom-webhook.webhookTag" . }}
   triggers:
     - type: ConfigChange
 ---
@@ -60,7 +60,7 @@ spec:
   output:
     to:
       kind: ImageStreamTag
-      name: aibom-postprocess:{{ .Values.image.postprocess.tag }}
+      name: aibom-postprocess:{{ include "aibom-webhook.postprocessTag" . }}
   triggers:
     - type: ConfigChange
 {{- end }}
