@@ -36,8 +36,6 @@ oc apply -f examples/lmdeploy-inference.yaml
 oc logs -n project-gavin-test job/aibom-tgi-benchmark-server-0-aibom-postprocess
 ```
 
-**llm-d** needs no separate example: its model-server pods run vLLM as the actual engine, on vLLM's own port 8000 with vLLM's `vllm:` metrics, so an llm-d pod is detected and has its telemetry collected exactly as vLLM — either through its `vllm serve` command or, for an args-only pod, by its image name (`postprocess.py`'s `_VLLM_IMAGE_RE` matches `llm-d` image paths). The `examples/vllm-inference.yaml` flow applies unchanged.
-
 ## Example: vLLM via RHOAI/KServe Model Serving
 
 The `examples/vllm-inference-rhoai.yaml` file deploys the same model as a KServe `InferenceService` — the route Red Hat OpenShift AI's Model Serving UI uses — instead of a raw JobSet. It uses a fully custom predictor container (`spec.predictor.containers`) so vLLM pulls the model directly from Hugging Face Hub, avoiding any dependency on a pre-provisioned S3/PVC model store.

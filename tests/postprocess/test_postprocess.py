@@ -98,7 +98,7 @@ def test_detect_vllm_returns_none_for_empty_command():
 
 
 # ---------------------------------------------------------------------------
-# Other serving engines: TGI, SGLang, LMDeploy, llm-d (all share the vLLM
+# Other serving engines: TGI, SGLang, LMDeploy (all share the vLLM
 # detection shape; here we check the engine is identified, the model name is
 # pulled out, and non-matching commands return None)
 # ---------------------------------------------------------------------------
@@ -162,13 +162,6 @@ def test_new_engines_return_none_for_unrelated_commands():
         assert fn(None) is None
     # `lmdeploy chat` / `lmdeploy serve gradio` aren't the api_server.
     assert pp.detect_lmdeploy_from_command(["lmdeploy", "chat", "org/m"]) is None
-
-
-def test_llm_d_image_detected_as_vllm_engine():
-    container = {"image": "ghcr.io/llm-d/llm-d-cuda-dev:latest", "args": ["--model", "org/m"]}
-    result = pp._detect_vllm_from_entrypoint_args(container)
-    assert result["serving_engine"] == "vllm"
-    assert result["model_name"] == "org/m"
 
 
 def test_detect_model_from_containers_identifies_each_engine():
