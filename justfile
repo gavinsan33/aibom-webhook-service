@@ -684,3 +684,28 @@ chart-verify *args:
         echo "$chart: $out/$chart-$version-report.yaml"
         grep -B2 'outcome: FAIL' "$out/$chart-$version-report.yaml" | grep 'check:' | sed 's/^ */  failed: /' || true
     done
+
+# Regenerates both charts' community reports (via chart-verify) and writes them
+# into the catalog submission layout, catalog/community/project-aibom/<chart>/<version>/report.yaml.
+# Run this whenever a chart changes before opening a catalog PR, so the committed
+# report's chart digest matches the chart the upstream CI will re-verify.
+# Usage: just catalog-reports [--version=X.Y.Z]
+[group('charts')]
+catalog-reports *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    version="$(grep '^version:' charts/aibom-webhook/Chart.yaml | awk '{print $2}')"
+    for arg in {{ args }}; do
+        case "$arg" in
+            --version=*) version="${arg#--version=}" ;;
+            *) echo "error: unknown argument '$arg' (expected --version=X.Y.Z)" >&2; exit 1 ;;
+        esac
+    done
+    tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+    {{ just_executable() }} chart-verify --version="$version" --out="$tmp"
+    for chart in aibom-webhook aibom-workload-namespace; do
+        dest="catalog/community/project-aibom/$chart/$version"
+        mkdir -p "$dest"
+        cp "$tmp/$chart-$version-report.yaml" "$dest/report.yaml"
+        echo "wrote $dest/report.yaml"
+    done
