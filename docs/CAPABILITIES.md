@@ -163,6 +163,8 @@ Also surfaced as `inference.served_model_name`, `max_num_seqs`, `seed`, `trust_r
 | SGLang | `python -m sglang.launch_server ...` | `--model-path` |
 | LMDeploy | `lmdeploy serve api_server <model> ...` | positional |
 
+**llm-d** runs vLLM as its engine, so its model-server pods report `serving_engine: vllm`: by command (`vllm serve`, which its CUDA image needs), or by image name for args-only pods on its `llm-d-xpu`/`llm-d-cpu`/`llm-d-rocm` images. A pod's `llm-d.ai/role` label (`prefill`/`decode`/`encode`) is recorded as `execution_metadata.pods[].serving_role` and `inference.serving_role`.
+
 **Quantization from model name** (regex, applied as a fallback wherever no explicit flag/config gave a method) — recognizes `AWQ`, `GPTQ` (+ int4/int8 variants), `INT4`/`INT8`, `FP4`/`FP8` (incl. `NVFP4`/`MXFP4`), `bitsandbytes`/`NF4`, `Marlin`, `GGUF`/`GGML`, `AQLM`, `EXL2`, `SqueezeLLM`, `HQQ`, `QuIP`, `EETQ`, `AutoRound` — extracting both method and bit width where the name encodes one.
 
 **KServe InferenceService storage model detection** — for predictors with no CLI model flag, `model.name` comes from the `InferenceService`'s declared storage, by scheme (then run through the same quantization-from-name regex). Recorded in `model.name_declared_via`:
@@ -230,6 +232,6 @@ In the AIBOM itself, each metric is recorded as summary statistics (`resource_ut
 These are explicit non-goals, not gaps waiting to close:
 
 - Per-request sampling params (e.g. a benchmark client's temperature) set after a vLLM server is already running.
-- TensorRT-LLM/Triton serving, or fine-tuning tools beyond trl (Axolotl, LLaMA-Factory). vLLM, TGI, SGLang, and LMDeploy *are* detected.
+- TensorRT-LLM/Triton serving, or fine-tuning tools beyond trl (Axolotl, LLaMA-Factory). vLLM/llm-d, TGI, SGLang, and LMDeploy *are* detected.
 - `pip install git+...`'s PEP 610 `direct_url.json`.
 - Verification that a declared git commit/dataset/model actually matches what's on disk or in a bucket — every "detection" above is identification, not an attestation.
