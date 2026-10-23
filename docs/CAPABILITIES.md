@@ -163,7 +163,7 @@ Also surfaced as `inference.served_model_name`, `max_num_seqs`, `seed`, `trust_r
 | SGLang | `python -m sglang.launch_server ...` | `--model-path` |
 | LMDeploy | `lmdeploy serve api_server <model> ...` | positional |
 
-**llm-d** runs vLLM as its engine, so its model-server pods report `serving_engine: vllm`: by command (`vllm serve`, which its CUDA image needs), or by image name for args-only pods on its `llm-d-xpu`/`llm-d-cpu`/`llm-d-rocm` images.
+**llm-d** runs vLLM as its engine, so its model-server pods report `serving_engine: vllm`: by command (`vllm serve`, which its CUDA image needs), or by image name for args-only pods on its `llm-d-xpu`/`llm-d-cpu`/`llm-d-rocm` images. A pod's `llm-d.ai/role` label (`prefill`/`decode`/`encode`) is recorded as `execution_metadata.pods[].serving_role` and `inference.serving_role`.
 
 **Quantization from model name** (regex, applied as a fallback wherever no explicit flag/config gave a method) — recognizes `AWQ`, `GPTQ` (+ int4/int8 variants), `INT4`/`INT8`, `FP4`/`FP8` (incl. `NVFP4`/`MXFP4`), `bitsandbytes`/`NF4`, `Marlin`, `GGUF`/`GGML`, `AQLM`, `EXL2`, `SqueezeLLM`, `HQQ`, `QuIP`, `EETQ`, `AutoRound` — extracting both method and bit width where the name encodes one.
 

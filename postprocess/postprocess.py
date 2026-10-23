@@ -2679,6 +2679,15 @@ def pod_job_result(pod_name, containers):
     return None
 
 
+def pod_serving_role(pod_name, containers):
+    """The pod's llm-d prefill/decode/encode role (its llm-d.ai/role label, as
+    the watcher recorded it in containers.json), or None (#167)."""
+    for c in containers:
+        if c.get("pod_name") == pod_name and c.get("serving_role"):
+            return c["serving_role"]
+    return None
+
+
 def pod_restart_info(pod_name, containers):
     """What a pod's containers went through before their current state, from
     the container statuses' lastState (#112). With restartPolicy OnFailure a
@@ -2896,6 +2905,9 @@ def compile_aibom(
             "exit_code": exit_code,
         }
         pod_entry.update(pod_restart_info(pod_name, containers or []))
+        serving_role = pod_serving_role(pod_name, containers or [])
+        if serving_role:
+            pod_entry["serving_role"] = serving_role
         # A failed pod of a Job that went on to complete is an earlier attempt
         # (restartPolicy Never + backoffLimit). Its own status stays above as
         # attempt detail, but it must not make the whole workload look failed.
@@ -3133,6 +3145,12 @@ def compile_aibom(
             "max_tokens": _try_int(annotations.get("max-tokens")),
             **{k: dm.get(k) for k in _VLLM_EXTRA_KEYS},
         }
+        # An llm-d prefill or decode pod only does part of each request, so its
+        # performance numbers below need the role to be read correctly. Set
+        # only when every pod that has a role agrees on it.
+        roles = {p["serving_role"] for p in pods if p.get("serving_role")}
+        if len(roles) == 1:
+            aibom["inference"]["serving_role"] = roles.pop()
 
         # Serving-level SLOs (TTFT, ITL, queue depth, KV-cache usage,
         # throughput) -- a distinct top-level section from

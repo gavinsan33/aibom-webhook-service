@@ -45,6 +45,10 @@ const (
 	instrumentedByAnnotationKey = "instrumented-by"
 	storageInfoAnnotationKey    = "storage-info"
 
+	// llmdRoleLabel is the prefill/decode/encode role llm-d's charts put on
+	// each model-server pod.
+	llmdRoleLabel = "llm-d.ai/role"
+
 	// maxPostprocessRetries caps how many times postprocess-job creation is
 	// retried (once per resync, see resyncPeriod) before giving up and removing
 	// the finalizer anyway — otherwise a permanently failing case (bad image,
@@ -989,6 +993,11 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 		// went on to complete can be told apart from a Job that failed. Empty
 		// for a bare pod, or a Job that hadn't finished (e.g. being deleted).
 		JobResult string `json:"job_result,omitempty"`
+		// ServingRole is the pod's llm-d.ai/role label (prefill, decode or
+		// encode). llm-d splits one deployment across pods by role, each pod
+		// gets its own AIBOM, and a prefill pod's throughput and latency
+		// figures mean little without knowing it only does prefill (#167).
+		ServingRole string `json:"serving_role,omitempty"`
 	}
 	var containers []containerInfo
 	for _, pod := range pods {
@@ -1025,6 +1034,7 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 				Args:    c.Args,
 			}
 			ci.JobResult = jobResults[podJobName(&pod)]
+			ci.ServingRole = pod.Labels[llmdRoleLabel]
 			if cs, ok := restarts[c.Name]; ok {
 				last := cs.LastTerminationState.Terminated
 				lastExit := last.ExitCode

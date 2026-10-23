@@ -3518,3 +3518,33 @@ def test_restart_info_empty_when_nothing_restarted():
     assert pp.pod_restart_info("p", [_container("p", "Completed", 0)]) == {}
     pod = _status_aibom(["p"], [_container("p", "Completed", 0)])["execution_metadata"]["pods"][0]
     assert "restart_count" not in pod
+
+
+# ---------------------------------------------------------------------------
+# llm-d prefill/decode role (#167)
+# ---------------------------------------------------------------------------
+
+
+def _role_aibom(roles):
+    return pp.compile_aibom(
+        discoveries=[{"pod_metadata": {"name": n}} for n in roles],
+        detected_datasets=[], runtime_info={}, annotations={}, telemetry=None,
+        detected_model={"serving_engine": "vllm", "model_name": "org/m"},
+        containers=[{"pod_name": n, "name": "vllm", **({"serving_role": r} if r else {})} for n, r in roles.items()],
+    )
+
+
+def test_llm_d_role_recorded_on_pod_and_inference():
+    aibom = _role_aibom({"ms-decode-0": "decode"})
+    assert aibom["execution_metadata"]["pods"][0]["serving_role"] == "decode"
+    assert aibom["inference"]["serving_role"] == "decode"
+
+
+def test_llm_d_role_omitted_when_pods_disagree_or_have_none():
+    mixed = _role_aibom({"ms-prefill-0": "prefill", "ms-decode-0": "decode"})
+    assert "serving_role" not in mixed["inference"]
+    assert [p["serving_role"] for p in mixed["execution_metadata"]["pods"]] == ["prefill", "decode"]
+
+    plain = _role_aibom({"vllm-0": None})
+    assert "serving_role" not in plain["inference"]
+    assert "serving_role" not in plain["execution_metadata"]["pods"][0]
