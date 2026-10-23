@@ -26,4 +26,4 @@ The CRDs are `aibom.io/v1alpha1`. There is no published matrix of which webhook,
 ## Cluster versions
 
 - **Console plugin:** its docs state OpenShift 4.12 or later.
-- **Webhook:** the dataset sidecar is a Kubernetes native sidecar, which is generally available from Kubernetes 1.29 (OpenShift 4.16). The webhook chart's other requirements are in [Getting Started](../user-guide/getting-started.md#cluster-requirements).
+- **Webhook:** the dataset sidecar is a Kubernetes native sidecar, which is generally available from Kubernetes 1.29 (OpenShift 4.16). OpenShift isn't required; see [Kubernetes without OpenShift](../user-guide/getting-started.md#kubernetes-without-openshift). The webhook chart's other requirements are in [Getting Started](../user-guide/getting-started.md#cluster-requirements).
