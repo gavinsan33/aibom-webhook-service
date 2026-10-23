@@ -952,6 +952,31 @@ def test_compile_aibom_infers_declared_dataset_from_auto_detected():
 
     assert aibom["dataset"]["declared"]["name"] == "tatsu-lab/alpaca"
     assert aibom["dataset"]["declared"]["declared_via"] == "inferred_from_runtime"
+    # Copied from the entry itself, so there's nothing to reconcile against.
+    assert aibom["dataset"]["auto_detected"][0]["matches_declared"] is None
+
+
+@pytest.mark.parametrize("detected,declared,expected", [
+    ("stanfordnlp/imdb", "imdb", True),
+    ("IMDB", "imdb", True),
+    ("/data/train.json", "train.json", True),
+    ("org1/imdb", "org2/imdb", False),
+    ("imdb", "imdb-extended", False),
+    (None, "imdb", False),
+])
+def test_dataset_names_match(detected, declared, expected):
+    assert pp._dataset_names_match(detected, declared) is expected
+
+
+def test_compile_aibom_declares_cli_config_and_split():
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[{"dataset_name": "glue", "source": "datasets.load_dataset"}],
+        runtime_info={}, annotations={"experiment-intent": "sft"}, telemetry=None, detected_model=None,
+        cli_dataset={"dataset_name": "glue", "dataset_config": "mrpc", "dataset_split": "train"},
+    )
+
+    declared = aibom["dataset"]["declared"]
+    assert (declared["declared_via"], declared["config_name"], declared["split"]) == ("cli_arg", "mrpc", "train")
     assert aibom["dataset"]["auto_detected"][0]["matches_declared"] is True
 
 

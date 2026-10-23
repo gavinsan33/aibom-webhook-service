@@ -40,18 +40,25 @@ class FakeDataset:
     shape that broke identity-only dedup against the DataLoader hook.
     """
 
-    def __init__(self, builder_name, config_name=None, fingerprint="fp-orig"):
+    def __init__(self, builder_name, config_name=None, fingerprint="fp-orig", split=None, sources=None):
         self.info = FakeDatasetInfo(builder_name=builder_name, config_name=config_name)
+        # Real Datasets keep the builder's cache directory, which hashes the
+        # data_files, through every transform.
+        self.sources = sources
+        self.cache_files = [{"filename": f"/cache/{builder_name}/{hash(tuple(sources))}/train.arrow"}] if sources else []
+        self.split = split
         self._fingerprint = fingerprint
 
     def map(self, fn):
-        return FakeDataset(self.info.builder_name, self.info.config_name, fingerprint="fp-mapped")
+        return FakeDataset(self.info.builder_name, self.info.config_name, fingerprint="fp-mapped", split=self.split,
+                           sources=self.sources)
 
 
 @pytest.fixture
 def fake_datasets_module(monkeypatch):
     def fake_load_dataset(path, *args, **kwargs):
-        return FakeDataset(builder_name=path, config_name=kwargs.get("name"))
+        return FakeDataset(builder_name=path, config_name=kwargs.get("name"), split=kwargs.get("split"),
+                           sources=kwargs.get("sources"))
 
     module = types.ModuleType("datasets")
     module.load_dataset = fake_load_dataset

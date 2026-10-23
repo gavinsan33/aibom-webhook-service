@@ -143,6 +143,166 @@ def test_torchvision_hook_records_entry(fake_torchvision_module):
     assert entries[0]["root"] == "/data/mnist"
 
 
+def test_torchvision_subclass_records_only_itself(monkeypatch):
+    """CIFAR100 inherits CIFAR10's patched __init__ and EMNIST calls MNIST's;
+    each used to record its parent too, so a CIFAR100 run was declared as
+    CIFAR10 (#114)."""
+    class CIFAR10:
+        def __init__(self, root, train=True, **kwargs):
+            self.root = root
+            self.train = train
+
+    class CIFAR100(CIFAR10):
+        pass
+
+    class MNIST(CIFAR10):
+        pass
+
+    class EMNIST(MNIST):
+        def __init__(self, root, split, **kwargs):
+            super().__init__(root, **kwargs)
+
+    class MyCifar(CIFAR10):
+        pass
+
+    tvd = types.ModuleType("torchvision.datasets")
+    tvd.CIFAR10, tvd.CIFAR100, tvd.MNIST, tvd.EMNIST = CIFAR10, CIFAR100, MNIST, EMNIST
+    tv = types.ModuleType("torchvision")
+    tv.datasets = tvd
+    monkeypatch.setitem(sys.modules, "torchvision", tv)
+    monkeypatch.setitem(sys.modules, "torchvision.datasets", tvd)
+    rd.install_hooks()
+
+    CIFAR100("/data")
+    EMNIST("/data", split="letters")
+    MyCifar("/data")
+
+    assert [e["dataset_name"] for e in rd.get_detected_datasets()] == ["CIFAR100", "EMNIST", "CIFAR10"]
+
+
+def test_dataloader_over_torchvision_dataset_merges(fake_torchvision_module, fake_torch_module):
+    rd.install_hooks()
+    import torchvision.datasets as tvd
+    import torch.utils.data as tud
+
+    tud.DataLoader(tvd.MNIST(root="/data/mnist", train=True), batch_size=64)
+
+    entries = rd.get_detected_datasets()
+    assert len(entries) == 1
+    assert entries[0]["batch_size"] == 64
+    assert entries[0]["seen_via"] == ["torch.utils.data.DataLoader"]
+
+
+def test_local_file_loads_named_by_files_and_kept_apart(fake_datasets_module):
+    """Two load_dataset("json", ...) calls used to both be named "json" and
+    dedupe into one entry, losing the second's data_files (#114)."""
+    rd.install_hooks()
+    import datasets
+
+    datasets.load_dataset("json", data_files="data/train.json")
+    datasets.load_dataset("json", data_files="data/val.json")
+    datasets.load_dataset("csv", data_files={"train": "/d/a/train.csv", "test": "/d/a/test.csv"})
+
+    entries = rd.get_detected_datasets()
+    assert [e["dataset_name"] for e in entries] == ["data/train.json", "data/val.json", "/d/a"]
+    assert entries[0]["builder"] == "json"
+    merged = rd._merge_output({}, entries, {})
+    assert len(merged["datasets"]) == 3
+
+
+def test_dataloader_attaches_to_its_own_split(fake_datasets_module, fake_torch_module):
+    """The key registry kept whichever load ran last, so the train loader
+    merged into the test entry (#114)."""
+    rd.install_hooks()
+    import datasets
+    import torch.utils.data as tud
+
+    train = datasets.load_dataset("imdb", split="train")
+    test = datasets.load_dataset("imdb", split="test")
+    tud.DataLoader(train.map(lambda x: x), batch_size=8)
+    tud.DataLoader(test.map(lambda x: x), batch_size=32)
+
+    assert [(e["split"], e["batch_size"]) for e in rd.get_detected_datasets()] == [("train", 8), ("test", 32)]
+
+
+def test_same_builder_different_files_each_keep_their_loader(fake_datasets_module, fake_torch_module):
+    """Same builder/config/split but different source files: the source
+    files are part of the key, so each transformed dataset finds its own
+    entry instead of both being marked ambiguous."""
+    rd.install_hooks()
+    import datasets
+    import torch.utils.data as tud
+
+    a = datasets.load_dataset("json", data_files="a.json", sources=["a.json"])
+    b = datasets.load_dataset("json", data_files="b.json", sources=["b.json"])
+    tud.DataLoader(a.map(lambda x: x), batch_size=4)
+    tud.DataLoader(b.map(lambda x: x), batch_size=8)
+
+    entries = rd.get_detected_datasets()
+    assert [e["batch_size"] for e in entries] == [4, 8]
+
+
+@pytest.mark.parametrize(
+    "first, second",
+    [
+        ({"name": "a"}, {"name": "b"}),
+        ({"split": "train"}, {"split": "test"}),
+        ({"sources": ["x"]}, {"sources": ["y"]}),
+        ({"sources": ["x"]}, {}),
+    ],
+    ids=["config", "split", "sources", "sources-vs-none"],
+)
+def test_hf_dataset_key_differs_per_identity_field(fake_datasets_module, first, second):
+    import datasets
+
+    k1 = rd._hf_dataset_key(datasets.load_dataset("d", **first))
+    k2 = rd._hf_dataset_key(datasets.load_dataset("d", **second))
+    assert k1 != k2
+
+
+def test_hf_dataset_key_survives_transform(fake_datasets_module):
+    import datasets
+
+    ds = datasets.load_dataset("d", name="c", split="train", sources=["x", "y"])
+    assert rd._hf_dataset_key(ds.map(lambda x: x)) == rd._hf_dataset_key(ds)
+
+
+def test_ambiguous_key_records_loader_separately(fake_datasets_module, fake_torch_module):
+    """Two loads with an identical key (no distinguishing source info): the
+    loader can't tell which it wraps."""
+    rd.install_hooks()
+    import datasets
+    import torch.utils.data as tud
+
+    datasets.load_dataset("json", data_files="a.json")
+    b = datasets.load_dataset("json", data_files="b.json")
+    tud.DataLoader(b.map(lambda x: x), batch_size=8)
+
+    entries = rd.get_detected_datasets()
+    assert len(entries) == 3
+    assert "batch_size" not in entries[0] and "batch_size" not in entries[1]
+
+
+def test_eval_loader_does_not_replace_train_batch_size(fake_torch_module):
+    rd.install_hooks()
+    import torch.utils.data as tud
+
+    class Split:
+        def __init__(self, split):
+            self.split = split
+
+    train, test = Split("train"), Split("test")
+    entry = {"dataset_name": "d", "source": "datasets.load_dataset"}
+    rd._dataset_registry[train] = entry
+    rd._dataset_registry[test] = entry
+
+    tud.DataLoader(test, batch_size=64)
+    tud.DataLoader(train, batch_size=8)
+    tud.DataLoader(test, batch_size=64)
+
+    assert entry["batch_size"] == 8
+
+
 def test_webdataset_hook_records_entry(fake_webdataset_module):
     rd.install_hooks()
     import webdataset as wds
