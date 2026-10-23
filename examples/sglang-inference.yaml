@@ -1,0 +1,184 @@
+# SGLang serving example.
+# Mirrors vllm-inference.yaml: a server + a guidellm OpenAI-http client that
+# drives traffic and then deletes the server Job so postprocessing fires.
+# Differences from the vLLM example: the server image/command and the port
+# (SGLang's own default is 30000). --enable-metrics is required for SGLang to
+# expose its sglang: Prometheus metrics on /metrics, which the
+# aibom-serving-metrics PodMonitor scrapes.
+#
+# Adjust image tag / model for your cluster as needed.
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: aibom-sglang-benchmark
+  namespace: project-gavin-test
+spec:
+  replicatedJobs:
+    - name: server
+      replicas: 1
+      template:
+        metadata:
+          annotations:
+            aibom.io/experiment-intent: inference
+            aibom.io/experiment-name: sglang-benchmark
+        spec:
+          parallelism: 1
+          completions: 1
+          backoffLimit: 0
+          # Longer than the other examples': the image is ~38 GB, so an
+          # uncached pull alone takes minutes before the server even starts.
+          activeDeadlineSeconds: 1800
+          template:
+            spec:
+              restartPolicy: Never
+              tolerations:
+                - operator: Exists
+              containers:
+                - name: server
+                  image: lmsysorg/sglang:latest
+                  command:
+                    - python3
+                    - -m
+                    - sglang.launch_server
+                    - --model-path=Qwen/Qwen2.5-0.5B-Instruct
+                    - --host=0.0.0.0
+                    - --port=30000
+                    - --enable-metrics
+                  env:
+                    - name: HOME
+                      value: /tmp
+                    - name: HF_TOKEN
+                      valueFrom:
+                        secretKeyRef:
+                          name: hf-token-secret
+                          key: HF_TOKEN
+                          optional: true
+                  ports:
+                    - containerPort: 30000
+                      name: http
+                  # Not /health: SGLang's /health runs a one-token generation,
+                  # which regularly outlasts a probe's 1 s default timeout, so
+                  # the pod could take minutes to go Ready (or never, before
+                  # the Job's deadline). /v1/models is served only once the
+                  # engine is up and generates nothing.
+                  readinessProbe:
+                    httpGet:
+                      path: /v1/models
+                      port: 30000
+                    initialDelaySeconds: 30
+                    periodSeconds: 10
+                    timeoutSeconds: 5
+                  resources:
+                    requests:
+                      nvidia.com/gpu: "1"
+                    limits:
+                      nvidia.com/gpu: "1"
+
+    - name: client
+      replicas: 1
+      template:
+        spec:
+          parallelism: 1
+          completions: 1
+          backoffLimit: 0
+          activeDeadlineSeconds: 900
+          template:
+            spec:
+              restartPolicy: Never
+              serviceAccountName: aibom-sglang-benchmark-client
+              tolerations:
+                - operator: Exists
+              initContainers:
+                - name: benchmark
+                  image: ghcr.io/vllm-project/guidellm@sha256:e3ad2371bfa8e42f2c3d1251b62d0d9c9706c27ae2143c8c048eb5fc6aebb558
+                  imagePullPolicy: Always
+                  command:
+                    - guidellm
+                    - run
+                    - --backend=kind=openai_http,target=http://aibom-sglang-benchmark-server-0-0.aibom-sglang-benchmark.project-gavin-test.svc.cluster.local:30000
+                    - --data=kind=synthetic_text,prompt_tokens=256,output_tokens=128
+                    - --profile=kind=sweep
+                    - --constraint=kind=max_duration,seconds=30
+                    - --output=kind=json
+                  env:
+                    - name: HOME
+                      value: /tmp
+              containers:
+                - name: delete-server-job
+                  image: docker.io/curlimages/curl:8.11.0
+                  command:
+                    - sh
+                    - -c
+                    - |
+                      TOKEN=/var/run/secrets/kubernetes.io/serviceaccount/token
+                      CACERT=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+                      NS=project-gavin-test
+                      curl -sf -X DELETE --cacert "$CACERT" \
+                        -H "Authorization: Bearer $(cat $TOKEN)" \
+                        "https://kubernetes.default.svc/apis/batch/v1/namespaces/$NS/jobs/aibom-sglang-benchmark-server-0?propagationPolicy=Background"
+                      # Then this Job's own RBAC, best-effort: deleting the RoleBinding
+                      # revokes the very token making these calls, so whatever comes
+                      # after it gets a 403. Anything left over is removed by
+                      # examples/cleanup.sh.
+                      curl -sf -X DELETE --cacert "$CACERT" \
+                        -H "Authorization: Bearer $(cat $TOKEN)" \
+                        "https://kubernetes.default.svc/apis/rbac.authorization.k8s.io/v1/namespaces/$NS/rolebindings/aibom-sglang-benchmark-client" || true
+                      curl -sf -X DELETE --cacert "$CACERT" \
+                        -H "Authorization: Bearer $(cat $TOKEN)" \
+                        "https://kubernetes.default.svc/apis/rbac.authorization.k8s.io/v1/namespaces/$NS/roles/aibom-sglang-benchmark-client" || true
+                      curl -sf -X DELETE --cacert "$CACERT" \
+                        -H "Authorization: Bearer $(cat $TOKEN)" \
+                        "https://kubernetes.default.svc/api/v1/namespaces/$NS/serviceaccounts/aibom-sglang-benchmark-client" || true
+                  resources:
+                    requests:
+                      cpu: "100m"
+                      memory: "128Mi"
+                    limits:
+                      cpu: "200m"
+                      memory: "256Mi"
+      dependsOn:
+        - name: server
+          status: Ready
+  successPolicy:
+    operator: All
+    targetReplicatedJobs:
+      - client
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aibom-sglang-benchmark-client
+  namespace: project-gavin-test
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: aibom-sglang-benchmark-client
+  namespace: project-gavin-test
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    resourceNames: ["aibom-sglang-benchmark-server-0"]
+    verbs: ["delete"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    resourceNames: ["aibom-sglang-benchmark-client"]
+    verbs: ["delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    resourceNames: ["aibom-sglang-benchmark-client"]
+    verbs: ["delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: aibom-sglang-benchmark-client
+  namespace: project-gavin-test
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: aibom-sglang-benchmark-client
+subjects:
+  - kind: ServiceAccount
+    name: aibom-sglang-benchmark-client
+    namespace: project-gavin-test
