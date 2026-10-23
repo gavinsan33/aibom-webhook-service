@@ -223,6 +223,22 @@ Each query aggregates to one series per pod — summed across containers, GPUs a
 
 In the AIBOM itself, each metric is recorded as summary statistics (`resource_utilization.metrics.<name>`: `min`/`max`/`avg`/`p95`, plus first/middle/last-third segment averages). A downsampled time series of each metric, about 200 points, is stored separately in an `AIBOMTelemetry` object referenced from `spec.data.telemetry_series_ref` (see [Telemetry](reference/schema.md#telemetry)). The series covers each pod's full run with no cold-start trim; the rest of this paragraph applies to the summary statistics. Each pod's window runs from its start time (parsed as UTC) to when its containers finished (`finished_at` in `containers.json`), or to collection time if it hasn't finished. The first scrape interval (30 s, `AIBOM_SERIES_SCRAPE_INTERVAL_S`) is excluded as cold start, capped at half the run length; a run too short for the full exclusion is flagged via `summary_includes_cold_start`. Stats are rounded once, after display scaling: 2 decimals at magnitude ≥ 1, 3 significant figures below that.
 
+### Inference serving metrics (per engine)
+
+For a pod whose `serving_engine` is detected (see *Other serving engines* above), the engine's own `/metrics` endpoint is scraped — via the `aibom-vllm-metrics` `PodMonitor` (`vllmMetrics.enabled`, default off) — and recorded under `inference.performance.metrics.<name>` with the same `min`/`max`/`avg`/`p95`/segment shape as above. All engines map to the same seven canonical fields; each engine just exposes a different subset under different upstream metric names:
+
+| `inference.performance` field | vLLM / llm-d | TGI | SGLang | LMDeploy |
+|---|:---:|:---:|:---:|:---:|
+| `time_to_first_token_seconds` (TTFT) | ✅ | — | ✅ | ✅ |
+| `inter_token_latency_seconds` (ITL) | ✅ | ✅ | ✅ | ✅ |
+| `num_requests_running` | ✅ | ✅ | ✅ | ✅ |
+| `num_requests_waiting` | ✅ | ✅ | ✅ | ✅ |
+| `kv_cache_usage` (%) | ✅ | — | ✅ | ✅ |
+| `prompt_throughput` (tok/s) | ✅ | — | ✅ | ✅ |
+| `generation_throughput` (tok/s) | ✅ | ✅ | ✅ | ✅ |
+
+**vLLM and llm-d are identical** (llm-d runs vLLM and is detected as `vllm`). **vLLM/llm-d, SGLang and LMDeploy record the same full set**; only the source metric names differ (e.g. `vllm:kv_cache_usage_perc` vs `sglang:token_usage`). **TGI is the outlier** — it exposes no TTFT, KV-cache or prompt-throughput metric, so those are simply absent. A metric an engine doesn't export is skipped, not reported null. SGLang and LMDeploy also need `--enable-metrics`; a workload that moves the engine off its default port (vLLM/llm-d 8000, TGI 80, SGLang 30000, LMDeploy 23333) isn't scraped (#86).
+
 ---
 
 ## What's Not Detected
