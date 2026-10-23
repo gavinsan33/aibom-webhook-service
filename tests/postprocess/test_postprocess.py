@@ -155,6 +155,21 @@ def test_detect_lmdeploy_quantization_from_name():
     assert result["quantization_method"] == "awq"
 
 
+def test_detect_lmdeploy_quantization_from_flag():
+    result = pp.detect_lmdeploy_from_command(
+        ["lmdeploy", "serve", "api_server", "org/m", "--model-format", "awq", "--cache-max-entry-count", "0.8"]
+    )
+    assert result["quantization"] == "awq"
+    assert result["gpu_memory_utilization"] == 0.8
+
+
+def test_detect_sglang_mem_fraction():
+    result = pp.detect_sglang_from_command(
+        ["python", "-m", "sglang.launch_server", "--model-path", "org/m", "--mem-fraction-static", "0.85"]
+    )
+    assert result["gpu_memory_utilization"] == 0.85
+
+
 def test_new_engines_return_none_for_unrelated_commands():
     for fn in (pp.detect_tgi_from_command, pp.detect_sglang_from_command, pp.detect_lmdeploy_from_command):
         assert fn(["python", "train.py"]) is None

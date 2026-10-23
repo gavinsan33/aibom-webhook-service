@@ -1016,6 +1016,9 @@ _SGLANG_ARG_MAP = {
     "--dp-size": ("data_parallel_size", int),
     "--dp": ("data_parallel_size", int),
     "--context-length": ("max_model_len", int),
+    # SGLang's closest analogue to vLLM's --gpu-memory-utilization: the fraction
+    # of GPU memory reserved for the static (KV-cache) pool.
+    "--mem-fraction-static": ("gpu_memory_utilization", _finite_float),
 }
 
 
@@ -1035,9 +1038,13 @@ def detect_sglang_from_command(command):
 # LMDeploy: `lmdeploy serve api_server <model> ...` (model is positional).
 _LMDEPLOY_ARG_MAP = {
     "--model-name": ("served_model_name", str),
+    "--model-format": ("quantization", str),  # awq/gptq -- its weight-quant flag
     "--dtype": ("dtype", str),
     "--tp": ("tensor_parallel_size", int),
     "--session-len": ("max_model_len", int),
+    # Closest analogue to vLLM's --gpu-memory-utilization: fraction of free GPU
+    # memory given to the KV cache.
+    "--cache-max-entry-count": ("gpu_memory_utilization", _finite_float),
 }
 
 
