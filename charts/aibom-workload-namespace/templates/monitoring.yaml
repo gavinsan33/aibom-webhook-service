@@ -29,6 +29,14 @@
 # per-workload override yet (see #86). SGLang needs --enable-metrics (and
 # LMDeploy before 0.18) for anything to be there; TGI and LMDeploy 0.18+
 # expose metrics by default.
+#
+# vLLM also gets 8200: an llm-d decode pod runs its routing sidecar on 8000 and
+# moves vLLM to 8200 (llm-d-modelservice's routing.proxy.targetPort default).
+# The sidecar proxies every path it doesn't handle itself, /metrics included,
+# through to vLLM, so scraping its 8000 as well would collect each vLLM series
+# twice and double the summed counters and gauges. Every endpoint therefore
+# drops init-container targets: the sidecar is a native sidecar (an init
+# container with restartPolicy Always), and no serving engine runs as one.
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
@@ -42,16 +50,43 @@ spec:
     - targetPort: 8000   # vLLM
       path: /metrics
       interval: 30s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_container_init]
+          regex: "true"
+          action: drop
+    - targetPort: 8200   # vLLM behind llm-d's routing sidecar
+      path: /metrics
+      interval: 30s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_container_init]
+          regex: "true"
+          action: drop
     - targetPort: 80     # TGI
       path: /metrics
       interval: 30s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_container_init]
+          regex: "true"
+          action: drop
     - targetPort: 8080   # TGI under a restricted SCC (can't bind 80)
       path: /metrics
       interval: 30s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_container_init]
+          regex: "true"
+          action: drop
     - targetPort: 30000  # SGLang
       path: /metrics
       interval: 30s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_container_init]
+          regex: "true"
+          action: drop
     - targetPort: 23333  # LMDeploy
       path: /metrics
       interval: 30s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_container_init]
+          regex: "true"
+          action: drop
 {{- end }}
