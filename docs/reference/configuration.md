@@ -30,7 +30,8 @@ Set chart values with `--set key=value` or `-f values.yaml` on `helm upgrade --i
 | `webhook.namespaceSelectorLabel.key` / `.value` | `aibom.io/enabled` / `"true"` | Namespaces must carry this label to opt in. |
 | `webhook.trustedJobControllerIdentity` | `""` | The full username the cluster's Job controller uses when creating a Job's pods, commonly `system:serviceaccount:kube-system:job-controller`. When set, a pod claiming to be a postprocess pod is also checked against it. Verify the value on your cluster first. A wrong value misclassifies real postprocess pods, not only spoofed ones. When empty, only the weaker owner-reference check applies. |
 | `networkPolicy.enabled` | `true` | Creates a NetworkPolicy allowing the API server to reach the webhook's port 8443. Set `false` if your cluster manages this itself. See [Troubleshooting](../user-guide/troubleshooting.md). |
-| `certManager.issuerName` | `aibom-webhook-selfsigned` | The cert-manager issuer for the webhook's certificate. |
+| `tls.provider` | `auto` | Who issues the webhook's TLS certificate: `service-ca` (OpenShift's built-in service CA), `cert-manager`, or `auto`, which is `service-ca` on OpenShift and `cert-manager` elsewhere. The webhook reloads the certificate when it's rotated. |
+| `certManager.issuerName` | `aibom-webhook-selfsigned` | The cert-manager issuer for the webhook's certificate. Only used with cert-manager. |
 | `certManager.duration` / `.renewBefore` | `8760h` / `720h` | Certificate lifetime and how long before expiry it is renewed. |
 
 ### Collection
