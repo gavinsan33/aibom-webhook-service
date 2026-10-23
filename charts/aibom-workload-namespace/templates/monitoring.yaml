@@ -17,7 +17,7 @@
 # since telling which engine (if any) a pod runs at admission time would require
 # duplicating postprocess.py's own CLI-detection logic in the Go mutator.
 #
-# One endpoint per supported engine's upstream default port (vLLM/llm-d 8000,
+# One endpoint per supported engine's upstream default port (vLLM 8000,
 # TGI 80, SGLang 30000, LMDeploy 23333) -- each is each engine's own default,
 # not just a convention here. A pod that isn't that engine simply doesn't listen
 # on the port (the scrape fails, harmless), and even if something unrelated does,
@@ -39,7 +39,7 @@ spec:
     matchLabels:
       aibom.io/instrumented: "true"
   podMetricsEndpoints:
-    - targetPort: 8000   # vLLM / llm-d
+    - targetPort: 8000   # vLLM
       path: /metrics
       interval: 30s
     - targetPort: 80     # TGI

@@ -928,15 +928,7 @@ def detect_vllm_from_command(command):
     return None if args is None else _parse_vllm_args(args)
 
 
-# llm-d is a distributed-inference platform whose model-server pods run vLLM as
-# the actual engine, on vLLM's own :8000/metrics with vLLM's own `vllm:` metric
-# names -- so an llm-d pod is reported (and its telemetry collected) as vLLM.
-# Its images carry `llm-d` as a path segment (e.g. ghcr.io/llm-d/llm-d-cuda-dev)
-# and set `vllm serve` as the ENTRYPOINT, so this only matters for the args-only
-# case; a pod that spells out `vllm serve ...` in its command already matches
-# _vllm_server_args. A command-level trl/other invocation still wins over this,
-# since image matching is only the entrypoint fallback.
-_VLLM_IMAGE_RE = re.compile(r"(?:^|/)vllm-openai$|(?:^|/)vllm/[^/]+$|(?:^|/)llm-d[^/]*$")
+_VLLM_IMAGE_RE = re.compile(r"(?:^|/)vllm-openai$|(?:^|/)vllm/[^/]+$")
 
 
 def _strip_tag_digest(ref):
@@ -3144,7 +3136,7 @@ def compile_aibom(
         # resource_utilization since these describe the application's own
         # behavior, not the hardware underneath it (see CLAUDE.md's
         # Inference Performance Telemetry section). Populated for any engine in
-        # SERVING_TELEMETRY_QUERIES (vLLM/llm-d, SGLang, LMDeploy, TGI); the
+        # SERVING_TELEMETRY_QUERIES (vLLM, SGLang, LMDeploy, TGI); the
         # units below are the same canonical set across engines, so a metric a
         # given engine doesn't export is simply absent from the pod telemetry
         # and skipped here (e.g. TGI has no TTFT or KV-cache metric).
