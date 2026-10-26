@@ -1,0 +1,82 @@
+# Single-GPU LoRA fine-tuning with Axolotl (supervised fine-tuning / SFT).
+#
+# Runs Axolotl's modern Click CLI, `axolotl train <config> [overrides]`. The
+# real training config lives in the YAML file, which runs inside this container
+# and the webhook's postprocess step cannot read — so, exactly like `trl
+# --config`, only the values passed as CLI *overrides* are picked up by
+# CLI-arg detection (here: --base-model, --adapter, --lora-r, ...). Everything
+# else (dataset composition, lora targets) is still auto-detected at runtime by
+# runtime_detector.py when the training process loads it.
+#
+# Uses Axolotl's own official image (the `axolotl` CLI preinstalled with a
+# consistent torch stack) rather than pip-installing it into an NGC PyTorch
+# image, which pulls dependency wheels whose ABI doesn't match NGC's custom
+# torch build. A minimal config is written inline so the example is
+# self-contained; the overrides on the command line are what the AIBOM records
+# as declared model/LoRA settings. --max-steps caps this to a short run.
+#
+# Plain batch/v1 Job (fine-tuning has no client/server split): qualifies for
+# postprocessing via its GPU request and aibom.io/* annotations, triggering on
+# JobComplete.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: aibom-axolotl-finetune
+  namespace: project-gavin-test
+  annotations:
+    aibom.io/experiment-intent: sft
+    aibom.io/experiment-name: axolotl-lora-sft-benchmark
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: finetune
+          image: axolotlai/axolotl:main-latest
+          command:
+            - sh
+            - -c
+            - |
+              cat > /tmp/qlora.yml <<'EOF'
+              base_model: ibm-granite/granite-3.3-2b-instruct
+              datasets:
+                - path: tatsu-lab/alpaca
+                  type: alpaca
+              output_dir: /tmp/output
+              sequence_len: 1024
+              gradient_accumulation_steps: 4
+              EOF
+              axolotl train /tmp/qlora.yml \
+                --base-model ibm-granite/granite-3.3-2b-instruct \
+                --adapter qlora \
+                --load-in-4bit \
+                --lora-r 16 \
+                --lora-alpha 32 \
+                --micro-batch-size 4 \
+                --learning-rate 2e-4 \
+                --num-epochs 1 \
+                --max-steps 50 \
+                --seed 42
+          env:
+            # OpenShift runs the pod as an arbitrary non-root UID whose $HOME is
+            # "/" (not writable), so HuggingFace's default ~/.cache download dir
+            # becomes /.cache and fails with PermissionError. Point HOME and the
+            # HF cache at writable /tmp.
+            - name: HOME
+              value: /tmp
+            - name: HF_HOME
+              value: /tmp/.cache/huggingface
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: HF_TOKEN
+                  optional: true
+          resources:
+            requests:
+              nvidia.com/gpu: "1"
+            limits:
+              nvidia.com/gpu: "1"

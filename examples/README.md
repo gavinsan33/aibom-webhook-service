@@ -114,3 +114,21 @@ Two of the five precedence tiers are exercised here: `detect_git_clone_from_cont
 # Deploy the example (namespace must be set up first)
 oc apply -f examples/granite-lora-finetune-git-clone.yaml
 ```
+
+## Example: Axolotl LoRA Fine-Tuning
+
+The `examples/axolotl-finetune.yaml` file runs the same kind of LoRA SFT, but through [Axolotl](https://github.com/axolotl-ai-cloud/axolotl)'s `axolotl train <config> [overrides]` CLI instead of `trl`. Axolotl is config-file driven, and that YAML runs inside the training container where `postprocess.py` can't read it — so, exactly like `trl --config`, only the values passed as command-line *overrides* are auto-detected (`--base-model`, `--adapter qlora`, `--lora-r`, ...). The example uses QLoRA (`--adapter qlora --load-in-4bit`), which the detector records as `fine_tuning.adaptation_method: qlora`. `--max-steps` keeps it short.
+
+```bash
+# Deploy the example (namespace must be set up first)
+oc apply -f examples/axolotl-finetune.yaml
+```
+
+## Example: LLaMA-Factory QLoRA Fine-Tuning
+
+The `examples/llamafactory-finetune.yaml` file runs QLoRA SFT via [LLaMA-Factory](https://github.com/hiyouga/LLaMA-Factory)'s `llamafactory-cli train` in *flag* mode. LLaMA-Factory is built on transformers, so its flags mirror the HF/`trl` names (`--model_name_or_path`, `--finetuning_type lora`, `--quantization_bit 4`, `--lora_rank`, ...), and CLI-arg detection reads them straight into the AIBOM's `model`/`fine_tuning`/`training` fields. `--finetuning_type lora` with `--quantization_bit 4` is QLoRA (`adaptation_method: qlora`). A config-file run (`llamafactory-cli train config.yaml`) would instead expose nothing on the CLI; the YAML isn't read.
+
+```bash
+# Deploy the example (namespace must be set up first)
+oc apply -f examples/llamafactory-finetune.yaml
+```
