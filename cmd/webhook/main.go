@@ -45,6 +45,11 @@ func main() {
 		os.Exit(runStripFinalizers())
 	}
 
+	systemNamespace := ownNamespace()
+	if systemNamespace == "" {
+		log.Fatalf("cannot determine own namespace: set the POD_NAMESPACE env var (e.g. via the downward API) or run with a mounted service-account token; postprocess Jobs, signing keys and the public-key guard all require it")
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -69,7 +74,7 @@ func main() {
 	}
 
 	handler := webhook.NewHandler(mutator, cfg.TrustedWatcherIdentity)
-	handler.SystemNamespace = ownNamespace()
+	handler.SystemNamespace = systemNamespace
 
 	mux := http.NewServeMux()
 	mux.Handle("/mutate", handler)
@@ -97,7 +102,7 @@ func main() {
 
 	if cfg.EnableWatcher && clientset != nil {
 		w := watcher.New(clientset, watcher.Config{
-			Namespace:                ownNamespace(),
+			Namespace:                systemNamespace,
 			PostprocessImage:         cfg.PostprocessImage,
 			PrometheusURL:            cfg.PrometheusURL,
 			DebugKeepPostprocessJobs: cfg.DebugKeepPostprocessJobs,
@@ -169,11 +174,19 @@ func buildRestConfig() (*rest.Config, error) {
 
 // ownNamespace is the namespace this pod runs in. Postprocess Jobs and their
 // signing keys live here, and it's the one identity the public-key ConfigMap
-// guard trusts.
+// guard trusts, so an empty value is not a soft failure: it silently breaks
+// postprocessing and makes the guard trust "system:serviceaccount::aibom-postprocess".
+// It's therefore required, and main fails fast when this returns "". The
+// POD_NAMESPACE env var (set via the downward API, see the Deployment) takes
+// precedence over the service-account namespace file, which lets an
+// out-of-cluster run (the kubeconfig fallback in buildRestConfig) supply it and
+// covers pods with automountServiceAccountToken disabled.
 func ownNamespace() string {
+	if ns := strings.TrimSpace(os.Getenv("POD_NAMESPACE")); ns != "" {
+		return ns
+	}
 	b, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
 	if err != nil {
-		log.Printf("WARNING: cannot read own namespace, postprocess Jobs and the public-key guard won't work: %v", err)
 		return ""
 	}
 	return strings.TrimSpace(string(b))
