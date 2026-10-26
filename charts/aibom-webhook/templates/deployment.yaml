@@ -58,6 +58,15 @@ spec:
             # values.yaml's comment on this setting before enabling it.
             - --trusted-job-controller-identity={{ .Values.webhook.trustedJobControllerIdentity }}
             {{- end }}
+          env:
+            # The namespace postprocess Jobs, signing keys and the public-key
+            # guard all run in. Read via the downward API so it's authoritative
+            # even if the service-account token isn't mounted; the binary fails
+            # fast if it ends up empty (see ownNamespace in cmd/webhook/main.go).
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
           volumeMounts:
             - name: certs
               mountPath: /certs
