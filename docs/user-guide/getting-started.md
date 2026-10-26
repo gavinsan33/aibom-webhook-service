@@ -32,6 +32,8 @@ helm upgrade --install aibom-webhook oci://quay.io/gsanders/aibom-webhook \
 
 Both charts detect OpenShift by its `image.openshift.io` API and choose these defaults from that (`platform: auto`). `helm template` without a cluster can't see the API and renders the non-OpenShift defaults, so when rendering offline, for example with Argo CD, set `platform=openshift` or `platform=kubernetes` explicitly.
 
+`platform` recovers the OpenShift defaults (Thanos Querier for Prometheus, the `Image` RBAC), but **not** the discovery image: that default keys on the OpenShift AI API (`datasciencecluster.opendatahub.io`), which an offline render can't see either, and `platform` has no "OpenShift AI" value to distinguish it from plain OpenShift. So an offline render on OpenShift AI still falls through to the public `pytorch/pytorch` image and, on an egress-restricted cluster, leaves every instrumented pod in `Init:ImagePullBackOff` (see [Troubleshooting](troubleshooting.md#pods-stay-in-initimagepullbackoff)). Set `image.discovery.repository`/`image.discovery.tag` by hand for offline renders — e.g. to the in-cluster `runtime-pytorch` ImageStream (`image-registry.openshift-image-registry.svc:5000/redhat-ods-applications/runtime-pytorch`, tag `pytorch`) on OpenShift AI, or any pullable image with `python3` and `bash`.
+
 Supported workload types are Job, JobSet, PyTorchJob and RayJob, plus any pod that requests `nvidia.com/gpu`. The Kubeflow Training Operator (PyTorchJob), JobSet and KubeRay are needed only if you run those kinds.
 
 ## Install the webhook

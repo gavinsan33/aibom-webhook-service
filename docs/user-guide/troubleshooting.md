@@ -24,6 +24,8 @@ oc describe pod <pod-name> -n <namespace>
 
 Set `image.discovery.repository` and `image.discovery.tag` to an image the cluster can pull, as shown in [Getting Started](getting-started.md#cluster-requirements), and upgrade the webhook chart. Pods already created keep the old image, so recreate them.
 
+A common trigger on OpenShift AI is an **offline render** (e.g. Argo CD with `helm template`): the discovery-image default keys on the OpenShift AI API, which an offline render can't see, so it falls through to `pytorch/pytorch` even with `platform=openshift` set. Setting `platform` alone doesn't fix this — set `image.discovery` by hand too (see the offline note in [Getting Started](getting-started.md#cluster-requirements)).
+
 ## Pods fail to start in an enabled namespace
 
 A stale `aibom-scripts` ConfigMap can fail pod startup for every instrumented workload in the namespace. The dataset detector hook mounts `runtime_detector.py` from that ConfigMap, and the `aibom-discovery` and `aibom-dataset-sidecar` init containers each run a script from it.

@@ -34,6 +34,13 @@ image.openshift.io API, which `helm template` without --api-versions can't see.
 {{/*
 Discovery init container image. Unset, it's OpenShift AI's runtime-pytorch
 ImageStream where the OpenShift AI API exists, else the public PyTorch image.
+The OpenShift AI API (datasciencecluster.opendatahub.io) is invisible to an
+offline `helm template` just like image.openshift.io is, and -- unlike the
+OpenShift defaults -- `platform` can't recover it: `platform=openshift` means
+OpenShift, not OpenShift AI, and the runtime-pytorch ImageStream only exists on
+the latter. So an offline render (e.g. Argo CD) always falls through to the
+public image here regardless of `platform`; set `image.discovery` explicitly to
+override it. See getting-started's offline note.
 */}}
 {{- define "aibom-webhook.discoveryImage" -}}
 {{- if .Values.image.discovery.repository -}}
