@@ -21,7 +21,7 @@ The webhook always fails open (`failurePolicy: Ignore`): if the service is down 
 
 ## Prerequisites
 
-- An OpenShift cluster with [cert-manager](https://cert-manager.io/) installed
+- OpenShift 4.16+ or Kubernetes 1.29+, with [cert-manager](https://cert-manager.io/) installed. Off OpenShift, see [Kubernetes without OpenShift](docs/user-guide/getting-started.md#kubernetes-without-openshift).
 - `helm` 3.x
 - Cluster-admin (the charts install cluster-scoped RBAC)
 - To build from source: Go 1.22+ and [`just`](https://github.com/casey/just) (`make install-just`)

@@ -1,5 +1,5 @@
 # Lets the aibom-postprocess Job query Prometheus/Thanos Querier directly
-# (see postprocess.py) instead of going through Grafana. Mirrors
+# (see postprocess.py). Mirrors
 # gpu-quota-operator's manager/deploy/service-ca-configmap.yaml and
 # manager/bootstrap/monitoring_rolebinding.yaml.
 #
@@ -8,7 +8,8 @@
 # watcher.go mounts this into the postprocess Job as optional: on a cluster
 # with no service-ca operator (e.g. a plain-HTTP dev Prometheus), the mount
 # resolves to an empty directory and postprocess.py falls back to the system
-# trust store instead of erroring.
+# trust store instead of erroring. Only created on OpenShift.
+{{- if include "aibom-workload-namespace.openshift" . }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -16,11 +17,13 @@ metadata:
   namespace: {{ .Release.Namespace }}
   annotations:
     service.beta.openshift.io/inject-cabundle: "true"
-{{- if .Values.monitoringAccess.enabled }}
+{{- end }}
+{{- if and .Values.monitoringAccess.enabled (include "aibom-workload-namespace.openshift" .) }}
 ---
 # Grants read access to OpenShift's built-in Prometheus/Thanos Querier.
 # cluster-monitoring-view is a ClusterRole shipped by OpenShift's cluster
-# monitoring operator, not something this chart defines. Bound to the specific
+# monitoring operator, not something this chart defines, so other clusters get
+# no binding. Bound to the specific
 # aibom-postprocess ServiceAccount (not the whole namespace's SA group, unlike
 # the other RoleBindings in rbac.yaml) since read access to cluster-wide
 # platform metrics is broader than what any other workload in this namespace
