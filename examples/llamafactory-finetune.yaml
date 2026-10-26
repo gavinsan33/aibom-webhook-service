@@ -1,20 +1,22 @@
-# Single-GPU QLoRA fine-tuning with LLaMA-Factory (supervised fine-tuning).
+# Single-GPU LoRA fine-tuning with LLaMA-Factory (supervised fine-tuning).
 #
 # Runs `llamafactory-cli train` in *flag* mode (rather than passing a YAML
 # config). LLaMA-Factory is built on transformers, so its flags mirror the
-# HF/trl names — --model_name_or_path, --finetuning_type, --lora_rank,
-# --quantization_bit, etc. — and CLI-arg detection reads them directly into the
-# AIBOM's model/fine_tuning fields. A config-file run (`llamafactory-cli train
-# config.yaml`) would instead expose nothing on the CLI; the YAML isn't read.
+# HF/trl names — --model_name_or_path, --finetuning_type, --lora_rank, etc. —
+# and CLI-arg detection reads them directly into the AIBOM's model/fine_tuning
+# fields. A config-file run (`llamafactory-cli train config.yaml`) would instead
+# expose nothing on the CLI; the YAML isn't read.
 #
 # Uses LLaMA-Factory's own official image (CLI + its demo datasets preinstalled)
 # rather than pip-installing it into an NGC PyTorch image — pip-installing the
 # full stack into NGC pulls a torchaudio wheel whose ABI doesn't match NGC's
 # custom torch build (undefined symbol: torch_dtype_float4_e2m1fn_x2 at import).
 #
-# --finetuning_type lora + --quantization_bit 4 is QLoRA, which the detector
-# records as adaptation_method: qlora. --max_samples keeps this short.
-# alpaca_en_demo is a demo dataset bundled in the image's data/dataset_info.json.
+# --finetuning_type lora is plain LoRA, which the detector records as
+# adaptation_method: lora. (QLoRA via --quantization_bit needs bitsandbytes,
+# which the stock image doesn't ship — left out so the example runs as-is; the
+# qlora detection path is covered by the unit tests.) --max_samples keeps this
+# short. alpaca_en_demo is a demo dataset bundled in the image's dataset_info.json.
 #
 # Plain batch/v1 Job: qualifies via its GPU request and aibom.io/* annotations,
 # triggering on JobComplete.
@@ -25,7 +27,7 @@ metadata:
   namespace: project-gavin-test
   annotations:
     aibom.io/experiment-intent: sft
-    aibom.io/experiment-name: llamafactory-qlora-sft-benchmark
+    aibom.io/experiment-name: llamafactory-lora-sft-benchmark
 spec:
   backoffLimit: 0
   template:
@@ -45,7 +47,6 @@ spec:
             - --dataset=alpaca_en_demo
             - --template=default
             - --finetuning_type=lora
-            - --quantization_bit=4
             - --lora_rank=16
             - --lora_alpha=32
             - --per_device_train_batch_size=4
