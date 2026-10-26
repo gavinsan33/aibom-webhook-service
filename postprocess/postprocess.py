@@ -1162,6 +1162,121 @@ def detect_trl_from_command(command):
 
 
 # ---------------------------------------------------------------------------
+# Axolotl (fine-tuning)
+#
+# `axolotl train <config.yml> [overrides]` (modern Click CLI, kebab-case
+# overrides), or the legacy `python -m axolotl.cli.train <config>` /
+# `accelerate launch -m axolotl.cli.train` (snake_case). The real config lives
+# in the YAML, which runs in the training container postprocess can't read, so
+# -- exactly like `trl --config` -- only values passed as CLI overrides are
+# seen; the detector still reports `training_framework` (and so an intent) when
+# none are. `_split_flag` normalizes kebab and snake to one spelling, so both
+# CLI styles map through the same (snake-keyed) table. Only `train` is a
+# training run (not preprocess/inference/merge-lora/...).
+# ---------------------------------------------------------------------------
+
+_AXOLOTL_ARG_MAP = {
+    "--base_model": ("model_name", str),
+    "--learning_rate": ("learning_rate", _finite_float),
+    "--micro_batch_size": ("batch_size", int),
+    "--num_epochs": ("epochs", _int_or_float),
+    "--lora_r": ("lora_rank", int),
+    "--lora_alpha": ("lora_alpha", int),
+    "--adapter": ("adapter", str),
+    "--load_in_4bit": ("load_in_4bit", bool),
+    "--load_in_8bit": ("load_in_8bit", bool),
+    "--seed": ("random_seed", int),
+}
+
+
+def _axolotl_args(tokens):
+    for seg in _invocation_segments(tokens):
+        for i, tok in enumerate(seg):
+            if os.path.basename(tok) == "axolotl" and seg[i + 1:i + 2] == ["train"]:
+                return seg[i + 2:]
+            if i > 0 and seg[i - 1] == "-m" and tok == "axolotl.cli.train":
+                return seg[i + 1:]
+    return None
+
+
+def detect_axolotl_from_command(command):
+    """Detect model/LoRA config from an `axolotl train`-style CLI invocation."""
+    args = _axolotl_args(command)
+    if args is None:
+        return None
+    parsed, _ = _parse_flags(args, _AXOLOTL_ARG_MAP, "_", bool_values=True)
+    result = {"training_framework": "axolotl", **parsed}
+
+    adapter = (result.pop("adapter", "") or "").lower()
+    quantized = result.pop("load_in_4bit", False) or result.pop("load_in_8bit", False)
+    if adapter in ("lora", "qlora", "relora"):
+        # axolotl's own QLoRA is `adapter: qlora`; a bare `lora` + 4/8-bit load
+        # is QLoRA in effect too.
+        result["adaptation_method"] = "qlora" if (adapter == "lora" and quantized) else adapter
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# LLaMA-Factory (fine-tuning)
+#
+# `llamafactory-cli train <config.yaml>` or `llamafactory-cli train --flag ...`.
+# It's built on transformers, so its flag names mirror trl's HF-style set. A
+# config-file run exposes nothing on the CLI (not read, same as trl/axolotl); a
+# flag-style run is parsed here. `--finetuning_type` selects lora/full/freeze;
+# only `lora` carries an adaptation method (QLoRA when `--quantization_bit` is
+# set, DoRA/rsLoRA with their flags).
+# ---------------------------------------------------------------------------
+
+_LLAMAFACTORY_ARG_MAP = {
+    "--model_name_or_path": ("model_name", str),
+    "--finetuning_type": ("finetuning_type", str),
+    "--lora_rank": ("lora_rank", int),
+    "--lora_alpha": ("lora_alpha", int),
+    "--use_dora": ("use_dora", bool),
+    "--use_rslora": ("use_rslora", bool),
+    "--quantization_bit": ("quantization_bit", int),
+    "--learning_rate": ("learning_rate", _finite_float),
+    "--per_device_train_batch_size": ("batch_size", int),
+    "--num_train_epochs": ("epochs", _int_or_float),
+    "--seed": ("random_seed", int),
+}
+
+
+def _llamafactory_args(tokens):
+    for seg in _invocation_segments(tokens):
+        for i, tok in enumerate(seg):
+            if os.path.basename(tok) == "llamafactory-cli" and seg[i + 1:i + 2] == ["train"]:
+                return seg[i + 2:]
+    return None
+
+
+def detect_llamafactory_from_command(command):
+    """Detect model/LoRA config from a `llamafactory-cli train`-style CLI."""
+    args = _llamafactory_args(command)
+    if args is None:
+        return None
+    parsed, _ = _parse_flags(args, _LLAMAFACTORY_ARG_MAP, "_", bool_values=True)
+    result = {"training_framework": "llama-factory", **parsed}
+
+    ft = (result.pop("finetuning_type", "") or "").lower()
+    use_dora = result.pop("use_dora", False)
+    use_rslora = result.pop("use_rslora", False)
+    quantized = bool(result.pop("quantization_bit", None))
+    if ft == "lora":
+        if use_dora:
+            result["adaptation_method"] = "dora"
+        elif use_rslora:
+            result["adaptation_method"] = "rslora"
+        elif quantized:
+            result["adaptation_method"] = "qlora"
+        else:
+            result["adaptation_method"] = "lora"
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Parallelization
 # ---------------------------------------------------------------------------
 
@@ -1397,6 +1512,8 @@ def detect_model_from_containers(containers):
                 or detect_sglang_from_command(tokens)
                 or detect_lmdeploy_from_command(tokens)
                 or detect_trl_from_command(tokens)
+                or detect_axolotl_from_command(tokens)
+                or detect_llamafactory_from_command(tokens)
                 or _detect_vllm_from_entrypoint_args(container)
                 or _detect_tgi_from_entrypoint_args(container)
             )
