@@ -101,12 +101,22 @@ finalizerCleanup:
 
 # Prometheus/Thanos endpoint the postprocess Job queries directly for telemetry.
 # Auth (bearer ServiceAccount token) and TLS trust (the service-ca ConfigMap
-# aibom-workload-namespace creates per opted-in namespace, or the system trust
+# this chart creates on OpenShift, or the system trust
 # store if that's absent) are always automatic — see postprocess.py. Unset, it's
 # https://thanos-querier.openshift-monitoring.svc:9091 on OpenShift and empty
 # elsewhere. Empty disables telemetry collection entirely.
 prometheus:
   url: null
+
+# Lets the aibom-postprocess ServiceAccount query Prometheus/Thanos Querier for
+# telemetry. Postprocess Jobs run in this chart's namespace, so this is bound
+# once here rather than per workload namespace. Binds cluster-monitoring-view
+# on OpenShift; nothing is bound elsewhere. Set enabled to false if your
+# account can't create a ClusterRoleBinding and have a cluster-admin apply one
+# for the aibom-postprocess ServiceAccount instead; telemetry is then empty
+# rather than the install failing.
+monitoringAccess:
+  enabled: true
 
 # Git provenance from image labels: when the cluster has no image.openshift.io
 # Image object for a workload's image (any non-OpenShift cluster, or an image
