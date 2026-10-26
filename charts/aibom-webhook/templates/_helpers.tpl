@@ -48,7 +48,7 @@ override it. See getting-started's offline note.
 {{- else if .Capabilities.APIVersions.Has "datasciencecluster.opendatahub.io/v1" -}}
 image-registry.openshift-image-registry.svc:5000/redhat-ods-applications/runtime-pytorch:pytorch
 {{- else -}}
-pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime
+pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime@sha256:e5c32997194edfc6fb0235223d1cd0433056045a468e7dfeaac390a3fcf8ae6d
 {{- end -}}
 {{- end -}}
 
@@ -62,4 +62,16 @@ Prometheus URL. Unset, it's OpenShift's Thanos Querier on OpenShift and empty
 {{- else if include "aibom-webhook.openshift" . -}}
 https://thanos-querier.openshift-monitoring.svc:9091
 {{- end -}}
+{{- end -}}
+
+{{/*
+Image tags default to the chart's appVersion, so a released chart runs the
+images built for that release. A checkout's Chart.yaml has appVersion "latest".
+*/}}
+{{- define "aibom-webhook.webhookTag" -}}
+{{- .Values.image.webhook.tag | default .Chart.AppVersion -}}
+{{- end -}}
+
+{{- define "aibom-webhook.postprocessTag" -}}
+{{- .Values.image.postprocess.tag | default .Chart.AppVersion -}}
 {{- end -}}

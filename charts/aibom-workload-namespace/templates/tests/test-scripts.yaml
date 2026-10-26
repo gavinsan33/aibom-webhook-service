@@ -1,0 +1,43 @@
+# `helm test`: the aibom-scripts ConfigMap exists and every script is non-empty.
+# Mounting it is the check: a missing ConfigMap keeps the pod from starting.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: aibom-namespace-test
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: test
+      image: {{ .Values.test.image | default (printf "quay.io/project-aibom/aibom-postprocess:%s" .Chart.AppVersion) | quote }}
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      command:
+        - python3
+        - -c
+        - |
+          import os, sys
+          names = ["generate_snapshot.py", "runtime_detector.py", "k8s_api.py", "dataset_sidecar.py"]
+          empty = [n for n in names if os.path.getsize("/scripts/" + n) == 0]
+          if empty:
+              sys.exit(f"empty scripts in aibom-scripts: {empty}")
+          print("aibom-scripts: ok")
+      volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+          readOnly: true
+  volumes:
+    - name: scripts
+      configMap:
+        name: aibom-scripts

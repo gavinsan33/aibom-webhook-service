@@ -1,0 +1,46 @@
+name: Build images
+
+# Every push to main rebuilds both images as :latest and :<short sha>, which
+# `just deploy` and the dev charts from chart-publish.yml use. Release tags
+# (:X.Y.Z) come from release.yml instead. This replaces Quay's GitHub build
+# triggers, whose generated deploy key GitHub rejects as too short.
+on:
+  push:
+    branches: [main]
+
+env:
+  REGISTRY: quay.io/project-aibom
+
+jobs:
+  images:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - image: aibom-webhook-service
+            file: Dockerfile
+          - image: aibom-postprocess
+            file: postprocess/Dockerfile
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: quay.io
+          username: ${{ secrets.QUAY_ROBOT_USERNAME }}
+          password: ${{ secrets.QUAY_ROBOT_TOKEN }}
+
+      - name: Short SHA
+        id: sha
+        run: echo "sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.file }}
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ matrix.image }}:latest
+            ${{ env.REGISTRY }}/${{ matrix.image }}:${{ steps.sha.outputs.sha }}

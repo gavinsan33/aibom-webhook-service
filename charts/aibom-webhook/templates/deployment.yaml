@@ -5,7 +5,7 @@ metadata:
   namespace: {{ include "aibom-webhook.namespace" . }}
   labels:
     app: aibom-webhook
-    app.kubernetes.io/version: {{ .Values.image.webhook.tag | quote }}
+    app.kubernetes.io/version: {{ include "aibom-webhook.webhookTag" . | quote }}
 spec:
   replicas: {{ .Values.replicaCount }}
   strategy:
@@ -17,7 +17,7 @@ spec:
     metadata:
       labels:
         app: aibom-webhook
-        app.kubernetes.io/version: {{ .Values.image.webhook.tag | quote }}
+        app.kubernetes.io/version: {{ include "aibom-webhook.webhookTag" . | quote }}
     spec:
       serviceAccountName: aibom-webhook
       securityContext:
@@ -26,8 +26,10 @@ spec:
           type: RuntimeDefault
       containers:
         - name: webhook
-          image: "{{ .Values.image.webhook.repository }}:{{ .Values.image.webhook.tag }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: "{{ .Values.image.webhook.repository }}:{{ include "aibom-webhook.webhookTag" . }}"
+          {{- with .Values.image.pullPolicy }}
+          imagePullPolicy: {{ . }}
+          {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -40,7 +42,7 @@ spec:
             - --tls-cert=/certs/tls.crt
             - --tls-key=/certs/tls.key
             - --port=8443
-            - --postprocess-image={{ .Values.image.postprocess.repository }}:{{ .Values.image.postprocess.tag }}
+            - --postprocess-image={{ .Values.image.postprocess.repository }}:{{ include "aibom-webhook.postprocessTag" . }}
             - --discovery-image={{ include "aibom-webhook.discoveryImage" . }}
             - --enable-watcher={{ .Values.watcher.enabled }}
             - --prometheus-url={{ include "aibom-webhook.prometheusURL" . }}

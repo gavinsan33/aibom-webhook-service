@@ -9,7 +9,7 @@ binary_name := "webhook-server"
 webhook_namespace := "project-aibom"
 # quay.io org/user that deploy/deploy-local/chart-push push to and pull from by default.
 # Override per-invocation with --repo=<repo>, or with `just --set default_repo <repo> <recipe>`.
-default_repo := "quay.io/gsanders"
+default_repo := "quay.io/project-aibom"
 # Cluster flavor the deploy recipes target: openshift (default) or kubernetes.
 # kubernetes uses kubectl and doesn't impersonate system:admin, an OpenShift
 # identity; a cluster-admin kubeconfig is expected instead.
@@ -243,7 +243,7 @@ deploy-buildconfig *args: _check-auth
     values_args=()
     [[ -n "$values_file" ]] && values_args=(-f "$values_file")
     gitref_args=()
-    [[ "$version" = "latest" ]] || gitref_args=(--set "build.gitRef=$version")
+    [[ "$version" = "latest" ]] || gitref_args=(--set-string "build.gitRef=$version")
     first_install=false
     helm status aibom-webhook -n {{ webhook_namespace }} >/dev/null 2>&1 || first_install=true
     helm upgrade --install aibom-webhook charts/aibom-webhook -n {{ webhook_namespace }} "$ns_flag" \
@@ -252,7 +252,7 @@ deploy-buildconfig *args: _check-auth
         --set build.enabled=true \
         --set image.webhook.repository="image-registry.openshift-image-registry.svc:5000/{{ webhook_namespace }}/aibom-webhook-service" \
         --set image.postprocess.repository="image-registry.openshift-image-registry.svc:5000/{{ webhook_namespace }}/aibom-postprocess" \
-        --set image.webhook.tag="$version" --set image.postprocess.tag="$version" "${gitref_args[@]}"
+        --set-string image.webhook.tag="$version" --set-string image.postprocess.tag="$version" "${gitref_args[@]}"
     if [[ "$first_install" = true ]]; then
         # The BuildConfigs' ConfigChange trigger already auto-fired an initial build the
         # moment they were just created above — starting another would just double build
@@ -374,21 +374,21 @@ deploy-local *args: _check-auth
         --set build.enabled=false \
         --set image.webhook.repository="${repo}/aibom-webhook-service" \
         --set image.postprocess.repository="${repo}/aibom-postprocess" \
-        --set image.webhook.tag="$version" --set image.postprocess.tag="$version"
+        --set-string image.webhook.tag="$version" --set-string image.postprocess.tag="$version"
     {{ kubectl }} -n {{ webhook_namespace }} rollout restart deployment/aibom-webhook
     {{ kubectl }} -n {{ webhook_namespace }} rollout status deployment/aibom-webhook --timeout=120s
     echo "NOTE: run 'just setup-namespace <namespace>' for each workload namespace"
 
-# The seamless default: install/upgrade the chart against images Quay already
+# The seamless default: install/upgrade the chart against images CI already
 # built — no build, no push, just a helm install pointing at a tag. Works once
-# Quay's GitHub build triggers are set up (see README) to auto-build both
-# images on every push to main: nothing runs locally at all, this just tells
+# .github/workflows/images.yml has built both images on a push to main
+# (see docs/reference/development.md): nothing runs locally at all, this just tells
 # the cluster where to pull from. Also matches values.yaml's own defaults
-# (quay.io/gsanders, tag latest), so `just deploy` with no arguments is
+# (quay.io/project-aibom, tag latest), so `just deploy` with no arguments is
 # equivalent to a plain `helm upgrade --install` with no --set overrides —
 # repo/version only matter when deploying a different quay org or pinning to
-# an immutable SHA tag instead of the mutable "latest" Quay's main trigger
-# keeps overwriting. For in-cluster builds instead, see `just deploy-buildconfig`.
+# an immutable SHA tag instead of the mutable "latest" each main build
+# overwrites. For in-cluster builds instead, see `just deploy-buildconfig`.
 # Usage: just deploy [--repo=<repo>] [--version=<tag>] [--values=<file>] [--skip-crds]
 [group('deploy')]
 deploy *args: _check-auth
@@ -423,7 +423,7 @@ deploy *args: _check-auth
         --set build.enabled=false \
         --set image.webhook.repository="${repo}/aibom-webhook-service" \
         --set image.postprocess.repository="${repo}/aibom-postprocess" \
-        --set image.webhook.tag="$version" --set image.postprocess.tag="$version"
+        --set-string image.webhook.tag="$version" --set-string image.postprocess.tag="$version"
     {{ kubectl }} -n {{ webhook_namespace }} rollout restart deployment/aibom-webhook
     {{ kubectl }} -n {{ webhook_namespace }} rollout status deployment/aibom-webhook --timeout=120s
     echo "NOTE: run 'just setup-namespace <namespace>' for each workload namespace"
@@ -584,34 +584,39 @@ uninstall-namespace *args: _check-auth
 # there's exactly one source of truth for the scripts and this recipe is the
 # only place responsible for keeping the packaged copy fresh.
 #
-# Publishes each chart under two tags per run, mirroring the images' own
-# mutable-latest/immutable-<sha> split (see "Setting Up Quay Auto-Build" in the
-# README — every image build produces both):
-#   - <Chart.yaml version> (e.g. 0.1.0) — mutable, overwritten on every
-#     chart-push, since Chart.yaml's version isn't bumped automatically.
-#     `helm upgrade --install ... oci://.../aibom-webhook` with no --version
-#     resolves here.
-#   - <Chart.yaml version>-<git sha> (e.g. 0.1.0-abc1234, "-dirty" suffixed the
-#     same way deploy-local's tag is if the working tree has uncommitted
-#     changes) — immutable, one per chart-push, for pinning/rollback.
-# The pinned tag uses SemVer *prerelease* syntax (hyphen), not build metadata
-# (plus): a prerelease has strictly lower precedence than the plain release
-# per the SemVer spec, so "no --version" reliably and deterministically
-# resolves to the mutable tag above rather than being an unpredictable tie —
-# build metadata is ignored for precedence entirely, which is what made an
-# earlier version of this recipe (using "+<sha>") ambiguous.
-# Usage: just chart-push [--repo=<repo>]
+# Without --version, publishes each chart as <Chart.yaml version>-<git sha>
+# (e.g. 0.1.0-abc1234, "-dirty" suffixed if the working tree has uncommitted
+# changes): a dev build, immutable, one per run. Its images are :latest
+# (appVersion "latest" in a checkout). The SemVer prerelease hyphen means
+# `helm install` with no --version skips dev builds and takes the newest
+# release; pass --devel or an exact --version to install one.
+#
+# With --version=X.Y.Z, publishes a release instead (#150): both charts as
+# X.Y.Z with appVersion X.Y.Z, so their images default to :X.Y.Z -- the tags
+# .github/workflows/release.yml builds from the same git tag. Refuses a version
+# that's already published: a release is pushed once.
+# Usage: just chart-push [--version=X.Y.Z] [--repo=<repo>]
 [group('charts')]
 chart-push *args:
     #!/usr/bin/env bash
     set -euo pipefail
     repo="{{ default_repo }}"
+    version=""
     for arg in {{ args }}; do
         case "$arg" in
+            --version=*) version="${arg#--version=}" ;;
             --repo=*) repo="${arg#--repo=}" ;;
-            *) echo "error: unknown argument '$arg' (expected --repo=<repo>)" >&2; exit 1 ;;
+            *) echo "error: unknown argument '$arg' (expected --version=X.Y.Z or --repo=<repo>)" >&2; exit 1 ;;
         esac
     done
+    if [[ -n "$version" ]]; then
+        [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "error: --version must be X.Y.Z, got '$version'" >&2; exit 1; }
+        for chart in aibom-webhook aibom-workload-namespace; do
+            if helm show chart "oci://$repo/$chart" --version "$version" >/dev/null 2>&1; then
+                echo "error: oci://$repo/$chart $version is already published" >&2; exit 1
+            fi
+        done
+    fi
     pkg_dir="$(mktemp -d)"
     trap 'rm -rf charts/aibom-workload-namespace/files "$pkg_dir"' EXIT
     rm -rf charts/aibom-workload-namespace/files
@@ -622,11 +627,13 @@ chart-push *args:
     sha="$(git rev-parse --short HEAD)"
     git diff --quiet HEAD || sha="${sha}-dirty"
     for chart in aibom-webhook aibom-workload-namespace; do
-        base_version="$(grep '^version:' "charts/$chart/Chart.yaml" | awk '{print $2}')"
-        pinned_version="${base_version}-${sha}"
-        helm package "charts/$chart" -d "$pkg_dir"
-        helm package "charts/$chart" -d "$pkg_dir" --version "$pinned_version"
-        helm push "$pkg_dir/$chart-$base_version.tgz" "oci://$repo"
-        helm push "$pkg_dir/$chart-${pinned_version}.tgz" "oci://$repo"
-        echo "pushed oci://$repo/$chart — mutable: $base_version, pin with: --version=$pinned_version"
+        if [[ -n "$version" ]]; then
+            chart_version="$version"
+            helm package "charts/$chart" -d "$pkg_dir" --version "$version" --app-version "$version"
+        else
+            chart_version="$(grep '^version:' "charts/$chart/Chart.yaml" | awk '{print $2}')-${sha}"
+            helm package "charts/$chart" -d "$pkg_dir" --version "$chart_version"
+        fi
+        helm push "$pkg_dir/$chart-${chart_version}.tgz" "oci://$repo"
+        echo "pushed oci://$repo/$chart --version=$chart_version"
     done
