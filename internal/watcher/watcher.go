@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
@@ -61,7 +62,11 @@ const (
 
 	// podFinalizerName is distinct from finalizerName so that `kubectl get -o yaml`
 	// self-documents which mechanism (Job-level vs Pod-level) placed a given finalizer.
-	podFinalizerName = "aibom.io/log-extraction-pod"
+	podFinalizerName = aibomdata.PodFinalizerName
+
+	// jobControllerUIDLabel is set by the Job controller on every pod it
+	// creates, to the owning Job's UID.
+	jobControllerUIDLabel = "batch.kubernetes.io/controller-uid"
 
 	postprocessContainerName      = "aibom-postprocess"
 	postprocessServiceAccountName = aibomdata.PostprocessServiceAccountName
@@ -151,7 +156,9 @@ type Watcher struct {
 	// postprocessing", so watch-everything-then-filter is unavoidable), pods are far
 	// higher cardinality cluster-wide and the webhook already applies LabelInstrumented
 	// before this feature runs, so scoping the watch server-side avoids needless
-	// watch-cache load from every unrelated pod in the cluster.
+	// watch-cache load from every unrelated pod in the cluster. Job-owned pods are
+	// included so their finalizer (see aibomdata.PodFinalizerName) can be found
+	// from the cache by releaseJobPods.
 	podFactory informers.SharedInformerFactory
 }
 
@@ -168,7 +175,7 @@ func New(clientset kubernetes.Interface, cfg Config) *Watcher {
 		podFactory: informers.NewSharedInformerFactoryWithOptions(
 			clientset, resyncPeriod,
 			informers.WithTweakListOptions(func(opts *metav1.ListOptions) {
-				opts.LabelSelector = fmt.Sprintf("%s=true,!batch.kubernetes.io/job-name", LabelInstrumented)
+				opts.LabelSelector = LabelInstrumented + "=true"
 			}),
 		),
 	}
@@ -273,15 +280,17 @@ func (w *Watcher) onJobEvent(obj interface{}) {
 		return
 	}
 
-	// Path B: job is complete or being deleted — run postprocessing
+	// Path B: job is complete or being deleted — run postprocessing. Every
+	// return below except a retry releases the Job and its pods (finishJob).
 	if job.Annotations != nil && job.Annotations[AnnotationPostprocess] != "" {
-		if hasFinalizer(job) {
-			w.removeFinalizer(context.TODO(), job)
-		}
+		w.finishJob(context.TODO(), job)
 		return
 	}
 
 	if !hasFinalizer(job) && !w.isJobFinished(job) {
+		// Deleted while running without ever qualifying: nothing to collect,
+		// but its pods still carry the webhook's finalizer.
+		w.releaseJobPods(context.TODO(), job)
 		return
 	}
 
@@ -293,9 +302,7 @@ func (w *Watcher) onJobEvent(obj interface{}) {
 		// will never reach collectAIBOM (the only other place that deletes
 		// it), clean it up here instead of leaking it forever.
 		w.deleteWorkloadIdentity(context.TODO(), job.Namespace, job.Name)
-		if hasFinalizer(job) {
-			w.removeFinalizer(context.TODO(), job)
-		}
+		w.finishJob(context.TODO(), job)
 		return
 	}
 
@@ -309,9 +316,7 @@ func (w *Watcher) onJobEvent(obj interface{}) {
 		if retries >= maxPostprocessRetries {
 			log.Printf("giving up on postprocessing %s/%s after %d retries; removing finalizer", job.Namespace, job.Name, retries)
 			w.deleteWorkloadIdentity(context.TODO(), job.Namespace, job.Name)
-			if hasFinalizer(job) {
-				w.removeFinalizer(context.TODO(), job)
-			}
+			w.finishJob(context.TODO(), job)
 			return
 		}
 		// Leave the finalizer in place so the next resync retries postprocess-job
@@ -321,8 +326,33 @@ func (w *Watcher) onJobEvent(obj interface{}) {
 		return
 	}
 
-	if hasFinalizer(job) {
-		w.removeFinalizer(context.TODO(), job)
+	w.finishJob(context.TODO(), job)
+}
+
+// finishJob releases a Job the watcher is done with: its pods' finalizer
+// first, then the Job's own.
+func (w *Watcher) finishJob(ctx context.Context, job *batchv1.Job) {
+	w.releaseJobPods(ctx, job)
+	w.removeFinalizer(ctx, job)
+}
+
+// releaseJobPods removes the finalizer the webhook puts on a Job's pods at
+// admission (#164). It reads the informer cache, so it's cheap enough to run
+// on every resync of a finished Job, which is what retries a failed removal.
+// Pods are matched by the Job's UID too, so an earlier run's Job being
+// cleaned up doesn't release a same-named rerun's pods.
+func (w *Watcher) releaseJobPods(ctx context.Context, job *batchv1.Job) {
+	selector := labels.Set{"batch.kubernetes.io/job-name": job.Name}
+	if job.UID != "" {
+		selector[jobControllerUIDLabel] = string(job.UID)
+	}
+	pods, err := w.podFactory.Core().V1().Pods().Lister().Pods(job.Namespace).List(labels.SelectorFromSet(selector))
+	if err != nil {
+		log.Printf("warning: could not list pods of %s/%s to release their finalizer: %v", job.Namespace, job.Name, err)
+		return
+	}
+	for _, pod := range pods {
+		w.removePodFinalizer(ctx, pod)
 	}
 }
 
@@ -358,7 +388,16 @@ func (w *Watcher) onPodEvent(obj interface{}) {
 	// Pods owned by a Job (or a JobSet's Jobs) are handled by onJobEvent's
 	// Job-level finalizer path — the Job controller sets this label on every
 	// pod it creates, so it reliably identifies pods already covered there.
-	if pod.Labels["batch.kubernetes.io/job-name"] != "" {
+	// onJobEvent also releases their finalizer, unless the Job is gone (it
+	// was deleted with --cascade=orphan, say, or replaced by a same-named
+	// rerun), which leaves nothing else to.
+	if jobName := pod.Labels["batch.kubernetes.io/job-name"]; jobName != "" {
+		if pod.DeletionTimestamp != nil && hasPodFinalizer(pod) {
+			job, err := w.factory.Batch().V1().Jobs().Lister().Jobs(pod.Namespace).Get(jobName)
+			if errors.IsNotFound(err) || (err == nil && string(job.UID) != pod.Labels[jobControllerUIDLabel]) {
+				w.removePodFinalizer(context.TODO(), pod)
+			}
+		}
 		return
 	}
 
@@ -487,15 +526,23 @@ func (w *Watcher) addPodFinalizer(ctx context.Context, pod *corev1.Pod) error {
 	return nil
 }
 
+// removePodFinalizer patches at the pod's resourceVersion because the Job
+// controller removes its own tracking finalizer from a Job's pods around the
+// same time, and a merge patch of the finalizer list from a stale copy would
+// put it back. A conflict is left for the next event or resync to retry with
+// a fresh copy; the webhook has no get on pods to re-read it here.
 func (w *Watcher) removePodFinalizer(ctx context.Context, pod *corev1.Pod) {
-	patch, ok := finalizerRemovalPatch(pod.Finalizers, podFinalizerName, "")
+	patch, ok := finalizerRemovalPatch(pod.Finalizers, podFinalizerName, pod.ResourceVersion)
 	if !ok {
 		return
 	}
 	_, err := w.clientset.CoreV1().Pods(pod.Namespace).Patch(ctx, pod.Name, types.MergePatchType, patch, metav1.PatchOptions{})
-	if err != nil {
+	switch {
+	case errors.IsConflict(err):
+		log.Printf("pod %s/%s changed before its finalizer could be removed; retrying on its next update", pod.Namespace, pod.Name)
+	case err != nil:
 		log.Printf("warning: could not remove finalizer from pod %s/%s: %v", pod.Namespace, pod.Name, err)
-	} else {
+	default:
 		log.Printf("removed finalizer from pod %s/%s", pod.Namespace, pod.Name)
 	}
 }
