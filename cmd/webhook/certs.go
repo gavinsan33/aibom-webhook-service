@@ -20,8 +20,10 @@ type certReloader struct {
 	mu      sync.Mutex
 	modTime time.Time
 	cert    *tls.Certificate
-	// modTime of the last pair that failed to load, so a persistently broken
-	// pair is warned about once rather than on every handshake.
+	// Whether a reload failure has been warned about, and the certificate's
+	// modTime at that point (zero if it couldn't be stat'ed), so a persistently
+	// broken pair is warned about once rather than on every handshake.
+	warned        bool
 	failedModTime time.Time
 }
 
@@ -37,7 +39,7 @@ func (r *certReloader) GetCertificate(*tls.ClientHelloInfo) (*tls.Certificate, e
 		var cert tls.Certificate
 		cert, err = tls.LoadX509KeyPair(r.certPath, r.keyPath)
 		if err == nil {
-			r.cert, r.modTime = &cert, info.ModTime()
+			r.cert, r.modTime, r.warned = &cert, info.ModTime(), false
 			return r.cert, nil
 		}
 	}
@@ -48,8 +50,8 @@ func (r *certReloader) GetCertificate(*tls.ClientHelloInfo) (*tls.Certificate, e
 		if info != nil {
 			mtime = info.ModTime()
 		}
-		if !mtime.Equal(r.failedModTime) {
-			r.failedModTime = mtime
+		if !r.warned || !mtime.Equal(r.failedModTime) {
+			r.warned, r.failedModTime = true, mtime
 			log.Printf("warning: could not reload TLS certificate, keeping the previous one: %v", err)
 		}
 		return r.cert, nil

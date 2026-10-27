@@ -77,3 +77,25 @@ func TestCertReloaderPicksUpRotation(t *testing.T) {
 		t.Fatalf("got %d reload warnings for one broken pair, want 1", n)
 	}
 }
+
+// A certificate that disappears from a running pod (Secret deleted, mount
+// unreadable) is warned about once, not silently served from the cache.
+func TestCertReloaderWarnsWhenCertGoesMissing(t *testing.T) {
+	dir := t.TempDir()
+	r := &certReloader{certPath: filepath.Join(dir, "tls.crt"), keyPath: filepath.Join(dir, "tls.key")}
+	writeKeyPair(t, dir, "first", time.Now())
+	commonName(t, r)
+
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	defer log.SetOutput(os.Stderr)
+	os.Remove(r.certPath)
+	for range 3 {
+		if got := commonName(t, r); got != "first" {
+			t.Fatalf("with the certificate missing got %q, want the cached first", got)
+		}
+	}
+	if n := strings.Count(logs.String(), "could not reload"); n != 1 {
+		t.Fatalf("got %d reload warnings for a missing certificate, want 1", n)
+	}
+}
