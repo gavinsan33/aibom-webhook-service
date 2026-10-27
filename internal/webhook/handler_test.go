@@ -1277,27 +1277,47 @@ func TestHandleAdmission_AllowsUnrelatedConfigMapFromAnyIdentity(t *testing.T) {
 
 // Job-owned pods are held by a finalizer so a Job whose controller deletes
 // them on activeDeadlineSeconds still has pods for the watcher to read (#164).
+// Both patch shapes are applied to the pod, since a wrong path fails
+// admission rather than any assertion on the patch list.
 func TestMutate_JobPodGetsPodFinalizer(t *testing.T) {
 	m := newTestMutator()
 
-	jobPod := podWithOwner("Job")
-	jobPod.Labels = map[string]string{"batch.kubernetes.io/job-name": "test-job"}
-	jobPod.Finalizers = []string{"batch.kubernetes.io/job-tracking"}
-	patches, err := m.Mutate(jobPod, "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	found := false
-	for _, p := range patches {
-		if p.Path == "/metadata/finalizers/-" && p.Value == aibomdata.PodFinalizerName {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("Job pod should get %s appended to its finalizers, patches: %+v", aibomdata.PodFinalizerName, patches)
+	for name, tc := range map[string]struct {
+		existing, want []string
+	}{
+		"no finalizers yet":       {nil, []string{aibomdata.PodFinalizerName}},
+		"job-tracking already on": {[]string{"batch.kubernetes.io/job-tracking"}, []string{"batch.kubernetes.io/job-tracking", aibomdata.PodFinalizerName}},
+		"already present":         {[]string{aibomdata.PodFinalizerName}, []string{aibomdata.PodFinalizerName}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			jobPod := podWithOwner("Job")
+			jobPod.Labels = map[string]string{"batch.kubernetes.io/job-name": "test-job"}
+			jobPod.Finalizers = tc.existing
+			patches, err := m.Mutate(jobPod, "")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			original, _ := json.Marshal(jobPod)
+			patchJSON, _ := json.Marshal(patches)
+			decoded, err := jsonpatch.DecodePatch(patchJSON)
+			if err != nil {
+				t.Fatalf("decode patch: %v", err)
+			}
+			mutated, err := decoded.Apply(original)
+			if err != nil {
+				t.Fatalf("patches don't apply to the pod: %v", err)
+			}
+			var got corev1.Pod
+			if err := json.Unmarshal(mutated, &got); err != nil {
+				t.Fatalf("unmarshal mutated pod: %v", err)
+			}
+			if strings.Join(got.Finalizers, ",") != strings.Join(tc.want, ",") {
+				t.Errorf("finalizers = %v, want %v", got.Finalizers, tc.want)
+			}
+		})
 	}
 
-	patches, err = m.Mutate(podWithGPU(), "")
+	patches, err := m.Mutate(podWithGPU(), "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

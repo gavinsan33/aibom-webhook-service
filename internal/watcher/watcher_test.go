@@ -2586,6 +2586,53 @@ func TestReleaseJobPods_MatchesJobUID(t *testing.T) {
 	assertPodReleased(t, client, "test-ns", leftover.Name)
 }
 
+func TestGivingUpOnPostprocess_ReleasesPodFinalizer(t *testing.T) {
+	job := completedJob("gpu-job", "test-ns")
+	job.Finalizers = []string{finalizerName}
+	job.Annotations = map[string]string{AnnotationPostprocessRetries: strconv.Itoa(maxPostprocessRetries - 1)}
+	pod := heldPod("gpu-job", "test-ns", true)
+
+	client := fake.NewSimpleClientset(enabledNamespace("test-ns"), job, pod)
+	client.PrependReactor("create", "jobs", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, fmt.Errorf("quota exceeded")
+	})
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "busybox:latest"})
+	startWatcher(t, w)
+
+	w.onJobEvent(job)
+
+	assertPodReleased(t, client, "test-ns", pod.Name)
+}
+
+// A Job deleted while running that never qualified has no Job finalizer and
+// is never postprocessed, but its pods still carry the webhook's.
+func TestDeletedNonQualifyingJob_ReleasesPodFinalizer(t *testing.T) {
+	now := metav1.Now()
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "cpu-job", Namespace: "test-ns", DeletionTimestamp: &now, Finalizers: []string{"other.io/keep"}}}
+	pod := heldPod("cpu-job", "test-ns", true)
+	pod.Spec.Containers[0].Resources = corev1.ResourceRequirements{}
+
+	client := fake.NewSimpleClientset(enabledNamespace("test-ns"), job, pod)
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "busybox:latest"})
+	startWatcher(t, w)
+
+	w.onJobEvent(job)
+
+	assertPodReleased(t, client, "test-ns", pod.Name)
+}
+
+func TestOptedOutNamespace_ReleasesJobPodFinalizer(t *testing.T) {
+	pod := heldPod("train-job", "disabled-ns", false)
+
+	client := fake.NewSimpleClientset(disabledNamespace("disabled-ns"), pod)
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "busybox:latest"})
+	startWatcher(t, w)
+
+	w.onPodEvent(pod)
+
+	assertPodReleased(t, client, "disabled-ns", pod.Name)
+}
+
 func TestRunningJobPod_KeepsPodFinalizer(t *testing.T) {
 	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "gpu-job", Namespace: "test-ns"}}
 	pod := heldPod("gpu-job", "test-ns", true)
