@@ -1,0 +1,25 @@
+name: Chart lint
+
+# helm lint is the only Mandatory check in the community chart-verifier profile
+# the OpenShift Helm catalog uses, so running it on every chart change catches a
+# broken template or values.schema.json before it reaches a release or the
+# catalog submission. platform=openshift exercises the OpenShift-only branches
+# (image caching, BuildConfig gating) that auto can't detect without a cluster.
+on:
+  pull_request:
+    paths:
+      - "charts/**"
+  push:
+    branches: [main]
+    paths:
+      - "charts/**"
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - run: |
+          helm lint charts/aibom-webhook --set platform=openshift
+          helm lint charts/aibom-workload-namespace --set platform=openshift
