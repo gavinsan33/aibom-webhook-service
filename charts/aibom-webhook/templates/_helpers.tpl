@@ -78,11 +78,17 @@ images built for that release. A checkout's Chart.yaml has appVersion "latest".
 
 {{/*
 Who issues the webhook's TLS certificate: "service-ca" (OpenShift's built-in
-service CA) or "cert-manager". tls.provider=auto picks service-ca on OpenShift.
+service CA) or "cert-manager". tls.provider=auto picks service-ca on OpenShift
+when the service-ca operator's API (operator.openshift.io/v1 ServiceCA) is
+served too, since the image API alone doesn't prove the operator runs. An
+explicit platform=openshift is trusted instead, since an offline render sees
+no APIs.
 */}}
 {{- define "aibom-webhook.tlsProvider" -}}
 {{- $p := toString .Values.tls.provider -}}
-{{- if eq $p "auto" -}}{{ if include "aibom-webhook.openshift" . }}service-ca{{ else }}cert-manager{{ end }}
+{{- if eq $p "auto" -}}
+{{- $serviceCA := or (eq (toString .Values.platform) "openshift") (.Capabilities.APIVersions.Has "operator.openshift.io/v1/ServiceCA") -}}
+{{- if and (include "aibom-webhook.openshift" .) $serviceCA }}service-ca{{ else }}cert-manager{{ end }}
 {{- else if and (eq $p "service-ca") (not (include "aibom-webhook.openshift" .)) -}}
 {{- fail "tls.provider=service-ca needs OpenShift; set platform=openshift (required for an offline helm template) or use cert-manager" -}}
 {{- else -}}{{ $p }}
