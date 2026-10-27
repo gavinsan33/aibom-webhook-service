@@ -572,16 +572,20 @@ func (w *Watcher) setPodPostprocessRetries(ctx context.Context, pod *corev1.Pod,
 }
 
 // isNamespaceOptedOut reports whether the namespace is known to exist and
-// doesn't carry the enabled label. Unlike !isNamespaceEnabled, a failed
-// lookup (informer not synced, namespace gone) is not "opted out": stripping
-// finalizers on the strength of a transient cache miss would throw away the
-// AIBOM of a workload in a namespace that is still enabled.
+// doesn't carry the enabled label, or is being deleted. Unlike
+// !isNamespaceEnabled, a failed lookup (informer not synced, namespace gone)
+// is not "opted out": stripping finalizers on the strength of a transient
+// cache miss would throw away the AIBOM of a workload in a namespace that is
+// still enabled. A namespace being deleted counts: its AIBOM would be created
+// in it and deleted with it, and the Role that lets us remove our finalizers
+// is deleted with it too, so waiting to postprocess can leave the namespace
+// stuck Terminating.
 func (w *Watcher) isNamespaceOptedOut(namespace string) bool {
 	ns, err := w.factory.Core().V1().Namespaces().Lister().Get(namespace)
 	if err != nil {
 		return false
 	}
-	return ns.Labels[LabelEnabled] != "true"
+	return ns.DeletionTimestamp != nil || ns.Labels[LabelEnabled] != "true"
 }
 
 func (w *Watcher) isNamespaceEnabled(namespace string) bool {

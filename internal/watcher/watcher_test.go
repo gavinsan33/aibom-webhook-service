@@ -1981,6 +1981,36 @@ func TestOnPodEvent_OptedOutNamespace_StripsFinalizer(t *testing.T) {
 	}
 }
 
+// A namespace being deleted is treated as opted out: its AIBOM would be
+// deleted with it, and the Role our finalizer removal needs is going too.
+func TestOnJobEvent_TerminatingNamespace_ReleasesWithoutPostprocessing(t *testing.T) {
+	ns := enabledNamespace("dying-ns")
+	now := metav1.Now()
+	ns.DeletionTimestamp = &now
+	job := completedJob("train-job", "dying-ns")
+	job.Finalizers = []string{finalizerName}
+	pod := heldPod("train-job", "dying-ns", true)
+
+	client := fake.NewSimpleClientset(ns, job, pod)
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "busybox:latest"})
+	startWatcher(t, w)
+
+	w.onJobEvent(job)
+	w.onPodEvent(pod)
+
+	got, err := client.BatchV1().Jobs("dying-ns").Get(context.TODO(), "train-job", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if hasFinalizer(got) {
+		t.Error("job finalizer should be released in a namespace being deleted")
+	}
+	assertPodReleased(t, client, "dying-ns", pod.Name)
+	if _, err := client.BatchV1().Jobs("aibom-system").Get(context.TODO(), ppName("dying-ns", "train-job"), metav1.GetOptions{}); err == nil {
+		t.Error("no postprocess job should be created for a namespace being deleted")
+	}
+}
+
 func TestOnJobEvent_UnknownNamespace_KeepsFinalizer(t *testing.T) {
 	// A namespace missing from the informer cache (not yet synced, or gone)
 	// is not "opted out": stripping on a cache miss would discard the AIBOM of
