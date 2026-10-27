@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gavinsan33/aibom-webhook-service/internal/aibomdata"
 	jsonpatch "gopkg.in/evanphx/json-patch.v4"
 	admissionv1 "k8s.io/api/admission/v1"
 	authenticationv1 "k8s.io/api/authentication/v1"
@@ -1271,5 +1272,38 @@ func TestHandleAdmission_AllowsUnrelatedConfigMapFromAnyIdentity(t *testing.T) {
 	}
 	if !resp.Response.Allowed {
 		t.Errorf("expected Allowed=true for an unrelated ConfigMap, got denied: %v", resp.Response.Result)
+	}
+}
+
+// Job-owned pods are held by a finalizer so a Job whose controller deletes
+// them on activeDeadlineSeconds still has pods for the watcher to read (#164).
+func TestMutate_JobPodGetsPodFinalizer(t *testing.T) {
+	m := newTestMutator()
+
+	jobPod := podWithOwner("Job")
+	jobPod.Labels = map[string]string{"batch.kubernetes.io/job-name": "test-job"}
+	jobPod.Finalizers = []string{"batch.kubernetes.io/job-tracking"}
+	patches, err := m.Mutate(jobPod, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	found := false
+	for _, p := range patches {
+		if p.Path == "/metadata/finalizers/-" && p.Value == aibomdata.PodFinalizerName {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Job pod should get %s appended to its finalizers, patches: %+v", aibomdata.PodFinalizerName, patches)
+	}
+
+	patches, err = m.Mutate(podWithGPU(), "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, p := range patches {
+		if strings.HasPrefix(p.Path, "/metadata/finalizers") {
+			t.Errorf("a pod with no Job owner gets its finalizer from the watcher, not admission: %+v", p)
+		}
 	}
 }
