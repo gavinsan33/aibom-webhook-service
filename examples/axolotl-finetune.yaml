@@ -1,19 +1,31 @@
 # Single-GPU LoRA fine-tuning with Axolotl (supervised fine-tuning / SFT).
 #
-# Runs Axolotl's modern Click CLI, `axolotl train <config> [overrides]`. The
-# real training config lives in the YAML file, which runs inside this container
-# and the webhook's postprocess step cannot read — so, exactly like `trl
-# --config`, only the values passed as CLI *overrides* are picked up by
-# CLI-arg detection (here: --base-model, --adapter, --lora-r, ...). Everything
-# else (dataset composition, lora targets) is still auto-detected at runtime by
-# runtime_detector.py when the training process loads it.
+# Runs Axolotl's `axolotl train <config> [overrides]` CLI. CLI-arg detection
+# reads the overrides (--base-model, --adapter, --lora-r, ...) into the AIBOM's
+# model/fine_tuning fields; the config YAML itself runs in the container and the
+# webhook's postprocess step can't read it, so (exactly like `trl --config`)
+# only the command-line overrides are picked up. Dataset composition is still
+# auto-detected at runtime by runtime_detector.py.
 #
-# Uses Axolotl's own official image (the `axolotl` CLI preinstalled with a
-# consistent torch stack) rather than pip-installing it into an NGC PyTorch
-# image, which pulls dependency wheels whose ABI doesn't match NGC's custom
-# torch build. A minimal config is written inline so the example is
-# self-contained; the overrides on the command line are what the AIBOM records
-# as declared model/LoRA settings. --max-steps caps this to a short run.
+# WHY NOT THE OFFICIAL axolotlai/axolotl IMAGE:
+# That image installs Python in a venv (/workspace/axolotl-venv) owned by its own
+# build user. OpenShift's default (restricted-v2 SCC) runs every container as an
+# arbitrary high UID that doesn't own those files, so it can't execute the venv
+# python -> "exec: .../python: Permission denied". (The vendor image would work
+# only with a privileged SCC, e.g. `oc adm policy add-scc-to-user anyuid -z
+# default -n <ns>` as cluster-admin.) Instead this uses the public pytorch/pytorch
+# image, whose Python is world-accessible, and pip-installs axolotl at startup so
+# it runs under the arbitrary UID with no SCC changes. HOME/HF_HOME/PATH point at
+# writable /tmp for the arbitrary UID.
+#
+# Plain LoRA (not QLoRA): QLoRA needs bitsandbytes with a matching CUDA build, an
+# extra moving part; plain LoRA exercises the same detection path
+# (adaptation_method: lora) and runs with fewer dependencies. The qlora/dora/etc.
+# detection branches are covered by the unit tests.
+#
+# EXPIRATION: ttlSecondsAfterFinished deletes this Job (and its pod) 24h after it
+# finishes — success or failure — so a one-off test doesn't linger. The AIBOM
+# custom resource it produces is a separate object and is NOT deleted by this.
 #
 # Plain batch/v1 Job (fine-tuning has no client/server split): qualifies for
 # postprocessing via its GPU request and aibom.io/* annotations, triggering on
@@ -28,6 +40,7 @@ metadata:
     aibom.io/experiment-name: axolotl-lora-sft-benchmark
 spec:
   backoffLimit: 0
+  ttlSecondsAfterFinished: 86400  # auto-delete the Job 24h after it finishes
   template:
     spec:
       restartPolicy: Never
@@ -35,12 +48,14 @@ spec:
         - operator: Exists
       containers:
         - name: finetune
-          image: axolotlai/axolotl:main-latest
+          image: pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
           command:
             - sh
             - -c
             - |
-              cat > /tmp/qlora.yml <<'EOF'
+              export PATH="$HOME/.local/bin:$PATH" && \
+              pip install --no-cache-dir --user axolotl && \
+              cat > /tmp/lora.yml <<'EOF'
               base_model: ibm-granite/granite-3.3-2b-instruct
               datasets:
                 - path: tatsu-lab/alpaca
@@ -49,10 +64,9 @@ spec:
               sequence_len: 1024
               gradient_accumulation_steps: 4
               EOF
-              axolotl train /tmp/qlora.yml \
+              axolotl train /tmp/lora.yml \
                 --base-model ibm-granite/granite-3.3-2b-instruct \
-                --adapter qlora \
-                --load-in-4bit \
+                --adapter lora \
                 --lora-r 16 \
                 --lora-alpha 32 \
                 --micro-batch-size 4 \
@@ -62,9 +76,8 @@ spec:
                 --seed 42
           env:
             # OpenShift runs the pod as an arbitrary non-root UID whose $HOME is
-            # "/" (not writable), so HuggingFace's default ~/.cache download dir
-            # becomes /.cache and fails with PermissionError. Point HOME and the
-            # HF cache at writable /tmp.
+            # "/" (not writable), so pip --user and HuggingFace's ~/.cache both
+            # fail. Point HOME, the HF cache, at writable /tmp.
             - name: HOME
               value: /tmp
             - name: HF_HOME
