@@ -70,6 +70,10 @@ spec:
                 - path: tatsu-lab/alpaca
                   type: alpaca
               output_dir: /tmp/output
+              # axolotl's prepared-dataset cache defaults to ./last_run_prepared
+              # (relative to CWD = "/", which the arbitrary UID can't write);
+              # point it at writable /tmp.
+              dataset_prepared_path: /tmp/last_run_prepared
               sequence_len: 1024
               gradient_accumulation_steps: 4
               EOF
