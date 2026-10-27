@@ -37,7 +37,7 @@ test target="all":
     esac
 
 _test-go:
-    go test ./internal/... -v -count=1
+    go test ./... -v -count=1
 
 _test-python:
     python3 -m venv .venv-test
@@ -180,7 +180,7 @@ _check-auth:
 # specifically trying to avoid needing.
 #
 # Install/upgrade the webhook chart, build both images in-cluster from source, and
-# roll out the result. Requires cert-manager already installed in the cluster.
+# roll out the result. The webhook certificate comes from OpenShift's service-ca.
 # Builds every time: a BuildConfig's ConfigChange trigger only fires automatically
 # on its *initial* creation, never on later edits (e.g. a new tag) — so relying on
 # the trigger alone would leave subsequent deploys pointing at an unbuilt tag.
@@ -444,7 +444,8 @@ deploy *args: _check-auth
 # route — no auth/TLS needed there, which postprocess.py already tolerates
 # (see SERVICE_ACCOUNT_TOKEN_FILE/SERVICE_CA_CERT_FILE's missing-file
 # fallbacks). Requires the kind cluster to already be up with cert-manager
-# installed (templates/certificates.yaml still needs it).
+# installed: tls.provider is pinned to cert-manager, so templates/certificates.yaml
+# issues the certificate even if the mock cluster serves OpenShift APIs.
 
 kind_cluster_name := "mock-openshift"
 kind_webhook_img := "localhost/aibom-webhook-service:dev"
@@ -479,6 +480,7 @@ kind-deploy: kind-image
         --set image.webhook.repository=localhost/aibom-webhook-service --set image.webhook.tag=dev \
         --set image.postprocess.repository=localhost/aibom-postprocess --set image.postprocess.tag=dev \
         --set image.pullPolicy=IfNotPresent \
+        --set tls.provider=cert-manager \
         --set prometheus.url=http://prometheus.monitoring.svc:9090
     kubectl --context kind-{{ kind_cluster_name }} -n {{ webhook_namespace }} rollout restart deployment/aibom-webhook
     kubectl --context kind-{{ kind_cluster_name }} -n {{ webhook_namespace }} rollout status deployment/aibom-webhook --timeout=120s

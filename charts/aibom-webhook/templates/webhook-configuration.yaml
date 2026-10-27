@@ -3,10 +3,14 @@ kind: MutatingWebhookConfiguration
 metadata:
   name: aibom-webhook
   annotations:
-    # cert-manager's cainjector controller watches for this annotation and
-    # keeps clientConfig.caBundle (below) populated and in sync with
-    # templates/certificates.yaml's Certificate automatically, including on renewal.
+    # Keeps clientConfig.caBundle populated and in sync on renewal: the
+    # service-ca operator injects its CA, or cert-manager's cainjector injects
+    # the CA of templates/certificates.yaml's Certificate.
+    {{- if eq (include "aibom-webhook.tlsProvider" .) "service-ca" }}
+    service.beta.openshift.io/inject-cabundle: "true"
+    {{- else }}
     cert-manager.io/inject-ca-from: {{ include "aibom-webhook.namespace" . }}/aibom-webhook-certs
+    {{- end }}
 webhooks:
   - name: {{ include "aibom-webhook.serviceDNSName" . }}
     admissionReviewVersions: ["v1"]
@@ -56,7 +60,8 @@ webhooks:
         namespace: {{ include "aibom-webhook.namespace" . }}
         path: /mutate
         port: 443
-      # caBundle is deliberately omitted: it's populated by cert-manager's cainjector
-      # (see the cert-manager.io/inject-ca-from annotation above). If this template set
-      # caBundle itself, Helm's server-side apply and cainjector's own apply would both
-      # try to own the field, causing an SSA conflict on every install/upgrade.
+      # caBundle is deliberately omitted: it's populated by the service-ca operator
+      # or cert-manager's cainjector (see the annotations above). If this template
+      # set caBundle itself, Helm's server-side apply and the injector's own apply
+      # would both try to own the field, causing an SSA conflict on every
+      # install/upgrade.

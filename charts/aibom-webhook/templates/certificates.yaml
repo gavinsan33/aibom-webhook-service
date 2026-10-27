@@ -1,4 +1,7 @@
-# Requires cert-manager (https://cert-manager.io/) installed in the cluster.
+# Only when tls.provider resolves to cert-manager (the default outside
+# OpenShift); requires cert-manager (https://cert-manager.io/) in the cluster.
+# On OpenShift the service-ca operator issues the certificate instead: see the
+# Service annotation in deployment.yaml.
 #
 # Replaces the manual cluster cert-provisioning half of scripts/generate-certs.sh:
 # issues the webhook's server certificate into the same aibom-webhook-certs
@@ -10,6 +13,7 @@
 #
 # scripts/generate-certs.sh is unchanged and still used for local dev
 # (`just run`), which never touches a cluster.
+{{- if eq (include "aibom-webhook.tlsProvider" .) "cert-manager" }}
 apiVersion: cert-manager.io/v1
 kind: Issuer
 metadata:
@@ -33,3 +37,4 @@ spec:
     kind: Issuer
   duration: {{ .Values.certManager.duration }}
   renewBefore: {{ .Values.certManager.renewBefore }}
+{{- end }}
