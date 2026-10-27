@@ -3596,6 +3596,13 @@ def test_failed_job_with_no_reported_container_failure_is_failed():
     assert _status_aibom(["job-a1"], containers)["execution_metadata"]["status"] == "Failed"
 
 
+def test_deadline_exceeded_job_reports_the_deadline_not_the_kill():
+    containers = [_container("job-a1", "Error", 143, job_result="Failed", job_failure_reason="DeadlineExceeded")]
+    em = _status_aibom(["job-a1"], containers)["execution_metadata"]
+    assert em["status"] == "DeadlineExceeded"
+    assert em["pods"][0]["status"] == "Error"
+
+
 def test_only_the_completed_jobs_failed_pods_are_discounted_in_a_jobset():
     containers = [
         _container("server-a1", "OOMKilled", 137, job_result="Complete"),

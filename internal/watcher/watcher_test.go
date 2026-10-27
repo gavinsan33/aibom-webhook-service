@@ -1693,13 +1693,14 @@ type capturedContainer struct {
 	PodName              string `json:"pod_name"`
 	TerminatedReason     string `json:"terminated_reason"`
 	JobResult            string `json:"job_result"`
+	JobFailureReason     string `json:"job_failure_reason"`
 	RestartCount         int32  `json:"restart_count"`
 	LastTerminatedReason string `json:"last_terminated_reason"`
 	LastExitCode         *int32 `json:"last_exit_code"`
 	ServingRole          string `json:"serving_role"`
 }
 
-func capturedContainers(t *testing.T, w *Watcher, pods []corev1.Pod, jobResults map[string]string) []capturedContainer {
+func capturedContainers(t *testing.T, w *Watcher, pods []corev1.Pod, jobResults map[string]batchv1.JobCondition) []capturedContainer {
 	t.Helper()
 	_, _, containersJSON, _ := w.buildPostprocessInputs(context.Background(), "ns", "cm-name", pods, jobResults)
 	var containers []capturedContainer
@@ -1747,7 +1748,7 @@ func TestBuildPostprocessInputs_NoRestartHistoryWhenNeverRestarted(t *testing.T)
 
 	_, _, containersJSON, _ := w.buildPostprocessInputs(context.Background(), "ns", "cm-name", []corev1.Pod{*pod}, nil)
 
-	for _, key := range []string{"restart_count", "last_terminated_reason", "last_exit_code", "job_result", "serving_role"} {
+	for _, key := range []string{"restart_count", "last_terminated_reason", "last_exit_code", "job_result", "serving_role", "job_failure_reason"} {
 		if strings.Contains(containersJSON, key) {
 			t.Errorf("%s should be omitted, got: %s", key, containersJSON)
 		}
@@ -1767,12 +1768,19 @@ func TestBuildPostprocessInputs_TagsEachPodWithItsJobsResult(t *testing.T) {
 	w := &Watcher{clientset: fake.NewSimpleClientset()}
 
 	got := capturedContainers(t, w, []corev1.Pod{*failedAttempt, *sibling, *bare},
-		map[string]string{"train-job": "Complete", "sibling-job": "Failed"})
+		map[string]batchv1.JobCondition{
+			"train-job":   {Type: batchv1.JobComplete, Reason: "CompletionsReached"},
+			"sibling-job": {Type: batchv1.JobFailed, Reason: "DeadlineExceeded"},
+		})
 
 	want := map[string]string{"train-job-attempt1": "Complete", "sibling-job-pod": "Failed", "bare": ""}
+	wantReason := map[string]string{"sibling-job-pod": "DeadlineExceeded"}
 	for _, c := range got {
 		if c.JobResult != want[c.PodName] {
 			t.Errorf("pod %s: job_result = %q, want %q", c.PodName, c.JobResult, want[c.PodName])
+		}
+		if c.JobFailureReason != wantReason[c.PodName] {
+			t.Errorf("pod %s: job_failure_reason = %q, want %q", c.PodName, c.JobFailureReason, wantReason[c.PodName])
 		}
 	}
 }
