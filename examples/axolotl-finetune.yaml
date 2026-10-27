@@ -77,6 +77,9 @@ spec:
               sequence_len: 1024
               gradient_accumulation_steps: 4
               dataset_processes: 1
+              # LoRA needs to know which layers to adapt; auto-target all linear
+              # layers (model-agnostic) rather than hardcoding module names.
+              lora_target_linear: true
               EOF
               # axolotl's dataset prep exhausts the default open-file limit
               # ("Too many open files"); raise the soft limit to the hard max
