@@ -27,6 +27,12 @@ const (
 	// Job, which itself lives in the webhook's namespace.
 	LabelPostprocessNamespace = "aibom.io/postprocess-namespace"
 
+	// PodFinalizerName holds an instrumented pod until the watcher has read it.
+	// The watcher adds it to bare pods (KServe predictors); the webhook adds
+	// it to Job-owned pods at admission, since a Job's controller deletes its
+	// pods on activeDeadlineSeconds before marking the Job Failed (#164).
+	PodFinalizerName = "aibom.io/log-extraction-pod"
+
 	// LabelKServeInferenceService is the label KServe applies to every predictor
 	// pod, naming the owning InferenceService. For a predictor pod already
 	// instrumented via the requestsGPU fallback, it lets the watcher look up
