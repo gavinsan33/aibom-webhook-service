@@ -555,15 +555,21 @@ func (w *Watcher) isJobFinished(job *batchv1.Job) bool {
 // jobResult returns the Job's terminal condition ("Complete" or "Failed"), or
 // "" if it hasn't reached one (still running, or being deleted).
 func jobResult(job *batchv1.Job) string {
+	return string(terminalCondition(job).Type)
+}
+
+// terminalCondition is the Job's true Complete or Failed condition, or a zero
+// one if it has neither.
+func terminalCondition(job *batchv1.Job) batchv1.JobCondition {
 	for _, c := range job.Status.Conditions {
 		if c.Status != corev1.ConditionTrue {
 			continue
 		}
 		if c.Type == batchv1.JobComplete || c.Type == batchv1.JobFailed {
-			return string(c.Type)
+			return c
 		}
 	}
-	return ""
+	return batchv1.JobCondition{}
 }
 
 func podsRequestGPU(pods []corev1.Pod) bool {
@@ -884,9 +890,10 @@ func mergeDatasets(datasets []string) string {
 // buildPostprocessInputs reads the discovery, dataset, and storage data the
 // pods themselves already wrote into the data ConfigMap, and serializes
 // container command/args info for CLI-based model detection. jobResults maps a
-// Job name to its terminal condition (see jobResult) so each pod's containers
-// can be tagged with how the Job that owns them ended; nil for a bare pod.
-func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configMapName string, pods []corev1.Pod, jobResults map[string]string) (discoveries, datasets []string, containersJSON, storageJSON string) {
+// Job name to its terminal condition (see terminalCondition) so each pod's
+// containers can be tagged with how the Job that owns them ended; nil for a
+// bare pod.
+func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configMapName string, pods []corev1.Pod, jobResults map[string]batchv1.JobCondition) (discoveries, datasets []string, containersJSON, storageJSON string) {
 	dataCM, err := w.clientset.CoreV1().ConfigMaps(namespace).Get(ctx, configMapName, metav1.GetOptions{})
 	if err != nil {
 		if !errors.IsNotFound(err) {
@@ -998,6 +1005,9 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 		// gets its own AIBOM, and a prefill pod's throughput and latency
 		// figures mean little without knowing it only does prefill (#167).
 		ServingRole string `json:"serving_role,omitempty"`
+		// JobFailureReason is that Job's Failed condition reason
+		// (DeadlineExceeded, BackoffLimitExceeded, PodFailurePolicy, ...).
+		JobFailureReason string `json:"job_failure_reason,omitempty"`
 	}
 	var containers []containerInfo
 	for _, pod := range pods {
@@ -1033,7 +1043,11 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 				Command: c.Command,
 				Args:    c.Args,
 			}
-			ci.JobResult = jobResults[podJobName(&pod)]
+			cond := jobResults[podJobName(&pod)]
+			ci.JobResult = string(cond.Type)
+			if cond.Type == batchv1.JobFailed {
+				ci.JobFailureReason = cond.Reason
+			}
 			ci.ServingRole = pod.Labels[llmdRoleLabel]
 			if cs, ok := restarts[c.Name]; ok {
 				last := cs.LastTerminationState.Terminated
@@ -1076,7 +1090,7 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 // data gathered from the given pods. It does not patch AnnotationPostprocess back onto
 // the trigger resource — callers must do that themselves, since the trigger's kind
 // (Job vs Pod) determines which client to patch with.
-func (w *Watcher) createPostprocessJobCore(ctx context.Context, namespace, triggerName, triggerKind string, triggerUID types.UID, pods []corev1.Pod, annotations map[string]string, jobResults map[string]string) (string, error) {
+func (w *Watcher) createPostprocessJobCore(ctx context.Context, namespace, triggerName, triggerKind string, triggerUID types.UID, pods []corev1.Pod, annotations map[string]string, jobResults map[string]batchv1.JobCondition) (string, error) {
 	postprocessName := aibomdata.PostprocessJobName(namespace, triggerName)
 	// configMapName is the workload's own data ConfigMap, in its namespace,
 	// that its pods wrote into. inputsName is the merged copy the postprocess
@@ -1333,7 +1347,7 @@ func (w *Watcher) createPostprocessJob(ctx context.Context, job *batchv1.Job) er
 	// and each Job's terminal condition (#112): a pod of a Job that completed
 	// is not a failure even if an earlier attempt of it was.
 	annotations := collectAIBOMAnnotations(job.Annotations)
-	jobResults := map[string]string{job.Name: jobResult(job)}
+	jobResults := map[string]batchv1.JobCondition{job.Name: terminalCondition(job)}
 	if jobsetName := job.Labels["jobset.sigs.k8s.io/jobset-name"]; jobsetName != "" {
 		siblingJobs, err := w.clientset.BatchV1().Jobs(job.Namespace).List(ctx, metav1.ListOptions{
 			LabelSelector: fmt.Sprintf("jobset.sigs.k8s.io/jobset-name=%s", jobsetName),
@@ -1342,7 +1356,7 @@ func (w *Watcher) createPostprocessJob(ctx context.Context, job *batchv1.Job) er
 			for i := range siblingJobs.Items {
 				sibling := &siblingJobs.Items[i]
 				if _, ok := jobResults[sibling.Name]; !ok {
-					jobResults[sibling.Name] = jobResult(sibling)
+					jobResults[sibling.Name] = terminalCondition(sibling)
 				}
 				if len(annotations) == 0 {
 					if sa := collectAIBOMAnnotations(sibling.Annotations); len(sa) > 0 {
