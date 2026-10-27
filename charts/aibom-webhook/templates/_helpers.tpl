@@ -83,6 +83,8 @@ service CA) or "cert-manager". tls.provider=auto picks service-ca on OpenShift.
 {{- define "aibom-webhook.tlsProvider" -}}
 {{- $p := toString .Values.tls.provider -}}
 {{- if eq $p "auto" -}}{{ if include "aibom-webhook.openshift" . }}service-ca{{ else }}cert-manager{{ end }}
+{{- else if and (eq $p "service-ca") (not (include "aibom-webhook.openshift" .)) -}}
+{{- fail "tls.provider=service-ca needs OpenShift; set platform=openshift (required for an offline helm template) or use cert-manager" -}}
 {{- else -}}{{ $p }}
 {{- end -}}
 {{- end -}}

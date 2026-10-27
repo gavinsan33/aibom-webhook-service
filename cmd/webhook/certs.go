@@ -20,6 +20,9 @@ type certReloader struct {
 	mu      sync.Mutex
 	modTime time.Time
 	cert    *tls.Certificate
+	// modTime of the last pair that failed to load, so a persistently broken
+	// pair is warned about once rather than on every handshake.
+	failedModTime time.Time
 }
 
 func (r *certReloader) GetCertificate(*tls.ClientHelloInfo) (*tls.Certificate, error) {
@@ -41,7 +44,14 @@ func (r *certReloader) GetCertificate(*tls.ClientHelloInfo) (*tls.Certificate, e
 	// Mid-rotation the two files can briefly disagree; keep serving the last
 	// good pair until they don't.
 	if r.cert != nil {
-		log.Printf("warning: could not reload TLS certificate, keeping the previous one: %v", err)
+		var mtime time.Time
+		if info != nil {
+			mtime = info.ModTime()
+		}
+		if !mtime.Equal(r.failedModTime) {
+			r.failedModTime = mtime
+			log.Printf("warning: could not reload TLS certificate, keeping the previous one: %v", err)
+		}
 		return r.cert, nil
 	}
 	return nil, err

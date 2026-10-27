@@ -1,15 +1,18 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"log"
 	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -46,7 +49,7 @@ func commonName(t *testing.T, r *certReloader) string {
 }
 
 // A rotated certificate is picked up without a restart, and a broken rotation
-// keeps the last good one.
+// keeps the last good one, warning once rather than on every handshake.
 func TestCertReloaderPicksUpRotation(t *testing.T) {
 	dir := t.TempDir()
 	r := &certReloader{certPath: filepath.Join(dir, "tls.crt"), keyPath: filepath.Join(dir, "tls.key")}
@@ -60,9 +63,17 @@ func TestCertReloaderPicksUpRotation(t *testing.T) {
 	if got := commonName(t, r); got != "second" {
 		t.Fatalf("after rotation got %q, want second", got)
 	}
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	defer log.SetOutput(os.Stderr)
 	os.WriteFile(r.keyPath, []byte("garbage"), 0o600)
 	os.Chtimes(r.certPath, now.Add(2*time.Minute), now.Add(2*time.Minute))
-	if got := commonName(t, r); got != "second" {
-		t.Fatalf("with a broken pair got %q, want the previous second", got)
+	for range 3 {
+		if got := commonName(t, r); got != "second" {
+			t.Fatalf("with a broken pair got %q, want the previous second", got)
+		}
+	}
+	if n := strings.Count(logs.String(), "could not reload"); n != 1 {
+		t.Fatalf("got %d reload warnings for one broken pair, want 1", n)
 	}
 }

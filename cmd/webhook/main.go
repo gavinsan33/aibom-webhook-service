@@ -85,6 +85,11 @@ func main() {
 	})
 
 	certs := &certReloader{certPath: cfg.TLSCertPath, keyPath: cfg.TLSKeyPath}
+	// Load once up front: otherwise an unusable pair only shows up as generic
+	// handshake errors from net/http.
+	if _, err := certs.GetCertificate(nil); err != nil {
+		log.Fatalf("loading TLS certificate: %v", err)
+	}
 	server := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Port),
 		Handler:      mux,
