@@ -17,6 +17,16 @@ Run these in order, as a cluster-admin, for each upgrade:
 
 Existing AIBOMs are not changed by any of this.
 
+## Image caching (OpenShift)
+
+On OpenShift, `cacheImages.enabled` (default `true`) creates `ImageStream`s that mirror the injected images into the cluster's internal registry, and points the injection flags at that registry. On a `helm upgrade` into this from an earlier version:
+
+- The ImageStreams are created and OpenShift imports the images from Quay. The import is asynchronous, so a workload admitted in the first few seconds, before the import finishes, can briefly see `ImagePullBackOff` until the kubelet retries against the now-populated registry.
+- Only workloads admitted after the webhook pod rolls with its new flags get the cached references. Pods already running keep their original image references.
+- No change is needed in `aibom-workload-namespace`; it already creates the `system:image-puller` RoleBinding that lets workload namespaces pull from the internal registry.
+
+Set `cacheImages.enabled=false` to keep pulling the injected images from Quay.
+
 ## Versions
 
 Releases are published from `vX.Y.Z` git tags. Each release publishes both charts at version `X.Y.Z` and both images tagged `X.Y.Z`, and the charts' image tags default to their own version, so installing a chart version always runs the same images. A release is never republished. With no `--version`, Helm installs the newest release; pass `--version=X.Y.Z` to pin one.

@@ -42,8 +42,12 @@ spec:
             - --tls-cert=/certs/tls.crt
             - --tls-key=/certs/tls.key
             - --port=8443
-            - --postprocess-image={{ .Values.image.postprocess.repository }}:{{ include "aibom-webhook.postprocessTag" . }}
+            - --postprocess-image={{ include "aibom-webhook.postprocessImage" . }}
             - --discovery-image={{ include "aibom-webhook.discoveryImage" . }}
+            # Reuse the discovery image (bash + python3, already pulled on the
+            # node as this pod's init container) rather than the external
+            # python:3.12-slim default, so the sidecar never triggers an extra pull.
+            - --dataset-sidecar-image={{ include "aibom-webhook.discoveryImage" . }}
             - --enable-watcher={{ .Values.watcher.enabled }}
             - --prometheus-url={{ include "aibom-webhook.prometheusURL" . }}
             - --debug-keep-postprocess-jobs={{ .Values.debug.keepPostprocessJobs }}
