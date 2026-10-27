@@ -76,7 +76,12 @@ spec:
               dataset_prepared_path: /tmp/last_run_prepared
               sequence_len: 1024
               gradient_accumulation_steps: 4
+              dataset_processes: 1
               EOF
+              # axolotl's dataset prep exhausts the default open-file limit
+              # ("Too many open files"); raise the soft limit to the hard max
+              # (allowed without privilege).
+              ulimit -n "$(ulimit -Hn)" 2>/dev/null || true
               axolotl train /tmp/lora.yml \
                 --base-model ibm-granite/granite-3.3-2b-instruct \
                 --adapter lora \
