@@ -1,18 +1,26 @@
 name: Release
 
-# Pushing a tag vX.Y.Z publishes release X.Y.Z: both images tagged X.Y.Z and
+# Pushing a tag vX.Y.Z publishes release X.Y.Z: the three images tagged X.Y.Z and
 # both charts at version and appVersion X.Y.Z, so the charts' image defaults
 # point at exactly these builds. Nothing is ever republished: the job fails if
 # any image tag or chart version already exists (#150).
 #
-# The Quay robot needs push access to the two image repos as well as the two
+# The Quay robot needs push access to the three image repos as well as the two
 # chart repos.
+#
+# The charts are also added to a classic Helm repository (index.yaml) on the
+# gh-pages branch, served by GitHub Pages at HELM_REPO_URL, since OpenShift's
+# HelmChartRepository only documents plain HTTP repositories, not OCI.
 on:
   push:
     tags: ["v*.*.*"]
 
 env:
   REGISTRY: quay.io/project-aibom
+  HELM_REPO_URL: https://gavinsan33.github.io/aibom-webhook-service
+
+permissions:
+  contents: write
 
 jobs:
   release:
@@ -37,7 +45,7 @@ jobs:
 
       - name: Refuse to overwrite existing image tags
         run: |
-          for image in aibom-webhook-service aibom-postprocess; do
+          for image in aibom-webhook-service aibom-postprocess aibom-discovery; do
             if docker buildx imagetools inspect "$REGISTRY/$image:${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
               echo "$REGISTRY/$image:${{ steps.version.outputs.version }} already exists" >&2; exit 1
             fi
@@ -57,6 +65,13 @@ jobs:
           push: true
           tags: ${{ env.REGISTRY }}/aibom-postprocess:${{ steps.version.outputs.version }}
 
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: discovery/Dockerfile
+          push: true
+          tags: ${{ env.REGISTRY }}/aibom-discovery:${{ steps.version.outputs.version }}
+
       - uses: azure/setup-helm@v4
 
       - uses: extractions/setup-just@v2
@@ -68,4 +83,22 @@ jobs:
             --password "${{ secrets.QUAY_ROBOT_TOKEN }}"
 
       - name: Publish charts
-        run: just chart-push --version=${{ steps.version.outputs.version }} --repo=$REGISTRY
+        run: just chart-push --version=${{ steps.version.outputs.version }} --repo=$REGISTRY --out=dist
+
+      - name: Add the charts to the Helm repository on gh-pages
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git fetch origin gh-pages; then
+            git worktree add pages origin/gh-pages
+            git -C pages switch -c gh-pages
+          else
+            git worktree add --orphan -b gh-pages pages
+          fi
+          cp dist/*.tgz pages/
+          merge=()
+          [[ -f pages/index.yaml ]] && merge=(--merge pages/index.yaml)
+          helm repo index pages --url "$HELM_REPO_URL" "${merge[@]}"
+          git -C pages add .
+          git -C pages commit -m "Release ${{ steps.version.outputs.version }}"
+          git -C pages push origin gh-pages
