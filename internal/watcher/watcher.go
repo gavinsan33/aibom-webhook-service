@@ -437,7 +437,8 @@ func (w *Watcher) onPodEvent(obj interface{}) {
 		return
 	}
 
-	if err := w.createPostprocessJobForPod(context.TODO(), pod); err != nil {
+	annotated, err := w.createPostprocessJobForPod(context.TODO(), pod)
+	if err != nil {
 		if stderrors.Is(err, errPostprocessBusy) {
 			log.Printf("waiting to postprocess pod %s/%s: %v", pod.Namespace, pod.Name, err)
 			return
@@ -456,7 +457,9 @@ func (w *Watcher) onPodEvent(obj interface{}) {
 		return
 	}
 
-	w.removePodFinalizer(context.TODO(), pod)
+	// The annotation patch changed the pod's resourceVersion, so remove the
+	// finalizer from what it returned, not the copy this event carried.
+	w.removePodFinalizer(context.TODO(), annotated)
 }
 
 func (w *Watcher) shouldPostprocess(job *batchv1.Job) bool {
@@ -1436,21 +1439,21 @@ func (w *Watcher) createPostprocessJob(ctx context.Context, job *batchv1.Job) er
 // bare/ReplicaSet-owned pods (e.g. KServe predictors) that have no owning Job to trigger
 // postprocessing from. There is no JobSet-style sibling merging here since a bare pod has
 // no sibling workload to pull additional data from.
-func (w *Watcher) createPostprocessJobForPod(ctx context.Context, pod *corev1.Pod) error {
+func (w *Watcher) createPostprocessJobForPod(ctx context.Context, pod *corev1.Pod) (*corev1.Pod, error) {
 	annotations := collectAIBOMAnnotations(pod.Annotations)
 
 	postprocessName, err := w.createPostprocessJobCore(ctx, pod.Namespace, pod.Name, "Pod", pod.UID, []corev1.Pod{*pod}, annotations, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	patch := fmt.Sprintf(`{"metadata":{"annotations":{"%s":"%s"}}}`, AnnotationPostprocess, postprocessName)
-	_, err = w.clientset.CoreV1().Pods(pod.Namespace).Patch(ctx, pod.Name, types.MergePatchType, []byte(patch), metav1.PatchOptions{})
+	annotated, err := w.clientset.CoreV1().Pods(pod.Namespace).Patch(ctx, pod.Name, types.MergePatchType, []byte(patch), metav1.PatchOptions{})
 	if err != nil {
-		return fmt.Errorf("annotate original pod: %w", err)
+		return nil, fmt.Errorf("annotate original pod: %w", err)
 	}
 
-	return nil
+	return annotated, nil
 }
 
 // collectAIBOM runs once a postprocess Job finishes — succeeded or failed (see

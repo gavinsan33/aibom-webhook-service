@@ -13,11 +13,13 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gavinsan33/aibom-webhook-service/internal/aibomdata"
+	jsonpatch "gopkg.in/evanphx/json-patch.v4"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -694,6 +696,76 @@ func TestFinalizerAddedToAnnotatedJob(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Pod-level finalizer tests (bare/ReplicaSet-owned pods, e.g. KServe predictors)
 // ---------------------------------------------------------------------------
+
+// enforcePodResourceVersion makes the fake client treat pod patches the way
+// the API server does: each one bumps the pod's resourceVersion, and one that
+// names a stale resourceVersion fails with a Conflict. The fake ignores it.
+func enforcePodResourceVersion(client *fake.Clientset) {
+	gvr := corev1.SchemeGroupVersion.WithResource("pods")
+	client.PrependReactor("patch", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		pa := action.(k8stesting.PatchAction)
+		obj, err := client.Tracker().Get(gvr, pa.GetNamespace(), pa.GetName())
+		if err != nil {
+			return true, nil, err
+		}
+		current := obj.(*corev1.Pod)
+		var precondition struct {
+			Metadata struct {
+				ResourceVersion string `json:"resourceVersion"`
+			} `json:"metadata"`
+		}
+		_ = json.Unmarshal(pa.GetPatch(), &precondition)
+		if rv := precondition.Metadata.ResourceVersion; rv != "" && rv != current.ResourceVersion {
+			return true, nil, apierrors.NewConflict(gvr.GroupResource(), current.Name, fmt.Errorf("resourceVersion %s is stale", rv))
+		}
+		original, _ := json.Marshal(current)
+		merged, err := jsonpatch.MergePatch(original, pa.GetPatch())
+		if err != nil {
+			return true, nil, err
+		}
+		patched := &corev1.Pod{}
+		if err := json.Unmarshal(merged, patched); err != nil {
+			return true, nil, err
+		}
+		n, _ := strconv.Atoi(current.ResourceVersion)
+		patched.ResourceVersion = strconv.Itoa(n + 1)
+		return true, patched, client.Tracker().Update(gvr, patched, pa.GetNamespace())
+	})
+}
+
+// Postprocessing annotates the pod, which changes its resourceVersion, so the
+// finalizer has to be removed from that patched copy: from the event's copy
+// the API server rejects it as a conflict.
+func TestPostprocessOnPodDeletion_ReleasesFromAnnotatedCopy(t *testing.T) {
+	now := metav1.Now()
+	pod := instrumentedBarePod("predictor-pod", "test-ns")
+	pod.DeletionTimestamp = &now
+	pod.Finalizers = []string{podFinalizerName}
+	pod.ResourceVersion = "1"
+
+	client := fake.NewSimpleClientset(enabledNamespace("test-ns"), pod)
+	enforcePodResourceVersion(client)
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "aibom-postprocess:latest"})
+	// Only the namespace/Job informers: the pod informer would run onPodEvent
+	// concurrently and could release the pod from a fresher copy itself.
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	w.factory.Start(ctx.Done())
+	w.factory.WaitForCacheSync(ctx.Done())
+
+	w.onPodEvent(pod)
+
+	got, err := client.CoreV1().Pods("test-ns").Get(context.TODO(), "predictor-pod", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get pod: %v", err)
+	}
+	if got.Annotations[AnnotationPostprocess] == "" {
+		t.Fatal("pod should have been postprocessed")
+	}
+	if hasPodFinalizer(got) {
+		t.Error("finalizer should be removed right after postprocessing, not left for the next event")
+	}
+}
 
 func TestPodFinalizerAddedToGPUPod(t *testing.T) {
 	ns := enabledNamespace("test-ns")
