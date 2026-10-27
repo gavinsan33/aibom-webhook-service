@@ -13,10 +13,19 @@
 # arbitrary high UID that doesn't own those files, so it can't execute the venv
 # python -> "exec: .../python: Permission denied". (The vendor image would work
 # only with a privileged SCC, e.g. `oc adm policy add-scc-to-user anyuid -z
-# default -n <ns>` as cluster-admin.) Instead this uses the public pytorch/pytorch
-# image, whose Python is world-accessible, and pip-installs axolotl at startup so
-# it runs under the arbitrary UID with no SCC changes. HOME/HF_HOME/PATH point at
+# default -n <ns>` as cluster-admin.) Instead this uses a plain python image,
+# whose Python is world-accessible, and pip-installs axolotl at startup so it
+# runs under the arbitrary UID with no SCC changes. HOME/HF_HOME/PATH point at
 # writable /tmp for the arbitrary UID.
+#
+# WHY python:3.11 AND NOT pytorch/pytorch:
+# axolotl pins a current torch; a PyTorch base ships its own (older) torch +
+# matching torchvision/torchaudio, and the pip install then upgrades torch alone,
+# leaving torchvision/torchaudio mismatched ("torchvision has no attribute
+# 'extension'"). Starting from a base with NO torch lets axolotl pull one fully
+# self-consistent stack (torch + torchvision + torchaudio + bundled CUDA wheels;
+# GPU works via the node's NVIDIA driver). python:3.11 (not -slim) is used because
+# torch needs libgomp1, which the slim image omits.
 #
 # Plain LoRA (not QLoRA): QLoRA needs bitsandbytes with a matching CUDA build, an
 # extra moving part; plain LoRA exercises the same detection path
@@ -48,7 +57,7 @@ spec:
         - operator: Exists
       containers:
         - name: finetune
-          image: pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
+          image: python:3.11
           command:
             - sh
             - -c
