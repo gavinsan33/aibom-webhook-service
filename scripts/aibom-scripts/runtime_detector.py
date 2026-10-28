@@ -138,6 +138,19 @@ def _register_hf_dataset(dataset, entry):
         _hf_dataset_key_registry[key] = entry
 
 
+def _sole_hf_entry():
+    """The only load_dataset entry, if there is exactly one. Caller holds _lock.
+
+    Fallback for an HF dataset that matches no key: one saved with
+    save_to_disk and reloaded (axolotl's prepared-dataset cache) lives in a
+    different cache directory, and concatenating loads drops builder_name.
+    ponytail: one recorded load is taken to be the source; a script that also
+    trains on an unrelated load_from_disk dataset gets it merged in wrongly.
+    """
+    entries = [e for e in _detected_datasets if e.get("source") == "datasets.load_dataset"]
+    return entries[0] if len(entries) == 1 else None
+
+
 def _record(entry):
     _dbg(f"Recording dataset: {entry.get('dataset_name', '?')} via {entry.get('source', '?')}")
     with _lock:
@@ -731,6 +744,8 @@ def _install_dataloader_hook():
                     key = _hf_dataset_key(dataset)
                     if key is not None:
                         existing = _hf_dataset_key_registry.get(key)
+                    if existing is None and key not in _hf_dataset_key_registry and hasattr(dataset, "info"):
+                        existing = _sole_hf_entry()
             if existing is not None:
                 _dbg(f"DataLoader hook: dataset already recorded via {existing.get('source', '?')}, merging")
                 # An eval loader on the same dataset (a DatasetDict entry
