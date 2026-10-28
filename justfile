@@ -588,9 +588,11 @@ uninstall-namespace *args: _check-auth
 # there's exactly one source of truth for the scripts and this recipe is the
 # only place responsible for keeping the packaged copy fresh.
 #
-# Without --version, publishes each chart as <Chart.yaml version>-<git sha>
-# (e.g. 0.1.0-abc1234, "-dirty" suffixed if the working tree has uncommitted
-# changes): a dev build, immutable, one per run. Its images are :latest
+# Without --version, publishes each chart as a dev build versioned from the
+# latest vX.Y.Z tag: the next patch, the commits since the tag and the sha, e.g.
+# 0.1.1-dev.5.gabc1234 ("-dirty" suffixed if the working tree has uncommitted
+# changes). That sorts after the tag's release and in commit order, so
+# Chart.yaml's version is never bumped. Immutable, one per run. Its images are :latest
 # (appVersion "latest" in a checkout). The SemVer prerelease hyphen means
 # `helm install` with no --version skips dev builds and takes the newest
 # release; pass --devel or an exact --version to install one.
@@ -627,10 +629,9 @@ chart-push *args:
         done
         app_version="$version"
     else
-        sha="$(git rev-parse --short HEAD)"
-        git diff --quiet HEAD || sha="${sha}-dirty"
-        # Both charts share one Chart.yaml version.
-        version="$(grep '^version:' charts/aibom-webhook/Chart.yaml | awk '{print $2}')-${sha}"
+        desc="$(git describe --tags --long --dirty --match 'v[0-9]*.[0-9]*.[0-9]*')" || { echo "error: no vX.Y.Z tag to version a dev build from" >&2; exit 1; }
+        [[ "$desc" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)-([0-9]+)-(g[0-9a-f]+(-dirty)?)$ ]] || { echo "error: can't parse git describe output '$desc'" >&2; exit 1; }
+        version="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.$((BASH_REMATCH[3] + 1))-dev.${BASH_REMATCH[4]}.${BASH_REMATCH[5]}"
     fi
     if [[ -z "$out" ]]; then
         out="$(mktemp -d)"
@@ -667,7 +668,8 @@ _chart-package version out app_version="":
 chart-verify *args:
     #!/usr/bin/env bash
     set -euo pipefail
-    version="$(grep '^version:' charts/aibom-webhook/Chart.yaml | awk '{print $2}')"
+    version="$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*')"
+    version="${version#v}"
     out="chart-verifier"
     for arg in {{ args }}; do
         case "$arg" in
@@ -696,7 +698,8 @@ chart-verify *args:
 catalog-reports *args:
     #!/usr/bin/env bash
     set -euo pipefail
-    version="$(grep '^version:' charts/aibom-webhook/Chart.yaml | awk '{print $2}')"
+    version="$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*')"
+    version="${version#v}"
     for arg in {{ args }}; do
         case "$arg" in
             --version=*) version="${arg#--version=}" ;;

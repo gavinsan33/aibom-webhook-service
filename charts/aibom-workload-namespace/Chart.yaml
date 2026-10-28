@@ -2,7 +2,8 @@ apiVersion: v2
 name: aibom-workload-namespace
 description: Per-namespace RBAC and scripts ConfigMap for AIBOM-instrumented workload namespaces
 type: application
-version: 0.1.0
+# Unused: chart-push versions every build from git tags.
+version: 0.0.0
 appVersion: "latest"
 kubeVersion: ">=1.29.0-0"
 home: https://gavinsan33.github.io/project-aibom/
