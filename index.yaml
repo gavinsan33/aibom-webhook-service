@@ -1,0 +1,38 @@
+apiVersion: v1
+entries:
+  aibom-webhook:
+  - annotations:
+      charts.openshift.io/name: AIBOM Webhook
+    apiVersion: v2
+    appVersion: 0.1.0
+    created: "2026-10-28T13:50:40.848484828Z"
+    description: AIBOM mutating admission webhook and controller for OpenShift
+    digest: 47ffe94702f35c594d112b85455b88ae5ce2baf8bc90a2def4b7f4b30d1721e1
+    home: https://gavinsan33.github.io/project-aibom/
+    kubeVersion: '>=1.29.0-0'
+    name: aibom-webhook
+    sources:
+    - https://github.com/gavinsan33/aibom-webhook-service
+    type: application
+    urls:
+    - https://gavinsan33.github.io/aibom-webhook-service/aibom-webhook-0.1.0.tgz
+    version: 0.1.0
+  aibom-workload-namespace:
+  - annotations:
+      charts.openshift.io/name: AIBOM Workload Namespace
+    apiVersion: v2
+    appVersion: 0.1.0
+    created: "2026-10-28T13:50:40.849510569Z"
+    description: Per-namespace RBAC and scripts ConfigMap for AIBOM-instrumented workload
+      namespaces
+    digest: 2a8d83a689bc19c772a1edceb462b6d458d36f0e0566c19f87adde618361f52b
+    home: https://gavinsan33.github.io/project-aibom/
+    kubeVersion: '>=1.29.0-0'
+    name: aibom-workload-namespace
+    sources:
+    - https://github.com/gavinsan33/aibom-webhook-service
+    type: application
+    urls:
+    - https://gavinsan33.github.io/aibom-webhook-service/aibom-workload-namespace-0.1.0.tgz
+    version: 0.1.0
+generated: "2026-10-28T13:50:40.847372415Z"
