@@ -31,7 +31,16 @@ Set `cacheImages.enabled=false` to keep pulling the injected images from Quay.
 
 Releases are published from `vX.Y.Z` git tags. Each release publishes both charts at version `X.Y.Z` and both images tagged `X.Y.Z`, and the charts' image tags default to their own version, so installing a chart version always runs the same images. A release is never republished. With no `--version`, Helm installs the newest release; pass `--version=X.Y.Z` to pin one.
 
-Merges to `main` also publish dev builds of the charts as `<version>-<git-sha>`, using the `latest` images. Helm skips these unless you pass `--devel` or the exact version.
+Merges to `main` also publish dev builds of the charts, versioned after the last release (e.g. `0.1.1-dev.5.gabc1234`), using the `latest` images. Helm skips these unless you pass `--devel` or the exact version. To install the newest dev build, add `--devel` to both install commands:
+
+```bash
+helm upgrade --install aibom-webhook oci://quay.io/project-aibom/aibom-webhook \
+  -n project-aibom --create-namespace --kube-as-user=system:admin --devel
+helm upgrade --install aibom-ns-<namespace> oci://quay.io/project-aibom/aibom-workload-namespace \
+  -n <namespace> --kube-as-user=system:admin --devel
+```
+
+Both charts are published together on each merge, so `--devel` picks the same build for each.
 
 The CRDs are `aibom.io/v1alpha1`. There is no published matrix of which webhook, CLI and console plugin versions work together. The components are built from `main` in separate repositories, and the CLI and plugin read fields the webhook writes. Upgrade the webhook first, then the CLI and plugin.
 
