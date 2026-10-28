@@ -3393,6 +3393,29 @@ def test_shell_comments_are_ignored():
     assert "max_model_len" not in result
 
 
+def test_apostrophes_in_comments_and_heredoc_dont_break_tokenizing():
+    """An unbalanced `'` in a comment or heredoc body made shlex raise, so
+    nothing in the script was detected (examples/axolotl-finetune.yaml)."""
+    script = (
+        "cat > /tmp/c.yml <<'EOF'\n"
+        "# axolotl's cache\n"
+        "base_model: x\n"
+        "EOF\n"
+        "# can't write /\n"
+        "axolotl train /tmp/c.yml \\\n  --base-model org/m --adapter lora --lora-r 16\n"
+    )
+    result = pp.detect_model_from_containers([_sh(script)])
+    assert result["training_framework"] == "axolotl"
+    assert result["model_name"] == "org/m"
+    assert result["lora_rank"] == 16
+
+
+def test_heredoc_body_is_not_a_command():
+    result = pp.detect_model_from_containers([_sh("cat > s.sh <<EOF\nvllm serve a/b\nEOF\ntrl sft --seed 3\n")])
+    assert "serving_engine" not in result
+    assert result["random_seed"] == 3
+
+
 def test_trailing_comment_does_not_merge_the_next_line():
     """shlex's own comment handling ate the newline, so `pip install` and the
     server ended up in one (package-install) command."""

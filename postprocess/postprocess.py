@@ -768,6 +768,7 @@ def _flatten_container_command(container):
     script = _shell_script(command)
     if script is None:
         return command
+    script = _drop_comment_lines_and_heredocs(script)
     # Join shell line-continuations (`\` immediately followed by a
     # newline) before tokenizing -- shlex doesn't do this on its own,
     # and without it a backslash-newline survives as a spurious literal
@@ -784,6 +785,29 @@ def _flatten_container_command(container):
         return _strip_comments(list(lex))
     except ValueError:
         return command
+
+
+_HEREDOC_RE = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)(\w+)\1")
+
+
+def _drop_comment_lines_and_heredocs(script):
+    """Remove whole-line comments and heredoc bodies before tokenizing. Both
+    are literal text to the shell, but an apostrophe in them (`# it's`)
+    leaves shlex with an unbalanced quote and nothing gets tokenized."""
+    out = []
+    terminator = None
+    for line in script.split("\n"):
+        if terminator is not None:
+            if line.strip() == terminator:
+                terminator = None
+            continue
+        if line.lstrip().startswith("#"):
+            continue
+        out.append(line)
+        m = _HEREDOC_RE.search(line)
+        if m:
+            terminator = m.group(2)
+    return "\n".join(out)
 
 
 def _strip_comments(tokens):
