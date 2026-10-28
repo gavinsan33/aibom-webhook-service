@@ -210,6 +210,24 @@ def test_local_file_loads_named_by_files_and_kept_apart(fake_datasets_module):
     assert len(merged["datasets"]) == 3
 
 
+def test_dataset_reloaded_from_disk_merges_into_sole_load(fake_datasets_module, fake_torch_module):
+    """axolotl saves the tokenized dataset and trains on the reloaded copy,
+    whose cache directory matches no load_dataset key."""
+    from conftest import FakeDataset
+
+    rd.install_hooks()
+    import datasets
+    import torch.utils.data as tud
+
+    datasets.load_dataset("tatsu-lab/alpaca", sources=["hub"])
+    tud.DataLoader(FakeDataset(None), batch_size=4)
+
+    entries = rd.get_detected_datasets()
+    assert len(entries) == 1
+    assert entries[0]["dataset_name"] == "tatsu-lab/alpaca"
+    assert entries[0]["batch_size"] == 4
+
+
 def test_dataloader_attaches_to_its_own_split(fake_datasets_module, fake_torch_module):
     """The key registry kept whichever load ran last, so the train loader
     merged into the test entry (#114)."""
