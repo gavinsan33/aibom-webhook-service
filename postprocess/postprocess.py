@@ -2040,6 +2040,59 @@ def _substitute_pod_query(promql, pod_name):
     return promql.replace("{namespace}", JOB_NAMESPACE).replace("{pod_name}", pod_name)
 
 
+def _dcgm_gpu_hardware(pod_name):
+    """Best-effort GPU model + per-device memory for one pod from DCGM, sourced
+    by the trusted postprocess Job from cluster metrics rather than the in-pod
+    discovery container's nvidia-smi. dcgm-exporter tags DCGM_FI_DEV_FB_TOTAL
+    (the device's total framebuffer, MiB) with a `modelName` label and the
+    workload's `exported_pod`, so one instant query yields both, needing no RBAC
+    beyond the cluster-monitoring-view the Job already holds. Returns
+    {"gpu_models": "A100\\nA100", "gpu_memory_mb": [40960, 40960]} (one entry per
+    GPU, ordered by GPU index), or {} when DCGM isn't present or the pod has no
+    GPU series -- callers fall back to the discovery values. Never raises."""
+    if not JOB_NAMESPACE or not pod_name:
+        return {}
+    promql = _substitute_pod_query(
+        'DCGM_FI_DEV_FB_TOTAL{exported_namespace="{namespace}", exported_pod="{pod_name}"}',
+        pod_name,
+    )
+    try:
+        resp = query_prometheus_instant(promql, int(time.time() * 1000))
+    except Exception as e:  # network/auth/parse -- hardware stays discovery-sourced
+        print(f"  WARNING: DCGM GPU hardware query failed for {pod_name}: {e}", file=sys.stderr)
+        return {}
+    if not resp or resp.get("status") != "success":
+        return {}
+    devices = {}  # gpu index (or UUID) -> {"model": str|None, "mem_mb": int|None}
+    for series in resp.get("data", {}).get("result", []):
+        metric = series.get("metric", {})
+        key = metric.get("gpu") or metric.get("UUID") or str(len(devices))
+        try:
+            mem_mb = int(round(float(series.get("value", [None, None])[1])))
+        except (TypeError, ValueError, IndexError):
+            mem_mb = None
+        devices[key] = {"model": metric.get("modelName"), "mem_mb": mem_mb}
+    if not devices:
+        return {}
+    # gpu indices are strings; sort them numerically so "10" comes after "9",
+    # with non-numeric keys (UUIDs) after them.
+    def _device_order(k):
+        try:
+            return (0, int(k), "")
+        except ValueError:
+            return (1, 0, k)
+
+    ordered = [devices[k] for k in sorted(devices, key=_device_order)]
+    models = [d["model"] for d in ordered if d["model"]]
+    mems = [d["mem_mb"] for d in ordered if d["mem_mb"] is not None]
+    out = {}
+    if models:
+        out["gpu_models"] = "\n".join(models)
+    if mems:
+        out["gpu_memory_mb"] = mems
+    return out
+
+
 def collect_telemetry(discoveries, containers=None):
     print(f"  Processing {len(discoveries)} pod(s)")
 
@@ -2059,7 +2112,8 @@ def collect_telemetry(discoveries, containers=None):
             print(f"  WARNING: No pod UID, skipping", file=sys.stderr)
             continue
 
-        gpu_count = discovery.get("gpu", {}).get("gpu_count")
+        spec_gpu_count = pod_gpu_count(pod_name, containers)
+        gpu_count = spec_gpu_count if spec_gpu_count is not None else discovery.get("gpu", {}).get("gpu_count")
         if (not gpu_count or str(gpu_count) == "0") and not DEBUG_TELEMETRY_ALL_PODS:
             print(f"  Skipping {pod_name} (no GPUs)")
             continue
@@ -2526,6 +2580,19 @@ def pod_resource_limit(pod_name, containers, resource_key):
     return sum(limits) if limits else None
 
 
+def pod_gpu_count(pod_name, containers):
+    """A pod's GPU count from its containers' nvidia.com/gpu claims in
+    containers.json (gpu_limit, summed across the pod's containers) -- the
+    number the scheduler actually placed the pod against. Preferred over the
+    in-pod discovery container's nvidia-smi count, which can miscount (a
+    driver-error line read as a device, #115), sees only the share one
+    container was handed, and is set from inside the workload. None if no
+    container in the pod claims a GPU, so the discovery value is used as a
+    fallback."""
+    counts = [c["gpu_limit"] for c in containers or [] if c.get("pod_name") == pod_name and c.get("gpu_limit") is not None]
+    return sum(counts) if counts else None
+
+
 def compute_metric_limit(metric_name, pod_names, containers, scale):
     """Resolves resource_utilization.metrics.<metric_name>.limit: the
     configured ceiling usage was measured against, scaled the same way the
@@ -2963,7 +3030,16 @@ def compile_aibom(
             else (fw_version or fw_name)
         )
 
-        gpu_models = gpu_info.get("gpu_models", "")
+        # GPU model/count/memory are preferred from trusted out-of-pod sources
+        # (the pod-spec claim and DCGM) over the in-pod discovery container's
+        # nvidia-smi, falling back to discovery when those aren't available
+        # (#110). Nothing else in environment has such a source without extra
+        # RBAC, so cpu_model/numa/cuda/kernel stay discovery-sourced.
+        first_pod = safe_get(first, "pod_metadata", "name")
+        dcgm_hw = _dcgm_gpu_hardware(first_pod)
+        spec_gpu_count = pod_gpu_count(first_pod, containers)
+
+        gpu_models = dcgm_hw.get("gpu_models") or gpu_info.get("gpu_models", "")
         if gpu_models and gpu_models.strip().lower() not in ("", "not available"):
             gpu_type = gpu_models.strip().split("\n")[0].strip()
         else:
@@ -2973,7 +3049,7 @@ def compile_aibom(
 
         aibom["environment"] = {
             "gpu_type": gpu_type,
-            "gpu_count": gpu_info.get("gpu_count"),
+            "gpu_count": spec_gpu_count if spec_gpu_count is not None else gpu_info.get("gpu_count"),
             "cpu_model": system_info.get("cpu_model"),
             "cpu_cores": system_info.get("cpu_count"),
             "memory_gb": mem_gb,
@@ -2984,6 +3060,8 @@ def compile_aibom(
             "kernel_version": safe_get(first, "system", "kernel_version"),
         }
         aibom["environment"].update(_discovery_details(first))
+        if dcgm_hw.get("gpu_memory_mb"):
+            aibom["environment"]["gpu_memory_mb"] = dcgm_hw["gpu_memory_mb"]
 
     # Resource utilization from telemetry
     if telemetry and telemetry.get("pods"):
