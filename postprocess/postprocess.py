@@ -2074,7 +2074,15 @@ def _dcgm_gpu_hardware(pod_name):
         devices[key] = {"model": metric.get("modelName"), "mem_mb": mem_mb}
     if not devices:
         return {}
-    ordered = [devices[k] for k in sorted(devices)]
+    # gpu indices are strings; sort them numerically so "10" comes after "9",
+    # with non-numeric keys (UUIDs) after them.
+    def _device_order(k):
+        try:
+            return (0, int(k), "")
+        except ValueError:
+            return (1, 0, k)
+
+    ordered = [devices[k] for k in sorted(devices, key=_device_order)]
     models = [d["model"] for d in ordered if d["model"]]
     mems = [d["mem_mb"] for d in ordered if d["mem_mb"] is not None]
     out = {}

@@ -454,6 +454,18 @@ def test_dcgm_gpu_hardware_parses_models_and_memory(monkeypatch):
     assert hw["gpu_memory_mb"] == [40960, 40960]  # ordered by gpu index (0, then 1)
 
 
+def test_dcgm_gpu_hardware_orders_gpu_indices_numerically(monkeypatch):
+    monkeypatch.setattr(pp, "JOB_NAMESPACE", "ns")
+    result = [
+        {"metric": {"gpu": str(i), "modelName": "H100"}, "value": [1.7e9, str(1000 + i)]}
+        for i in (10, 2, 11, 0, 9, 1)
+    ]
+    monkeypatch.setattr(pp, "query_prometheus_instant",
+                        lambda promql, t: {"status": "success", "data": {"result": result}})
+    hw = pp._dcgm_gpu_hardware("p1")
+    assert hw["gpu_memory_mb"] == [1000, 1001, 1002, 1009, 1010, 1011]
+
+
 def test_dcgm_gpu_hardware_empty_when_no_series(monkeypatch):
     monkeypatch.setattr(pp, "JOB_NAMESPACE", "ns")
     monkeypatch.setattr(pp, "query_prometheus_instant",
