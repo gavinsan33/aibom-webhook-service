@@ -39,11 +39,13 @@ Captured once per pod by the discovery init container into `discovery-<pod>.json
 
 | Field | Detection | Surfaced? |
 |---|---|---|
-| GPU count | `nvidia-smi --query-gpu=name` (line count) | ✅ `environment.gpu_count` |
-| GPU model(s) | `nvidia-smi --query-gpu=name` | ✅ `environment.gpu_type` — only the **first line** of a multi-GPU-model listing; a mixed-model node's other GPU types are dropped |
-| GPU memory per device (VRAM) | `nvidia-smi --query-gpu=memory.total` | ✅ `environment.gpu_memory_mb` (list, one per GPU) |
+| GPU count | the pod's own `nvidia.com/gpu` claim, summed across containers (limit, else request); `nvidia-smi --query-gpu=name` line count only when no container claims a GPU | ✅ `environment.gpu_count` |
+| GPU model(s) | DCGM's `modelName` label (`DCGM_FI_DEV_FB_TOTAL`, by `exported_pod`), else `nvidia-smi --query-gpu=name` | ✅ `environment.gpu_type` — only the **first** model; a mixed-model node's other GPU types are dropped |
+| GPU memory per device (VRAM) | DCGM's device framebuffer (`DCGM_FI_DEV_FB_TOTAL`), else `nvidia-smi --query-gpu=memory.total` | ✅ `environment.gpu_memory_mb` (list, one per GPU) |
 | GPU driver version | `nvidia-smi --query-gpu=driver_version` | ✅ `environment.driver_version` |
 | CUDA version | `nvidia-smi` (`CUDA Version` line) | ✅ `environment.cuda_version` |
+
+The pod-spec claim and DCGM are read from outside the pod, so a workload can't misreport them; DCGM is a best-effort Prometheus query, and without dcgm-exporter the in-pod `nvidia-smi` values are used (#110). Driver and CUDA versions have no out-of-pod source and stay discovery-sourced.
 
 The discovery init container's own `nvidia.com/gpu` claim — what makes `nvidia-smi` work in it at all, since the NVIDIA Container Toolkit injects the binary and NVML driver library from the node's driver only when the claim is present — is not detected independently but copied from the pod's **total** `nvidia.com/gpu` allocation (the sum of each container's effective claim), so `nvidia-smi` sees every GPU the pod is scheduled with, not just the first container's.
 
@@ -96,7 +98,7 @@ The discovery init container's own `nvidia.com/gpu` claim — what makes `nvidia
 | torchvision datasets (19 known classes: MNIST family, CIFAR, ImageNet, ImageFolder, CelebA, LSUN, STL10, SVHN, VOC*, Coco*, Flickr*, Places365) | construction | dataset name (the most-derived known class: CIFAR100, not also CIFAR10), root, split, download flag, fingerprint |
 | `webdataset.WebDataset.__init__` | construction | dataset name, URL list |
 
-Dataset entries referring to the same underlying object are correlated (not double-recorded) first by **object identity**, then by **`(builder_name, config_name, split)`** for the common case of a transformed dataset (`.map`/`.filter`/`.select`/`.shuffle`, or a `DatasetDict` split pull) wrapped in a fresh `DataLoader`. If two loads share that key, a loader over a transformed copy gets its own entry rather than a guessed one. Each merged entry tracks a `seen_via` list of every hook that touched it. Entries from different processes and pods are deduped on name, source, config, split, revision, `data_files`, `data_dir` and root/path, so two local files or a train and test split stay separate.
+Dataset entries referring to the same underlying object are correlated (not double-recorded) first by **object identity**, then by **`(builder_name, config_name, split, cache directory)`** for the common case of a transformed dataset (`.map`/`.filter`/`.select`/`.shuffle`, or a `DatasetDict` split pull) wrapped in a fresh `DataLoader`. The cache directory's name hashes the `data_files` and revision, so two loads of one builder from different files stay apart. If two loads share that key, a loader over a transformed copy gets its own entry rather than a guessed one. Each merged entry tracks a `seen_via` list of every hook that touched it. Entries from different processes and pods are deduped on name, source, config, split, revision, `data_files`, `data_dir` and root/path, so two local files or a train and test split stay separate.
 
 **CLI-arg detection** (`postprocess.py`, from container command/args): `--dataset_name`, `--dataset_config_name` and `--dataset_train_split` (→ `dataset.declared.config_name`/`split`). A trl `--config` YAML isn't read; the runtime hook sees the load it causes.
 
@@ -131,7 +133,7 @@ Some seeds are ignored on purpose: the ones torch sets inside `DataLoader` worke
 
 | Flag | Field |
 |---|---|
-| `--model` | `model.name` (only the `--model` flag — the positional `vllm serve <model>` form isn't detected, #108) |
+| `--model` | `model.name` (also the positional `vllm serve <model>`; `--model` wins when both are given) |
 | `--dtype` | `model.dtype` |
 | `--quantization` / `-q` | `model.quantization` |
 | `--max-model-len` | `inference.max_model_len` |
@@ -143,7 +145,7 @@ Some seeds are ignored on purpose: the ones torch sets inside `DataLoader` worke
 | `--speculative-model`+`--num-speculative-tokens` (legacy), or `--speculative-config` (JSON/`key=value`) | `model.speculative_decoding` |
 | `--override-generation-config` (JSON/`key=value`) | `inference.temperature`, `.top_p`, `.top_k` |
 
-Only the kebab-case spellings above are recognized; vLLM also accepts snake_case (`--max_model_len`), which isn't detected (#108).
+snake_case spellings (`--max_model_len`), `--flag=value`, and boolean `--flag=false` / `--no-flag` are recognized too.
 
 Also surfaced as `inference.served_model_name`, `max_num_seqs`, `seed`, `trust_remote_code`, `enforce_eager`, `enable_prefix_caching` (no annotation override). `--port` is parsed but not surfaced — a deployment detail.
 
@@ -152,7 +154,7 @@ Also surfaced as `inference.served_model_name`, `max_num_seqs`, `seed`, `trust_r
 | Flag | Field |
 |---|---|
 | `--model_name_or_path` | `model.name` |
-| `--use_peft` (+ `--lora_r`/`--use_dora`/`--use_rslora`/`--load_in_4bit`/`--load_in_8bit`) | `fine_tuning.adaptation_method` (`lora`/`qlora`/`dora`/`rslora`/`peft`) — these boolean flags are only recognized with an explicit value (`--use_peft true`); a bare `--use_peft` followed by another flag is ignored (#108) |
+| `--use_peft` (+ `--lora_r`/`--use_dora`/`--use_rslora`/`--load_in_4bit`/`--load_in_8bit`) | `fine_tuning.adaptation_method` (`lora`/`qlora`/`dora`/`rslora`/`peft`) — these boolean flags work bare (`--use_peft`), with a value (`--use_peft true`, `--use_peft=false`), or negated (`--no_use_peft`); hyphenated spellings are accepted too |
 | `--lora_r` | `fine_tuning.lora_rank` |
 | `--lora_alpha` | `fine_tuning.lora_alpha` |
 | `--learning_rate` | `training.learning_rate` |
@@ -268,10 +270,10 @@ For a pod whose `serving_engine` is detected (see *Other serving engines* above)
 | `num_requests_running` | ✅ | ✅ | ✅ | ✅ |
 | `num_requests_waiting` | ✅ | ✅ | ✅ | ✅ |
 | `kv_cache_usage` (%) | ✅ | — | ✅ | ✅ |
-| `prompt_throughput` (tok/s) | ✅ | — | ✅ | ✅ |
+| `prompt_throughput` (tok/s) | ✅ | ✅ | ✅ | ✅ |
 | `generation_throughput` (tok/s) | ✅ | ✅ | ✅ | ✅ |
 
-**vLLM, SGLang and LMDeploy record the same full set**; only the source metric names differ (e.g. `vllm:kv_cache_usage_perc` vs `sglang:token_usage`). **TGI is the outlier** — it exposes no TTFT, KV-cache or prompt-throughput metric, so those are simply absent. A metric an engine doesn't export is skipped, not reported null. SGLang and LMDeploy also need `--enable-metrics`; a workload that moves the engine off its default port (vLLM 8000, TGI 80, SGLang 30000, LMDeploy 23333) isn't scraped (#86).
+**vLLM, SGLang and LMDeploy record the same full set**; only the source metric names differ (e.g. `vllm:kv_cache_usage_perc` vs `sglang:token_usage`). **TGI is the outlier** — it exposes no TTFT or KV-cache metric, so those are simply absent; its prompt throughput comes from `tgi_request_input_length_sum`. A metric an engine doesn't export is skipped, not reported null. SGLang needs `--enable-metrics` (as did LMDeploy before 0.18; 0.18+ exposes metrics by default and rejects the flag). A workload that moves the engine off its default port (vLLM 8000; TGI 80, or 8080 where OpenShift's restricted SCC keeps it off 80; SGLang 30000; LMDeploy 23333) isn't scraped (#86).
 
 ---
 
@@ -282,4 +284,20 @@ These are explicit non-goals, not gaps waiting to close:
 - Per-request sampling params (e.g. a benchmark client's temperature) set after a vLLM server is already running.
 - TensorRT-LLM/Triton serving. vLLM/llm-d, TGI, SGLang, and LMDeploy *are* detected as serving engines; trl, Axolotl, and LLaMA-Factory as fine-tuning tools.
 - `pip install git+...`'s PEP 610 `direct_url.json`.
-- Verification that a declared git commit/dataset/model actually matches what's on disk or in a bucket — every "detection" above is identification, not an attestation.
+- Verification that a declared git commit/dataset/model actually matches what's on disk or in a bucket — every "detection" above is identification, not an attestation. Recording signed image attestations where they exist is tracked in #184.
+
+### Not yet detected
+
+Gaps that are open issues rather than non-goals:
+
+- Optimizer parameters beyond the name: betas, epsilon, weight decay, scheduler (#176).
+- DataLoader shuffle, sampler type and `drop_last` (#177).
+- Training TP/PP/EP degrees, world size, ZeRO stage, FSDP sharding strategy (#178).
+- Beam search and generation parameters beyond temperature/top_p/top_k (#179).
+- KV-cache quantization (`--kv-cache-dtype`, LMDeploy `--quant-policy`) (#180).
+- FLOPs / MFU estimate against the GPU's theoretical peak (#181).
+- Run energy (Wh) and a carbon estimate from GPU power (#182).
+- Profiler use (Nsight Systems, Nsight Compute, `torch.profiler`) (#183).
+- A content hash of the dataset, rather than the metadata fingerprint above (#185).
+- TF32, FP8 training, and mixed precision set only in an accelerate/DeepSpeed/FSDP config (#186).
+- Versions of ML libraries other than torch (#187).
