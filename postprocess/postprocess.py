@@ -2981,7 +2981,7 @@ def _seed_or_none(value):
 
 def training_determinism(runtime_info):
     """training.determinism from the runtime hooks' seed and flag
-    observations (#175), or None if they saw nothing."""
+    observations, or None if they saw nothing."""
     block = {}
     seeds = runtime_info.get("seeds")
     if isinstance(seeds, dict):

@@ -1131,7 +1131,7 @@ def _install_transformers_hook():
                 info["optimizer"] = getattr(self.optim, "value", None) or str(self.optim)
             if getattr(self, "seed", None) is not None:
                 info["random_seed"] = self.seed
-            # Seeds the Trainer's data sampler separately from `seed` (#175).
+            # Seeds the Trainer's data sampler separately from `seed`.
             if getattr(self, "data_seed", None) is not None:
                 info["data_seed"] = self.data_seed
             if getattr(self, "full_determinism", False):
@@ -1268,7 +1268,7 @@ def _install_peft_hook():
     peft.LoraConfig.__init__ = _patched_init
 
 
-# ── Seeding hooks and determinism flags (#175) ───────────────────────────────
+# ── Seeding hooks and determinism flags ──────────────────────────────────────
 #
 # A process's seeds are one observation, kept under a single runtime_info key
 # ("seeds") so they merge as a unit across processes (here) and pods (the

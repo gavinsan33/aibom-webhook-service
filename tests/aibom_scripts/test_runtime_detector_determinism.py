@@ -1,4 +1,4 @@
-"""Seed hooks and determinism flags (#175)."""
+"""Seed hooks and determinism flags."""
 
 import json
 import os
