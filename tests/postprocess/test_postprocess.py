@@ -189,6 +189,45 @@ def test_detect_model_from_containers_identifies_each_engine():
         assert pp.detect_model_from_containers(containers)["serving_engine"] == engine
 
 
+@pytest.mark.parametrize("image", [
+    "ghcr.io/llm-d/llm-d-xpu:v1.0.0",
+    "ghcr.io/llm-d/llm-d-rocm@sha256:" + "a" * 64,
+    "quay.io/mirror/llm-d-cpu:v1",
+])
+def test_llm_d_model_server_image_detected_as_vllm(image):
+    result = pp._detect_vllm_from_entrypoint_args({"image": image, "args": ["--model", "org/m", "--port", "8200"]})
+    assert result["serving_engine"] == "vllm"
+    assert result["model_name"] == "org/m"
+
+
+@pytest.mark.parametrize("image", [
+    "ghcr.io/llm-d/llm-d-router-disagg-sidecar:v1.0.0",
+    "ghcr.io/llm-d/llm-d-routing-sidecar:v0.2.0",
+    "ghcr.io/llm-d/llm-d-inference-scheduler:v0.2.0",
+    "ghcr.io/llm-d/llm-d-router-endpoint-picker:v1.0.0",
+    "ghcr.io/llm-d/llm-d-inference-sim:latest",
+    "ghcr.io/llm-d/llm-d-xpu-sglang:v0.10.0",
+    # ENTRYPOINT is NVIDIA's wrapper, not vLLM: args alone don't start a server.
+    "ghcr.io/llm-d/llm-d-cuda:v0.9.0",
+])
+def test_llm_d_non_vllm_images_not_detected(image):
+    assert pp._detect_vllm_from_entrypoint_args({"image": image, "args": ["--port=8000"]}) is None
+
+
+def test_llm_d_routing_sidecar_listed_first_does_not_hide_vllm():
+    # A routing sidecar run as a regular container ahead of vLLM (llm-d's own
+    # charts make it a native sidecar, which containers.json never includes).
+    containers = [
+        {"name": "routing-proxy", "image": "ghcr.io/llm-d/llm-d-router-disagg-sidecar:v1.0.0",
+         "args": ["--port=8000", "--model-server-port=8200", "--kv-connector=nixlv2"]},
+        {"name": "vllm", "image": "ghcr.io/llm-d/llm-d-xpu:v1.0.0",
+         "args": ["--model", "Qwen/Qwen3-0.6B", "--port", "8200"]},
+    ]
+    result = pp.detect_model_from_containers(containers)
+    assert result["serving_engine"] == "vllm"
+    assert result["model_name"] == "Qwen/Qwen3-0.6B"
+
+
 # ---------------------------------------------------------------------------
 # Per-engine serving telemetry query generation
 # ---------------------------------------------------------------------------
@@ -3506,3 +3545,33 @@ def test_restart_info_empty_when_nothing_restarted():
     assert pp.pod_restart_info("p", [_container("p", "Completed", 0)]) == {}
     pod = _status_aibom(["p"], [_container("p", "Completed", 0)])["execution_metadata"]["pods"][0]
     assert "restart_count" not in pod
+
+
+# ---------------------------------------------------------------------------
+# llm-d prefill/decode role (#167)
+# ---------------------------------------------------------------------------
+
+
+def _role_aibom(roles):
+    return pp.compile_aibom(
+        discoveries=[{"pod_metadata": {"name": n}} for n in roles],
+        detected_datasets=[], runtime_info={}, annotations={}, telemetry=None,
+        detected_model={"serving_engine": "vllm", "model_name": "org/m"},
+        containers=[{"pod_name": n, "name": "vllm", **({"serving_role": r} if r else {})} for n, r in roles.items()],
+    )
+
+
+def test_llm_d_role_recorded_on_pod_and_inference():
+    aibom = _role_aibom({"ms-decode-0": "decode"})
+    assert aibom["execution_metadata"]["pods"][0]["serving_role"] == "decode"
+    assert aibom["inference"]["serving_role"] == "decode"
+
+
+def test_llm_d_role_omitted_when_pods_disagree_or_have_none():
+    mixed = _role_aibom({"ms-prefill-0": "prefill", "ms-decode-0": "decode"})
+    assert "serving_role" not in mixed["inference"]
+    assert [p["serving_role"] for p in mixed["execution_metadata"]["pods"]] == ["prefill", "decode"]
+
+    plain = _role_aibom({"vllm-0": None})
+    assert "serving_role" not in plain["inference"]
+    assert "serving_role" not in plain["execution_metadata"]["pods"][0]
