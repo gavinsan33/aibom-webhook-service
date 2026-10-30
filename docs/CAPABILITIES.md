@@ -155,6 +155,15 @@ Also surfaced as `inference.served_model_name`, `max_num_seqs`, `seed`, `trust_r
 | `--num_train_epochs` | `training.epochs` |
 | `--seed` | `training.random_seed` |
 
+*Axolotl* (`axolotl train <config> [overrides]`, modern kebab-case or legacy `-m axolotl.cli.train` snake-case) and *LLaMA-Factory* (`llamafactory-cli train`) are detected the same way, setting `training_framework` and the model/LoRA/training fields under the same names as trl. Both are config-file driven and **the YAML is not read** (same limit as `trl --config`): Axolotl reports only CLI overrides, LLaMA-Factory only flag-mode values; a pure config-file run still reports `training_framework` and an intent, nothing more.
+
+| Tool | Model flag | Adapter → `fine_tuning.adaptation_method` | Other flags |
+|---|---|---|---|
+| Axolotl | `--base-model` / `--base_model` | `--adapter` (`qlora`, or `lora` + `--load-in-4bit` → `qlora`) | `--lora-r`, `--lora-alpha`, `--learning-rate`, `--micro-batch-size`, `--num-epochs`, `--seed` |
+| LLaMA-Factory | `--model_name_or_path` | `--finetuning_type lora` (+ `--quantization_bit` → `qlora`, `--use_dora` → `dora`, `--use_rslora` → `rslora`; `full`/`freeze` → none) | `--lora_rank`, `--lora_alpha`, `--learning_rate`, `--per_device_train_batch_size`, `--num_train_epochs`, `--seed` |
+
+LLaMA-Factory's `--dataset` is not parsed as the declared dataset name (comma-separated, keyed to `dataset_info.json`); runtime detection and `aibom.io/dataset-*` annotations still apply.
+
 *Other serving engines* — each identified from its own server command, setting `inference.serving_engine` and `model.name`. `model.name` also feeds quantization-from-name and the inference `experiment_intent`.
 
 | Engine | Invocation | Model flag |
@@ -266,6 +275,6 @@ For a pod whose `serving_engine` is detected (see *Other serving engines* above)
 These are explicit non-goals, not gaps waiting to close:
 
 - Per-request sampling params (e.g. a benchmark client's temperature) set after a vLLM server is already running.
-- TensorRT-LLM/Triton serving, or fine-tuning tools beyond trl (Axolotl, LLaMA-Factory). vLLM/llm-d, TGI, SGLang, and LMDeploy *are* detected.
+- TensorRT-LLM/Triton serving. vLLM/llm-d, TGI, SGLang, and LMDeploy *are* detected as serving engines; trl, Axolotl, and LLaMA-Factory as fine-tuning tools.
 - `pip install git+...`'s PEP 610 `direct_url.json`.
 - Verification that a declared git commit/dataset/model actually matches what's on disk or in a bucket — every "detection" above is identification, not an attestation.

@@ -431,6 +431,77 @@ def test_detect_trl_returns_none_for_non_trl_command():
 
 
 # ---------------------------------------------------------------------------
+# Axolotl / LLaMA-Factory fine-tuning detection
+# ---------------------------------------------------------------------------
+
+
+def test_detect_axolotl_kebab_overrides():
+    # Modern Click CLI: kebab-case overrides after the config path.
+    result = pp.detect_axolotl_from_command(
+        ["axolotl", "train", "config.yml", "--base-model", "org/m",
+         "--lora-r", "16", "--lora-alpha", "32", "--adapter", "qlora",
+         "--learning-rate", "2e-4", "--num-epochs", "3"]
+    )
+    assert result["training_framework"] == "axolotl"
+    assert result["model_name"] == "org/m"
+    assert result["lora_rank"] == 16
+    assert result["adaptation_method"] == "qlora"
+    assert result["learning_rate"] == 2e-4
+    assert result["epochs"] == 3
+
+
+def test_detect_axolotl_lora_plus_4bit_is_qlora():
+    result = pp.detect_axolotl_from_command(
+        ["axolotl", "train", "c.yml", "--adapter", "lora", "--load-in-4bit"]
+    )
+    assert result["adaptation_method"] == "qlora"
+
+
+def test_detect_axolotl_legacy_module_form_config_only():
+    # Legacy form, config-only: framework detected, nothing from the YAML.
+    result = pp.detect_axolotl_from_command(
+        ["python", "-m", "axolotl.cli.train", "qlora.yml"]
+    )
+    assert result == {"training_framework": "axolotl"}
+
+
+def test_detect_llamafactory_flag_style_qlora():
+    result = pp.detect_llamafactory_from_command(
+        ["llamafactory-cli", "train", "--model_name_or_path", "org/m",
+         "--finetuning_type", "lora", "--lora_rank", "8", "--quantization_bit", "4",
+         "--num_train_epochs", "2.0", "--per_device_train_batch_size", "8"]
+    )
+    assert result["training_framework"] == "llama-factory"
+    assert result["model_name"] == "org/m"
+    assert result["lora_rank"] == 8
+    assert result["adaptation_method"] == "qlora"
+    assert result["epochs"] == 2.0
+    assert result["batch_size"] == 8
+
+
+def test_detect_llamafactory_full_finetune_has_no_adapter():
+    result = pp.detect_llamafactory_from_command(
+        ["llamafactory-cli", "train", "--model_name_or_path", "org/m", "--finetuning_type", "full"]
+    )
+    assert "adaptation_method" not in result
+
+
+def test_detect_llamafactory_config_only():
+    result = pp.detect_llamafactory_from_command(["llamafactory-cli", "train", "sft.yaml"])
+    assert result == {"training_framework": "llama-factory"}
+
+
+def test_axolotl_llamafactory_return_none_for_unrelated():
+    for fn in (pp.detect_axolotl_from_command, pp.detect_llamafactory_from_command):
+        assert fn(["python", "train.py"]) is None
+        assert fn([]) is None
+        assert fn(None) is None
+    # Non-train subcommands aren't training runs.
+    assert pp.detect_axolotl_from_command(["axolotl", "preprocess", "c.yml"]) is None
+    assert pp.detect_llamafactory_from_command(["llamafactory-cli", "export", "c.yaml"]) is None
+
+
+# ---------------------------------------------------------------------------
 # Shell-wrapped command flattening
 # ---------------------------------------------------------------------------
 
@@ -3320,6 +3391,29 @@ def test_shell_comments_are_ignored():
     result = pp.detect_model_from_containers([_sh(script)])
     assert result["model_name"] == "new/model"
     assert "max_model_len" not in result
+
+
+def test_apostrophes_in_comments_and_heredoc_dont_break_tokenizing():
+    """An unbalanced `'` in a comment or heredoc body made shlex raise, so
+    nothing in the script was detected (examples/axolotl-finetune.yaml)."""
+    script = (
+        "cat > /tmp/c.yml <<'EOF'\n"
+        "# axolotl's cache\n"
+        "base_model: x\n"
+        "EOF\n"
+        "# can't write /\n"
+        "axolotl train /tmp/c.yml \\\n  --base-model org/m --adapter lora --lora-r 16\n"
+    )
+    result = pp.detect_model_from_containers([_sh(script)])
+    assert result["training_framework"] == "axolotl"
+    assert result["model_name"] == "org/m"
+    assert result["lora_rank"] == 16
+
+
+def test_heredoc_body_is_not_a_command():
+    result = pp.detect_model_from_containers([_sh("cat > s.sh <<EOF\nvllm serve a/b\nEOF\ntrl sft --seed 3\n")])
+    assert "serving_engine" not in result
+    assert result["random_seed"] == 3
 
 
 def test_trailing_comment_does_not_merge_the_next_line():
