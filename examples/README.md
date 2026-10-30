@@ -21,6 +21,21 @@ oc get pods -n project-gavin-test -w
 oc logs -n project-gavin-test job/aibom-vllm-benchmark-server-0-aibom-postprocess
 ```
 
+## Example: Other Serving Engines (TGI, SGLang, LMDeploy)
+
+The `examples/tgi-inference.yaml`, `examples/sglang-inference.yaml`, and `examples/lmdeploy-inference.yaml` files are each a copy of the vLLM benchmark JobSet above with only the server container (image, command, port) swapped for a different serving engine — the guidellm client speaks the OpenAI-compatible HTTP API all four engines expose, so the same client/teardown harness drives every one. Each exercises both halves of multi-engine support: `postprocess.py` identifies the engine and model from the server command (see [Model Auto-Detection](../CLAUDE.md#model-auto-detection)), and its native serving-level metrics (TTFT, queue depth, KV-cache usage, throughput) are scraped and compiled into `inference.performance` the same way vLLM's are (see [Inference Performance Telemetry](../CLAUDE.md#inference-performance-telemetry)). Each engine's own default port is used (SGLang 30000, LMDeploy 23333) except TGI, whose default 80 can't be bound under OpenShift's restricted SCC, so it runs on 8080. The the `aibom-serving-metrics` PodMonitor scrapes; SGLang needs `--enable-metrics` (set in its example); TGI and LMDeploy 0.18+ expose metrics by default (LMDeploy 0.18 rejects `--enable-metrics`).
+
+TGI has no TTFT or KV-cache metric of its own, so its `inference.performance` reports a documented subset (inter-token latency, queue depth, running requests, prompt and generation throughput). The image tags and model are starting points — adjust them for what your cluster can pull and schedule.
+
+```bash
+oc apply -f examples/tgi-inference.yaml
+oc apply -f examples/sglang-inference.yaml
+oc apply -f examples/lmdeploy-inference.yaml
+
+# View the AIBOM after postprocessing completes (per engine)
+oc logs -n project-gavin-test job/aibom-tgi-benchmark-server-0-aibom-postprocess
+```
+
 ## Example: vLLM via RHOAI/KServe Model Serving
 
 The `examples/vllm-inference-rhoai.yaml` file deploys the same model as a KServe `InferenceService` — the route Red Hat OpenShift AI's Model Serving UI uses — instead of a raw JobSet. It uses a fully custom predictor container (`spec.predictor.containers`) so vLLM pulls the model directly from Hugging Face Hub, avoiding any dependency on a pre-provisioned S3/PVC model store.

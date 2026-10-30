@@ -1,0 +1,184 @@
+# TGI (HuggingFace text-generation-inference) serving example.
+# Mirrors vllm-inference.yaml: a server + a guidellm OpenAI-http client that
+# drives traffic and then deletes the server Job so postprocessing fires.
+# The only real differences from the vLLM example are the server image/command
+# and the port. TGI's own default is 80, but OpenShift's restricted SCC runs
+# pods as a random non-root UID with no NET_BIND_SERVICE, so it can't bind a
+# port below 1024; this uses 8080 (KServe's TGI runtime does the same). TGI
+# exposes Prometheus metrics on /metrics on that same port by default (no flag
+# needed), which the aibom-serving-metrics PodMonitor scrapes.
+#
+# Adjust image tag / model for your cluster as needed.
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: aibom-tgi-benchmark
+  namespace: project-gavin-test
+spec:
+  replicatedJobs:
+    - name: server
+      replicas: 1
+      template:
+        metadata:
+          annotations:
+            aibom.io/experiment-intent: inference
+            aibom.io/experiment-name: tgi-benchmark
+        spec:
+          parallelism: 1
+          completions: 1
+          backoffLimit: 0
+          activeDeadlineSeconds: 900
+          template:
+            spec:
+              restartPolicy: Never
+              tolerations:
+                - operator: Exists
+              containers:
+                - name: server
+                  image: ghcr.io/huggingface/text-generation-inference:3.0.1
+                  command:
+                    - text-generation-launcher
+                    - --model-id=Qwen/Qwen2.5-0.5B-Instruct
+                    - --port=8080
+                  # The router writes its tokenizer to ./out, and the image's
+                  # WORKDIR (/usr/src) isn't writable by a random UID.
+                  workingDir: /tmp
+                  env:
+                    - name: HOME
+                      value: /tmp
+                    # The image defaults its HF cache to /data, which is owned
+                    # by root; OpenShift's restricted SCC runs with a random UID
+                    # and gets "Permission denied: '/data'" on download.
+                    - name: HF_HOME
+                      value: /tmp/hf
+                    - name: HUGGINGFACE_HUB_CACHE
+                      value: /tmp/hf/hub
+                    - name: HF_TOKEN
+                      valueFrom:
+                        secretKeyRef:
+                          name: hf-token-secret
+                          key: HF_TOKEN
+                          optional: true
+                  ports:
+                    - containerPort: 8080
+                      name: http
+                  readinessProbe:
+                    httpGet:
+                      path: /health
+                      port: 8080
+                    initialDelaySeconds: 30
+                    periodSeconds: 10
+                  resources:
+                    requests:
+                      nvidia.com/gpu: "1"
+                    limits:
+                      nvidia.com/gpu: "1"
+
+    - name: client
+      replicas: 1
+      template:
+        spec:
+          parallelism: 1
+          completions: 1
+          backoffLimit: 0
+          activeDeadlineSeconds: 900
+          template:
+            spec:
+              restartPolicy: Never
+              serviceAccountName: aibom-tgi-benchmark-client
+              tolerations:
+                - operator: Exists
+              initContainers:
+                - name: benchmark
+                  image: ghcr.io/vllm-project/guidellm@sha256:e3ad2371bfa8e42f2c3d1251b62d0d9c9706c27ae2143c8c048eb5fc6aebb558
+                  imagePullPolicy: Always
+                  command:
+                    - guidellm
+                    - run
+                    - --backend=kind=openai_http,target=http://aibom-tgi-benchmark-server-0-0.aibom-tgi-benchmark.project-gavin-test.svc.cluster.local:8080
+                    - --data=kind=synthetic_text,prompt_tokens=256,output_tokens=128
+                    - --profile=kind=sweep
+                    - --constraint=kind=max_duration,seconds=30
+                    - --output=kind=json
+                  env:
+                    - name: HOME
+                      value: /tmp
+              containers:
+                - name: delete-server-job
+                  image: docker.io/curlimages/curl:8.11.0
+                  command:
+                    - sh
+                    - -c
+                    - |
+                      TOKEN=/var/run/secrets/kubernetes.io/serviceaccount/token
+                      CACERT=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+                      NS=project-gavin-test
+                      curl -sf -X DELETE --cacert "$CACERT" \
+                        -H "Authorization: Bearer $(cat $TOKEN)" \
+                        "https://kubernetes.default.svc/apis/batch/v1/namespaces/$NS/jobs/aibom-tgi-benchmark-server-0?propagationPolicy=Background"
+                      # Then this Job's own RBAC, best-effort: deleting the RoleBinding
+                      # revokes the very token making these calls, so whatever comes
+                      # after it gets a 403. Anything left over is removed by
+                      # examples/cleanup.sh.
+                      curl -sf -X DELETE --cacert "$CACERT" \
+                        -H "Authorization: Bearer $(cat $TOKEN)" \
+                        "https://kubernetes.default.svc/apis/rbac.authorization.k8s.io/v1/namespaces/$NS/rolebindings/aibom-tgi-benchmark-client" || true
+                      curl -sf -X DELETE --cacert "$CACERT" \
+                        -H "Authorization: Bearer $(cat $TOKEN)" \
+                        "https://kubernetes.default.svc/apis/rbac.authorization.k8s.io/v1/namespaces/$NS/roles/aibom-tgi-benchmark-client" || true
+                      curl -sf -X DELETE --cacert "$CACERT" \
+                        -H "Authorization: Bearer $(cat $TOKEN)" \
+                        "https://kubernetes.default.svc/api/v1/namespaces/$NS/serviceaccounts/aibom-tgi-benchmark-client" || true
+                  resources:
+                    requests:
+                      cpu: "100m"
+                      memory: "128Mi"
+                    limits:
+                      cpu: "200m"
+                      memory: "256Mi"
+      dependsOn:
+        - name: server
+          status: Ready
+  successPolicy:
+    operator: All
+    targetReplicatedJobs:
+      - client
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aibom-tgi-benchmark-client
+  namespace: project-gavin-test
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: aibom-tgi-benchmark-client
+  namespace: project-gavin-test
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    resourceNames: ["aibom-tgi-benchmark-server-0"]
+    verbs: ["delete"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    resourceNames: ["aibom-tgi-benchmark-client"]
+    verbs: ["delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    resourceNames: ["aibom-tgi-benchmark-client"]
+    verbs: ["delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: aibom-tgi-benchmark-client
+  namespace: project-gavin-test
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: aibom-tgi-benchmark-client
+subjects:
+  - kind: ServiceAccount
+    name: aibom-tgi-benchmark-client
+    namespace: project-gavin-test

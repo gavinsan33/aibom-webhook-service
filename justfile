@@ -282,7 +282,7 @@ deploy-buildconfig *args: _check-auth
     oc -n {{ webhook_namespace }} delete pods -l openshift.io/build.name --field-selector=status.phase==Succeeded
     {{ kubectl }} -n {{ webhook_namespace }} rollout restart deployment/aibom-webhook
     {{ kubectl }} -n {{ webhook_namespace }} rollout status deployment/aibom-webhook --timeout=120s
-    echo "NOTE: run 'just setup-namespace <namespace>' for each workload namespace"
+    echo "NOTE: run 'just setup-namespace --namespace=<namespace>' for each workload namespace"
 
 # Usage: just undeploy [--skip-crds]
 #
@@ -379,7 +379,7 @@ deploy-local *args: _check-auth
         --set-string image.webhook.tag="$version" --set-string image.postprocess.tag="$version"
     {{ kubectl }} -n {{ webhook_namespace }} rollout restart deployment/aibom-webhook
     {{ kubectl }} -n {{ webhook_namespace }} rollout status deployment/aibom-webhook --timeout=120s
-    echo "NOTE: run 'just setup-namespace <namespace>' for each workload namespace"
+    echo "NOTE: run 'just setup-namespace --namespace=<namespace>' for each workload namespace"
 
 # The seamless default: install/upgrade the chart against images CI already
 # built — no build, no push, just a helm install pointing at a tag. Works once
@@ -428,7 +428,7 @@ deploy *args: _check-auth
         --set-string image.webhook.tag="$version" --set-string image.postprocess.tag="$version"
     {{ kubectl }} -n {{ webhook_namespace }} rollout restart deployment/aibom-webhook
     {{ kubectl }} -n {{ webhook_namespace }} rollout status deployment/aibom-webhook --timeout=120s
-    echo "NOTE: run 'just setup-namespace <namespace>' for each workload namespace"
+    echo "NOTE: run 'just setup-namespace --namespace=<namespace>' for each workload namespace"
 
 # --- Local kind cluster --------------------------------------------------------
 #

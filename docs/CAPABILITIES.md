@@ -155,6 +155,32 @@ Also surfaced as `inference.served_model_name`, `max_num_seqs`, `seed`, `trust_r
 | `--num_train_epochs` | `training.epochs` |
 | `--seed` | `training.random_seed` |
 
+*Other serving engines* — each identified from its own server command, setting `inference.serving_engine` and `model.name`. `model.name` also feeds quantization-from-name and the inference `experiment_intent`.
+
+| Engine | Invocation | Model flag |
+|---|---|---|
+| TGI | `text-generation-launcher ...` (also the image's ENTRYPOINT, args-only) | `--model-id` |
+| SGLang | `python -m sglang.launch_server ...` | `--model-path` |
+| LMDeploy | `lmdeploy serve api_server <model> ...` | positional |
+
+**Flag coverage is not uniform across engines.** vLLM is the reference and parses the full flag set below; the others map only the fields that have a clear per-engine equivalent. Engine-specific tuning flags beyond these are intentionally not mapped — the model name is the field that matters most.
+
+| AIBOM field | vLLM | TGI | SGLang | LMDeploy |
+|---|---|---|---|---|
+| `model.name` | `--model` | `--model-id` | `--model-path` | positional |
+| `model.dtype` | `--dtype` | `--dtype` | `--dtype` | `--dtype` |
+| `model.quantization` | `--quantization` / `-q` | `--quantize` | `--quantization` | `--model-format` |
+| `inference.tensor_parallel_size` | `-tp` | `--num-shard` | `--tp-size` / `--tp` | `--tp` |
+| `inference.max_model_len` | `--max-model-len` | `--max-total-tokens` | `--context-length` | `--session-len` |
+| `inference.data_parallel_size` | `-dp` | — | `--dp-size` / `--dp` | — |
+| `inference.pipeline_parallel_size` | `-pp` | — | — | — |
+| `inference.gpu_memory_utilization` | `--gpu-memory-utilization` | — | `--mem-fraction-static` | `--cache-max-entry-count` |
+| expert-parallel, max-num-seqs, seed, speculative decoding, generation-config overrides, prefix-caching, enforce-eager | ✅ | — | — | — |
+
+Quantization also falls back to the model-name regex when no flag sets it, for every engine. Fields with `—` have no mapped flag for that engine; a server that sets one is simply not reflected in that field.
+
+**Args-only (ENTRYPOINT) detection** exists only for vLLM and TGI, whose images ship a fixed server ENTRYPOINT (`vllm serve`, `text-generation-launcher`). SGLang and LMDeploy images expect an explicit command, so a KServe-style predictor that sets only `args` with no `command` for those two isn't detected — launch them with an explicit `command`.
+
 **Quantization from model name** (regex, applied as a fallback wherever no explicit flag/config gave a method) — recognizes `AWQ`, `GPTQ` (+ int4/int8 variants), `INT4`/`INT8`, `FP4`/`FP8` (incl. `NVFP4`/`MXFP4`), `bitsandbytes`/`NF4`, `Marlin`, `GGUF`/`GGML`, `AQLM`, `EXL2`, `SqueezeLLM`, `HQQ`, `QuIP`, `EETQ`, `AutoRound` — extracting both method and bit width where the name encodes one.
 
 **KServe InferenceService storage model detection** — for predictors with no CLI model flag, `model.name` comes from the `InferenceService`'s declared storage, by scheme (then run through the same quantization-from-name regex). Recorded in `model.name_declared_via`:
@@ -215,6 +241,22 @@ Each query aggregates to one series per pod — summed across containers, GPUs a
 
 In the AIBOM itself, each metric is recorded as summary statistics (`resource_utilization.metrics.<name>`: `min`/`max`/`avg`/`p95`, plus first/middle/last-third segment averages). A downsampled time series of each metric, about 200 points, is stored separately in an `AIBOMTelemetry` object referenced from `spec.data.telemetry_series_ref` (see [Telemetry](reference/schema.md#telemetry)). The series covers each pod's full run with no cold-start trim; the rest of this paragraph applies to the summary statistics. Each pod's window runs from its start time (parsed as UTC) to when its containers finished (`finished_at` in `containers.json`), or to collection time if it hasn't finished. The first scrape interval (30 s, `AIBOM_SERIES_SCRAPE_INTERVAL_S`) is excluded as cold start, capped at half the run length; a run too short for the full exclusion is flagged via `summary_includes_cold_start`. Stats are rounded once, after display scaling: 2 decimals at magnitude ≥ 1, 3 significant figures below that.
 
+### Inference serving metrics (per engine)
+
+For a pod whose `serving_engine` is detected (see *Other serving engines* above), the engine's own `/metrics` endpoint is scraped — via the `aibom-vllm-metrics` `PodMonitor` (`vllmMetrics.enabled`, default off) — and recorded under `inference.performance.metrics.<name>` with the same `min`/`max`/`avg`/`p95`/segment shape as above. All engines map to the same seven canonical fields; each engine just exposes a different subset under different upstream metric names:
+
+| `inference.performance` field | vLLM | TGI | SGLang | LMDeploy |
+|---|:---:|:---:|:---:|:---:|
+| `time_to_first_token_seconds` (TTFT) | ✅ | — | ✅ | ✅ |
+| `inter_token_latency_seconds` (ITL) | ✅ | ✅ | ✅ | ✅ |
+| `num_requests_running` | ✅ | ✅ | ✅ | ✅ |
+| `num_requests_waiting` | ✅ | ✅ | ✅ | ✅ |
+| `kv_cache_usage` (%) | ✅ | — | ✅ | ✅ |
+| `prompt_throughput` (tok/s) | ✅ | — | ✅ | ✅ |
+| `generation_throughput` (tok/s) | ✅ | ✅ | ✅ | ✅ |
+
+**vLLM, SGLang and LMDeploy record the same full set**; only the source metric names differ (e.g. `vllm:kv_cache_usage_perc` vs `sglang:token_usage`). **TGI is the outlier** — it exposes no TTFT, KV-cache or prompt-throughput metric, so those are simply absent. A metric an engine doesn't export is skipped, not reported null. SGLang and LMDeploy also need `--enable-metrics`; a workload that moves the engine off its default port (vLLM 8000, TGI 80, SGLang 30000, LMDeploy 23333) isn't scraped (#86).
+
 ---
 
 ## What's Not Detected
@@ -222,6 +264,6 @@ In the AIBOM itself, each metric is recorded as summary statistics (`resource_ut
 These are explicit non-goals, not gaps waiting to close:
 
 - Per-request sampling params (e.g. a benchmark client's temperature) set after a vLLM server is already running.
-- Other serving engines (TGI, SGLang, TensorRT-LLM) or fine-tuning tools (Axolotl, LLaMA-Factory).
+- TensorRT-LLM/Triton serving, or fine-tuning tools beyond trl (Axolotl, LLaMA-Factory). vLLM, TGI, SGLang, and LMDeploy *are* detected.
 - `pip install git+...`'s PEP 610 `direct_url.json`.
 - Verification that a declared git commit/dataset/model actually matches what's on disk or in a bucket — every "detection" above is identification, not an attestation.
