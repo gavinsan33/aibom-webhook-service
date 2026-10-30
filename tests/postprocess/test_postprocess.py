@@ -2231,6 +2231,79 @@ def test_compile_aibom_training_arguments_seed_wins_over_direct_seeds():
     assert _training_aibom(runtime_info)["training"]["random_seed"] == 42
 
 
+_SOFTWARE_VERSIONS = {
+    "python": "3.12.3",
+    "packages": {"trl": "0.24.0", "torch": "2.9.0+cu128", "transformers": "4.57.1"},
+    "torch_cuda": "12.8",
+    "cudnn": "9.10.2",
+    "nccl": "2.27.3",
+}
+
+
+def test_software_environment_maps_versions():
+    assert pp.software_environment({"software_versions": _SOFTWARE_VERSIONS}) == {
+        "python_version": "3.12.3",
+        "libraries": {"torch": "2.9.0+cu128", "transformers": "4.57.1", "trl": "0.24.0"},
+        "torch_cuda_version": "12.8",
+        "cudnn_version": "9.10.2",
+        "nccl_version": "2.27.3",
+    }
+
+
+def test_software_environment_drops_malformed_values():
+    # runtime_info is written from inside the workload's container.
+    sv = {
+        "python": 3.12,
+        "packages": {"torch": 2.9, "": "1.0", "trl": "", "peft": "0.17.1", "x" * 100: "1" * 100},
+        "torch_cuda": ["12.8"],
+        "nccl": "2.27.3",
+    }
+    assert pp.software_environment({"software_versions": sv}) == {
+        "libraries": {"peft": "0.17.1", "x" * 64: "1" * 64},
+        "nccl_version": "2.27.3",
+    }
+    assert pp.software_environment({"software_versions": ["torch"]}) == {}
+    assert pp.software_environment({}) == {}
+
+
+def test_software_environment_caps_library_count():
+    packages = {f"pkg{i:03d}": "1.0" for i in range(100)}
+    libraries = pp.software_environment({"software_versions": {"packages": packages}})["libraries"]
+    assert list(libraries) == [f"pkg{i:03d}" for i in range(64)]
+
+
+def test_compile_aibom_adds_software_versions_to_environment():
+    discovery = {"pod_metadata": {"name": "train-0"}, "gpu": {"cuda_version": "13.0"}, "system": {}}
+    runtime_info = {"framework": "PyTorch", "framework_version": "2.9.0+cu128",
+                    "software_versions": _SOFTWARE_VERSIONS}
+    env = pp.compile_aibom(
+        discoveries=[discovery], detected_datasets=[], runtime_info=runtime_info,
+        annotations={}, telemetry=None,
+    )["environment"]
+    # The driver's CUDA (nvidia-smi) and the toolkit torch was built with are
+    # different fields.
+    assert env["cuda_version"] == "13.0"
+    assert env["torch_cuda_version"] == "12.8"
+    assert env["framework_version"] == "PyTorch 2.9.0+cu128"
+    assert env["libraries"]["trl"] == "0.24.0"
+    assert env["python_version"] == "3.12.3"
+
+
+def test_compile_aibom_software_versions_without_discovery():
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info={"software_versions": {"python": "3.12.3"}},
+        annotations={}, telemetry=None,
+    )
+    assert aibom["environment"] == {"python_version": "3.12.3"}
+
+
+def test_compile_aibom_no_environment_without_any_source():
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info={}, annotations={}, telemetry=None,
+    )
+    assert "environment" not in aibom
+
+
 def test_compile_aibom_runtime_lora_on_quantized_base_is_qlora():
     # Independent of whether LoraConfig or the quantized load came first (#109).
     runtime_info = {"adaptation_method": "lora", "quantization_method": "bitsandbytes"}
