@@ -591,12 +591,16 @@ func (w *Watcher) isNamespaceOptedOut(namespace string) bool {
 	return ns.DeletionTimestamp != nil || ns.Labels[LabelEnabled] != "true"
 }
 
+// isNamespaceEnabled is false for a namespace being deleted, like
+// isNamespaceOptedOut, so the two can't both pass when the namespace arrives
+// in the cache between the calls (a Job event delivered before the namespace
+// informer has synced).
 func (w *Watcher) isNamespaceEnabled(namespace string) bool {
 	ns, err := w.factory.Core().V1().Namespaces().Lister().Get(namespace)
 	if err != nil {
 		return false
 	}
-	return ns.Labels[LabelEnabled] == "true"
+	return ns.DeletionTimestamp == nil && ns.Labels[LabelEnabled] == "true"
 }
 
 // isJobFinished reports whether the job has reached a terminal state — either

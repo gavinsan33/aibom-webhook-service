@@ -2957,6 +2957,70 @@ def aggregate_pod_metrics(pods, unit_map):
     return metric_details
 
 
+_SEED_GENERATORS = ("python", "numpy", "torch")
+_DETERMINISM_FLAG_TYPES = {
+    "cudnn_deterministic": bool,
+    "cudnn_benchmark": bool,
+    "deterministic_algorithms": bool,
+    "deterministic_algorithms_warn_only": bool,
+    "cublas_workspace_config": str,
+    "python_hash_seed": str,
+}
+
+
+def _seed_or_none(value):
+    # runtime_info comes from the workload's own container; keep only the
+    # shapes runtime_detector.py writes (an int, or a string for a str seed
+    # or an int too large for JCS, which would leave the AIBOM unsigned).
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        return None
+    if isinstance(value, int) and abs(value) > 2 ** 53 - 1:
+        return str(value)
+    return value[:64] if isinstance(value, str) else value
+
+
+def training_determinism(runtime_info):
+    """training.determinism from the runtime hooks' seed and flag
+    observations, or None if they saw nothing."""
+    block = {}
+    seeds = runtime_info.get("seeds")
+    if isinstance(seeds, dict):
+        values = seeds.get("values") if isinstance(seeds.get("values"), dict) else {}
+        values = {g: _seed_or_none(values.get(g)) for g in _SEED_GENERATORS}
+        values = {g: v for g, v in values.items() if v is not None}
+        if values:
+            block["seeds"] = values
+        history = seeds.get("history") if isinstance(seeds.get("history"), dict) else {}
+        history = {
+            g: [v for v in history[g] if _seed_or_none(v) is not None]
+            for g in _SEED_GENERATORS if isinstance(history.get(g), list)
+        }
+        history = {g: h for g, h in history.items() if len(h) > 1}
+        if history:
+            block["seed_history"] = history
+    data_seed = _seed_or_none(runtime_info.get("data_seed"))
+    if data_seed is not None:
+        block["data_seed"] = data_seed
+    if runtime_info.get("full_determinism") is True:
+        block["full_determinism"] = True
+    flags = runtime_info.get("determinism_flags")
+    if isinstance(flags, dict):
+        for key, kind in _DETERMINISM_FLAG_TYPES.items():
+            if isinstance(flags.get(key), kind):
+                block[key] = flags[key]
+    return block or None
+
+
+def _agreed_seed(determinism):
+    """The one value every seeded generator was last seeded with, for a
+    script that seeds directly instead of through TrainingArguments."""
+    values = set(((determinism or {}).get("seeds") or {}).values())
+    if len(values) != 1:
+        return None
+    value = values.pop()
+    return value if isinstance(value, int) else None
+
+
 def compile_aibom(
     discoveries, detected_datasets, runtime_info, annotations, telemetry,
     detected_model=None, cli_dataset=None, detected_provenance=None, containers=None,
@@ -3235,6 +3299,7 @@ def compile_aibom(
 
     # Training config
     if intent in ("training", "sft"):
+        determinism = training_determinism(runtime_info)
         aibom["training"] = {
             "optimizer": annotations.get("optimizer") or runtime_info.get("optimizer"),
             "learning_rate": _first_not_none(
@@ -3256,7 +3321,9 @@ def compile_aibom(
                 _try_int(annotations.get("random-seed")),
                 runtime_info.get("random_seed"),
                 dm.get("random_seed"),
+                _agreed_seed(determinism),
             ),
+            "determinism": determinism,
             "mixed_precision": runtime_info.get("mixed_precision"),
             "parallelization_strategy": (
                 annotations.get("parallelization-strategy")
