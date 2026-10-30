@@ -17,7 +17,8 @@ Supported dataset frameworks:
 Also hooks transformers.TrainingArguments, transformers.PreTrainedModel.from_pretrained,
 and peft.LoraConfig -- catching model/training config for scripts that build these
 objects directly in Python, with no corresponding CLI flags for postprocess.py's
-command-line detectors to see.
+command-line detectors to see -- and the global seeding functions (random.seed,
+numpy.random.seed, torch.manual_seed) plus torch's determinism flags.
 
 Writes detected metadata to $AIBOM_DATASET_OUTPUT (default: /results/dataset_detected.json)
 only -- this process never talks to the Kubernetes API. The aibom-dataset-sidecar
@@ -38,9 +39,11 @@ All hooks are fault-tolerant — detection failures never interrupt training.
 import atexit
 import contextlib
 import fcntl
+import functools
 import hashlib
 import importlib.util
 import json
+import operator
 import os
 import signal
 import sys
@@ -53,6 +56,9 @@ _OUTPUT_PATH = os.environ.get(
     "AIBOM_DATASET_OUTPUT", "/results/dataset_detected.json"
 )
 _DEBUG = os.environ.get("AIBOM_DEBUG", "0") == "1"
+# Read at startup: the hash seed is fixed when the interpreter starts, so a
+# script that sets os.environ["PYTHONHASHSEED"] later changes nothing.
+_STARTUP_PYTHONHASHSEED = os.environ.get("PYTHONHASHSEED")
 
 
 def _dbg(msg):
@@ -543,11 +549,14 @@ def _after_fork_in_child():
     in whatever state another thread left them -- including held by the
     flush timer thread, which doesn't exist in the child -- and a Timer
     object that will never fire. Start clean."""
-    global _lock, _flush_timer, _flush_timer_lock, _git_captured
+    global _lock, _flush_timer, _flush_timer_lock, _git_captured, _training_activity
     _lock = threading.Lock()
     _flush_timer_lock = threading.Lock()
     _flush_timer = None
     _git_captured = False
+    # The child records determinism flags only if it does training work of
+    # its own; a DataLoader worker doesn't.
+    _training_activity = False
 
 
 def _on_sigterm(signum, frame):
@@ -657,6 +666,8 @@ def _flush(final=True, in_signal=False):
     global _git_captured
     _capture_training_args()
     _capture_accelerate_config()
+    if _training_activity:
+        _capture_determinism_flags()
 
     got_lock = _lock.acquire(timeout=0.5 if in_signal else -1)
     try:
@@ -735,8 +746,10 @@ def _install_dataloader_hook():
     _dbg(f"DataLoader hook: installed (torch {torch.__version__})")
 
     def _patched_init(self, dataset=None, *args, **kwargs):
+        global _training_activity
         _orig_init(self, dataset, *args, **kwargs)
         try:
+            _training_activity = True
             batch_size = getattr(self, "batch_size", None)
             with _lock:
                 existing = _dataset_registry.get(dataset) if dataset is not None else None
@@ -1099,8 +1112,10 @@ def _install_transformers_hook():
     # override it call super().__post_init__(), so hooking that catches them
     # all -- after TrainingArguments' own normalization has run.
     def _patched_ta_post_init(self, *args, **kwargs):
+        global _training_activity
         _orig_ta_post_init(self, *args, **kwargs)
         try:
+            _training_activity = True
             info = {"training_framework": "transformers.Trainer"}
             if getattr(self, "learning_rate", None) is not None:
                 info["learning_rate"] = self.learning_rate
@@ -1116,6 +1131,11 @@ def _install_transformers_hook():
                 info["optimizer"] = getattr(self.optim, "value", None) or str(self.optim)
             if getattr(self, "seed", None) is not None:
                 info["random_seed"] = self.seed
+            # Seeds the Trainer's data sampler separately from `seed` (#175).
+            if getattr(self, "data_seed", None) is not None:
+                info["data_seed"] = self.data_seed
+            if getattr(self, "full_determinism", False):
+                info["full_determinism"] = True
             # Mixed precision is the compute dtype, not the weights' dtype
             # (from_pretrained's), so it's kept under its own key (#109).
             if getattr(self, "bf16", False):
@@ -1248,6 +1268,177 @@ def _install_peft_hook():
     peft.LoraConfig.__init__ = _patched_init
 
 
+# ── Seeding hooks and determinism flags (#175) ───────────────────────────────
+#
+# A process's seeds are one observation, kept under a single runtime_info key
+# ("seeds") so they merge as a unit across processes (here) and pods (the
+# watcher's mergeDatasets), never mixing one process's torch seed with
+# another's Python seed. "values" is each generator's most recent explicit
+# seed, the one governing whatever ran after it; "history" lists the distinct
+# values in the order first seen, only for generators seeded with more than
+# one (a script that seeds 1234 and then lets Trainer reseed with 42).
+#
+# Seeds torch itself sets in a DataLoader worker (base_seed + worker_id, a
+# derived NumPy state, then transformers' seed_worker reseeding from those)
+# are not the script's choice and are ignored. So are seeds on ranks other
+# than 0, which differ by design under accelerate's set_seed(device_specific=True).
+#
+# Not captured: local generators (numpy.random.default_rng, RandomState,
+# torch.Generator) and torch.cuda.manual_seed* called on its own.
+
+_SEED_HISTORY_MAX = 8
+# Ints beyond this can't be canonicalized under RFC 8785, which would leave
+# the compiled AIBOM unsigned; they're recorded as strings instead.
+_JSON_SAFE_INT = 2 ** 53 - 1
+_last_seeds = {}
+_seed_history = {}
+# Set by anything only a training process does (a seed call, a DataLoader,
+# TrainingArguments), so determinism flags aren't recorded by a launcher like
+# torchrun, which imports torch and exits last, after its ranks.
+_training_activity = False
+
+
+def _seed_value(seed):
+    if seed is None or isinstance(seed, bool):
+        return None
+    if isinstance(seed, str):
+        return seed[:64]
+    try:
+        value = operator.index(seed)  # int, numpy integer
+    except TypeError:
+        return None  # bytes, arrays, ...
+    return value if abs(value) <= _JSON_SAFE_INT else str(value)
+
+
+def _in_dataloader_worker():
+    frame = sys._getframe(1)
+    while frame is not None:
+        if frame.f_globals.get("__name__") == "torch.utils.data._utils.worker":
+            return True
+        frame = frame.f_back
+    return False
+
+
+def _is_primary_rank():
+    return os.environ.get("RANK", "0") in ("", "0")
+
+
+def _record_seed(generator, seed):
+    global _training_activity
+    if _in_dataloader_worker():
+        return
+    _training_activity = True
+    value = _seed_value(seed)
+    if value is None or not _is_primary_rank():
+        return
+    with _lock:
+        _last_seeds[generator] = value
+        history = _seed_history.setdefault(generator, [])
+        if value not in history and len(history) < _SEED_HISTORY_MAX:
+            history.append(value)
+        observation = {"values": dict(_last_seeds)}
+        reseeded = {g: list(h) for g, h in _seed_history.items() if len(h) > 1}
+        if reseeded:
+            observation["history"] = reseeded
+        _runtime_info["seeds"] = observation
+    _dbg(f"seed hook: {generator} seeded with {value!r}")
+
+
+def _wrap_seed_fn(fn, generator, param):
+    @functools.wraps(fn)
+    def seed(*args, **kwargs):
+        result = fn(*args, **kwargs)
+        try:
+            _record_seed(generator, args[0] if args else kwargs.get(param))
+        except Exception:
+            _dbg_exc(f"seed hook ({generator})")
+        return result
+    return seed
+
+
+def _install_random_seed_hook():
+    import random
+
+    if "random_seed" in _hooks_installed:
+        return
+    orig = random.seed
+    _hooks_installed["random_seed"] = True
+    random.seed = _wrap_seed_fn(orig, "python", "a")
+    _dbg("seed hook: patched random.seed")
+
+
+def _install_numpy_seed_hook():
+    try:
+        # import_module, not `import numpy.random as npr`: this runs while
+        # numpy.random is still finishing its import, before numpy has the
+        # attribute bound.
+        npr = importlib.import_module("numpy.random")
+    except ImportError:
+        _dbg("seed hook: numpy not available, skipping")
+        return
+
+    if "numpy_seed" in _hooks_installed:
+        return
+    orig = npr.seed
+    _hooks_installed["numpy_seed"] = True
+    npr.seed = _wrap_seed_fn(orig, "numpy", "seed")
+    _dbg("seed hook: patched numpy.random.seed")
+
+
+def _install_torch_seed_hook():
+    try:
+        import torch
+    except ImportError:
+        return
+
+    if "torch_seed" in _hooks_installed:
+        return
+    orig = getattr(torch, "manual_seed", None)
+    if orig is None:
+        _dbg("seed hook: torch.manual_seed not found, skipping")
+        return
+    _hooks_installed["torch_seed"] = True
+    wrapped = _wrap_seed_fn(orig, "torch", "seed")
+    torch.manual_seed = wrapped
+    # torch.manual_seed is a re-export of torch.random.manual_seed.
+    torch_random = getattr(torch, "random", None)
+    if torch_random is not None and getattr(torch_random, "manual_seed", None) is orig:
+        torch_random.manual_seed = wrapped
+    _dbg("seed hook: patched torch.manual_seed")
+
+
+def _capture_determinism_flags():
+    """Read torch's determinism switches and the env vars that matter to
+    them. Read at flush time rather than hooked, since transformers'
+    enable_full_determinism and scripts set them by plain assignment
+    (torch.backends.cudnn.deterministic = True). torch is never imported
+    here, only read if the process already has it."""
+    flags = {}
+    torch = sys.modules.get("torch")
+    if torch is not None:
+        try:
+            cudnn = getattr(getattr(torch, "backends", None), "cudnn", None)
+            for attr, key in (("deterministic", "cudnn_deterministic"), ("benchmark", "cudnn_benchmark")):
+                value = getattr(cudnn, attr, None)
+                if isinstance(value, bool):
+                    flags[key] = value
+            enabled = getattr(torch, "are_deterministic_algorithms_enabled", None)
+            if callable(enabled):
+                flags["deterministic_algorithms"] = bool(enabled())
+                warn_only = getattr(torch, "is_deterministic_algorithms_warn_only_enabled", None)
+                if flags["deterministic_algorithms"] and callable(warn_only) and warn_only():
+                    flags["deterministic_algorithms_warn_only"] = True
+        except Exception:
+            _dbg_exc("_capture_determinism_flags")
+    cublas = os.environ.get("CUBLAS_WORKSPACE_CONFIG")
+    if cublas:
+        flags["cublas_workspace_config"] = cublas
+    if _STARTUP_PYTHONHASHSEED:
+        flags["python_hash_seed"] = _STARTUP_PYTHONHASHSEED
+    if flags:
+        _runtime_info["determinism_flags"] = flags
+
+
 # ── Public API ───────────────────────────────────────────────────────────────
 
 def install_hooks():
@@ -1262,18 +1453,29 @@ def install_hooks():
     _install_webdataset_hook()
     _install_transformers_hook()
     _install_peft_hook()
+    _install_random_seed_hook()
+    _install_numpy_seed_hook()
+    _install_torch_seed_hook()
     _register_durable_flush()
     _dbg(f"install_hooks: done, output will go to {_OUTPUT_PATH}")
 
 
+def _install_torch_hooks():
+    _install_dataloader_hook()
+    _install_torch_seed_hook()
+
+
 # Top-level module -> the hook to install once it has finished importing.
 _LAZY_TRIGGERS = {
-    "torch": _install_dataloader_hook,
+    "torch": _install_torch_hooks,
     "datasets": _install_hf_datasets_hook,
     "torchvision": _install_torchvision_hook,
     "webdataset": _install_webdataset_hook,
     "transformers": _install_transformers_hook,
     "peft": _install_peft_hook,
+    "random": _install_random_seed_hook,
+    # numpy 2 can import numpy.random lazily, on first attribute access.
+    "numpy.random": _install_numpy_seed_hook,
 }
 
 
@@ -1411,13 +1613,16 @@ def flush():
 
 def reset():
     """Clear detected datasets and stop any scheduled flush (for testing)."""
-    global _durable_flush_enabled, _git_captured
+    global _durable_flush_enabled, _git_captured, _training_activity
     _cancel_pending_flush()
     _durable_flush_enabled = False
     _git_captured = False
+    _training_activity = False
     with _lock:
         _detected_datasets.clear()
         _hf_dataset_key_registry.clear()
+        _last_seeds.clear()
+        _seed_history.clear()
 
 
 # Auto-install when loaded via PYTHONSTARTUP or env var activation.
