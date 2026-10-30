@@ -43,7 +43,7 @@ Captured once per pod by the discovery init container into `discovery-<pod>.json
 | GPU model(s) | DCGM's `modelName` label (`DCGM_FI_DEV_FB_TOTAL`, by `exported_pod`), else `nvidia-smi --query-gpu=name` | ✅ `environment.gpu_type` — only the **first** model; a mixed-model node's other GPU types are dropped |
 | GPU memory per device (VRAM) | DCGM's device framebuffer (`DCGM_FI_DEV_FB_TOTAL`), else `nvidia-smi --query-gpu=memory.total` | ✅ `environment.gpu_memory_mb` (list, one per GPU) |
 | GPU driver version | `nvidia-smi --query-gpu=driver_version` | ✅ `environment.driver_version` |
-| CUDA version | `nvidia-smi` (`CUDA Version` line) | ✅ `environment.cuda_version` |
+| CUDA version | `nvidia-smi` (`CUDA Version` line) — the newest CUDA the **driver** supports, not the toolkit torch was built with (`environment.torch_cuda_version`, below) | ✅ `environment.cuda_version` |
 
 The pod-spec claim and DCGM are read from outside the pod, so a workload can't misreport them; DCGM is a best-effort Prometheus query, and without dcgm-exporter the in-pod `nvidia-smi` values are used (#110). Driver and CUDA versions have no out-of-pod source and stay discovery-sourced.
 
@@ -84,6 +84,22 @@ The discovery init container's own `nvidia.com/gpu` claim — what makes `nvidia
 **Pod metadata** — ✅ surfaced into `execution_metadata.pods[]`: `pod_name`/`pod_uid`/`pod_namespace`/`pod_ip`/`node_name`/`start_time` (from downward-API env vars + a capture timestamp).
 
 **InferenceService storage resolution** (KServe only) — ✅ surfaced. Reads `spec.predictor.model.storage.{path,key}` / `storageUri` off the pod's own `InferenceService` object (via its `INFERENCESERVICE_NAME` downward-API env var) and writes `storage-<pod>.json`; consumed by `postprocess.py`'s `detect_model_from_storage` to derive `model.name` (see below). Identification only — doesn't touch the actual bucket.
+
+---
+
+## Software Versions (`runtime_detector.py`)
+
+Recorded by every instrumented Python process that detected something, when it flushes, and surfaced into `environment`:
+
+| Field | Detection |
+|---|---|
+| `environment.python_version` | the interpreter's `sys.version_info` |
+| `environment.libraries` | `{distribution: version}` for the tracked ML libraries the process **imported** (in `sys.modules`), not everything installed in the image: torch, torchvision, torchao, numpy, transformers, tokenizers, safetensors, datasets, webdataset, accelerate, peft, trl, deepspeed, megatron-core, bitsandbytes, flash-attn, xformers, triton, liger-kernel, axolotl, llamafactory, vllm, sglang, lmdeploy, text-generation-server. Version from the installed distribution's metadata, else the module's `__version__` |
+| `environment.torch_cuda_version` / `torch_hip_version` | `torch.version.cuda` / `.hip`, the toolkit torch was built against |
+| `environment.cudnn_version` | the cuDNN torch loaded (CUDA builds only) |
+| `environment.nccl_version` | `torch.cuda.nccl.version()` (RCCL on ROCm); absent on CPU-only builds |
+
+A library imported lazily (flash-attn, bitsandbytes) is listed from the first flush after its import. Each process lists what it imported, and the lists are unioned across a pod's processes, so a launcher that imported only torch doesn't hide what a rank used. Across pods, the first pod's list is used. Reading the versions never initializes CUDA. `environment.framework_version` (`PyTorch 2.x`) is unchanged. Not covered: non-Python processes (TGI's Rust router; its Python shard is), and libraries outside the list. Like the rest of the runtime hooks' output, these are reported by the workload's own process, not verified.
 
 ---
 
@@ -300,4 +316,3 @@ Gaps that are open issues rather than non-goals:
 - Profiler use (Nsight Systems, Nsight Compute, `torch.profiler`) (#183).
 - A content hash of the dataset, rather than the metadata fingerprint above (#185).
 - TF32, FP8 training, and mixed precision set only in an accelerate/DeepSpeed/FSDP config (#186).
-- Versions of ML libraries other than torch (#187).
