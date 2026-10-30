@@ -116,9 +116,14 @@ Every `dataset.auto_detected[]` entry gets `matches_declared` — whether its na
 
 | Hook | Captures |
 |---|---|
-| `transformers.TrainingArguments.__post_init__` | learning rate, batch size, epochs, optimizer, random seed, `training.mixed_precision` (`bf16`/`fp16` flags; not the weights' dtype) |
+| `transformers.TrainingArguments.__post_init__` | learning rate, batch size, epochs, optimizer, random seed, `data_seed` and `full_determinism` (→ `training.determinism`), `training.mixed_precision` (`bf16`/`fp16` flags; not the weights' dtype) |
 | `transformers.PreTrainedModel.from_pretrained` | model name, `device_map` and how many accelerators it resolved to, architecture (`config.architectures[0]`), dtype, quantization method (bitsandbytes/GPTQ/AWQ/HQQ/AQLM class-name or flag detection), quantization bit width. Only the process's **first** model load is recorded, so a DPO reference, reward or teacher model loaded afterwards doesn't replace the trained model; one loaded *before* it still would |
 | `peft.LoraConfig.__init__` | LoRA rank, LoRA alpha, adaptation method (`dora`/`rslora`/`lora`; `lora` becomes `qlora` when the runtime hooks also saw a quantized base model, in either order) |
+| `random.seed`, `numpy.random.seed`, `torch.manual_seed` (and `torch.random.manual_seed`) | each generator's seed → `training.determinism.seeds.{python,numpy,torch}`, the most recent explicit value; `training.determinism.seed_history` lists the distinct values when a generator was seeded with more than one |
+
+**Determinism** (`training.determinism`, #175). Besides the seeds above, these are read when the process flushes, if it did training work (seeded a generator, built a `DataLoader` or `TrainingArguments`): `torch.backends.cudnn.deterministic`/`.benchmark` (→ `cudnn_deterministic`/`cudnn_benchmark`), `torch.are_deterministic_algorithms_enabled()` (→ `deterministic_algorithms`, plus `deterministic_algorithms_warn_only` when set), `CUBLAS_WORKSPACE_CONFIG` (→ `cublas_workspace_config`) and the `PYTHONHASHSEED` the interpreter started with (→ `python_hash_seed`). `transformers.enable_full_determinism` sets the torch flags and the env var, so they are captured too. The block is `null` when none of this was seen. When every generator's seed agrees, that value also fills `training.random_seed` if nothing else did.
+
+Some seeds are ignored on purpose: the ones torch sets inside `DataLoader` workers (including `worker_init_fn`, e.g. transformers' `seed_worker`), and any set on ranks other than `RANK=0`, which differ by design under accelerate's `set_seed(device_specific=True)`. Not captured: local generators (`numpy.random.default_rng`, `RandomState`, `torch.Generator`) and `torch.cuda.manual_seed*` called on its own.
 
 **CLI-arg detection** (`postprocess.py`) — parses each container's command/args, including through `sh -c "... && cmd"` wrapper-script flattening:
 
