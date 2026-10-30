@@ -1,5 +1,6 @@
 import dataclasses
 import enum
+import random
 import sys
 import types
 
@@ -9,9 +10,11 @@ import runtime_detector as rd
 
 
 @pytest.fixture(autouse=True)
-def _reset_runtime_detector_state():
+def _reset_runtime_detector_state(monkeypatch):
     """Full isolation between tests: hook-install guards, weak/key dataset
     registries, and captured runtime_info are all module-level globals."""
+    # install_hooks() patches the real random.seed; undo it after each test.
+    monkeypatch.setattr(random, "seed", random.seed)
     rd.reset()
     rd._hooks_installed.clear()
     rd._dataset_registry.clear()
@@ -167,6 +170,8 @@ def _make_fake_training_arguments():
         num_train_epochs: float = 3
         optim: str = "adamw_torch"
         seed: int = 42
+        data_seed: int = None
+        full_determinism: bool = False
         bf16: bool = False
         fp16: bool = False
 
