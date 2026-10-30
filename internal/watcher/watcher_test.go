@@ -441,6 +441,28 @@ func TestOnJobEvent_NonEnabledNamespace_Skips(t *testing.T) {
 	}
 }
 
+func TestOnJobEvent_ReplacementJobIgnoresOriginalsPods(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	job := completedJob("server-0", "test-ns")
+	job.UID = "replacement"
+	pod := instrumentedPod("server-0", "test-ns")
+	isController := true
+	pod.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: "batch/v1", Kind: "Job", Name: "server-0", UID: "original", Controller: &isController,
+	}}
+
+	client := fake.NewSimpleClientset(ns, job, pod)
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "busybox:latest"})
+	startWatcher(t, w)
+
+	w.onJobEvent(job)
+
+	_, err := client.BatchV1().Jobs("aibom-system").Get(context.TODO(), ppName("test-ns", "server-0"), metav1.GetOptions{})
+	if err == nil {
+		t.Error("a replacement Job owning no pods should not be postprocessed")
+	}
+}
+
 func TestOnJobEvent_IncompleteJob_Skips(t *testing.T) {
 	ns := enabledNamespace("test-ns")
 	job := &batchv1.Job{
