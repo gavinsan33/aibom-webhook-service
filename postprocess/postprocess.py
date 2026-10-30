@@ -3455,6 +3455,10 @@ def compile_aibom(
         aibom["environment"].update(_discovery_details(first))
         if dcgm_hw.get("gpu_memory_mb"):
             aibom["environment"]["gpu_memory_mb"] = dcgm_hw["gpu_memory_mb"]
+    # From the runtime hooks, so present even when discovery data isn't.
+    software = software_environment(runtime_info)
+    if software:
+        aibom.setdefault("environment", {}).update(software)
 
     # Resource utilization from telemetry
     if telemetry and telemetry.get("pods"):
@@ -3532,6 +3536,42 @@ _DISCOVERY_DETAILS = {
     "kernel_config": ("performance_config", ("cpu_governor", "numa_balancing",
                                              "transparent_hugepages", "max_map_count")),
 }
+
+
+_SOFTWARE_BUILD_FIELDS = (
+    ("torch_cuda", "torch_cuda_version"),
+    ("torch_hip", "torch_hip_version"),
+    ("cudnn", "cudnn_version"),
+    ("nccl", "nccl_version"),
+)
+_MAX_LIBRARIES = 64
+
+
+def software_environment(runtime_info):
+    """environment fields from the runtime hooks' software_versions: the
+    Python version, the versions of the ML libraries the workload imported,
+    and the CUDA/HIP toolkit, cuDNN and NCCL torch was built with. Strings
+    only, length-capped: runtime_info is written inside the workload's own
+    container."""
+    sv = runtime_info.get("software_versions")
+    if not isinstance(sv, dict):
+        return {}
+    out = {}
+    if isinstance(sv.get("python"), str) and sv["python"]:
+        out["python_version"] = sv["python"][:32]
+    packages = sv.get("packages")
+    if isinstance(packages, dict):
+        libraries = {
+            name[:64]: version[:64]
+            for name, version in sorted(packages.items())
+            if isinstance(name, str) and name and isinstance(version, str) and version
+        }
+        if libraries:
+            out["libraries"] = dict(list(libraries.items())[:_MAX_LIBRARIES])
+    for key, field in _SOFTWARE_BUILD_FIELDS:
+        if isinstance(sv.get(key), str) and sv[key]:
+            out[field] = sv[key][:32]
+    return out
 
 
 def _discovery_details(disc):

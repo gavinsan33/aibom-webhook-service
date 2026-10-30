@@ -28,7 +28,7 @@ The webhook always fails open (`failurePolicy: Ignore`): if the service is down,
 **Runtime detector (in each application container)**
 
 - Loaded as `sitecustomize.py` on `PYTHONPATH`, so it runs at Python startup with no code changes.
-- Hooks PyTorch `DataLoader`, HuggingFace `datasets.load_dataset`, torchvision datasets, webdataset, `transformers.TrainingArguments`, `transformers.PreTrainedModel.from_pretrained`, `peft.LoraConfig`, and the global seeding functions (`random.seed`, `numpy.random.seed`, `torch.manual_seed`).
+- Hooks PyTorch `DataLoader`, HuggingFace `datasets.load_dataset`, torchvision datasets, webdataset, `transformers.TrainingArguments`, `transformers.PreTrainedModel.from_pretrained`, `peft.LoraConfig`, and the global seeding functions (`random.seed`, `numpy.random.seed`, `torch.manual_seed`), and records the versions of the ML libraries the process imported.
 - Captures dataset name, version, split, fingerprint, license, and training arguments.
 - Writes its result to a local file; it never talks to the Kubernetes API itself.
 
