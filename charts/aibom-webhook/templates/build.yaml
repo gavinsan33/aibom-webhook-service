@@ -40,5 +40,33 @@ spec:
       name: {{ .name }}:{{ include (printf "aibom-webhook.%s" .tag) $ }}
   triggers:
     - type: ConfigChange
+---
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: aibom-discovery
+  namespace: {{ include "aibom-webhook.namespace" . }}
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: aibom-discovery
+  namespace: {{ include "aibom-webhook.namespace" . }}
+spec:
+  source:
+    type: Git
+    git:
+      uri: {{ .Values.build.gitRepo }}
+      ref: {{ .Values.build.gitRef }}
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: discovery/Dockerfile
+  output:
+    to:
+      kind: ImageStreamTag
+      name: aibom-discovery:{{ .Values.image.discovery.tag | default .Chart.AppVersion }}
+  triggers:
+    - type: ConfigChange
 {{- end }}
 {{- end }}

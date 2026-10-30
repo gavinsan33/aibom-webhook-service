@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
@@ -61,7 +62,11 @@ const (
 
 	// podFinalizerName is distinct from finalizerName so that `kubectl get -o yaml`
 	// self-documents which mechanism (Job-level vs Pod-level) placed a given finalizer.
-	podFinalizerName = "aibom.io/log-extraction-pod"
+	podFinalizerName = aibomdata.PodFinalizerName
+
+	// jobControllerUIDLabel is set by the Job controller on every pod it
+	// creates, to the owning Job's UID.
+	jobControllerUIDLabel = "batch.kubernetes.io/controller-uid"
 
 	postprocessContainerName      = "aibom-postprocess"
 	postprocessServiceAccountName = aibomdata.PostprocessServiceAccountName
@@ -151,7 +156,9 @@ type Watcher struct {
 	// postprocessing", so watch-everything-then-filter is unavoidable), pods are far
 	// higher cardinality cluster-wide and the webhook already applies LabelInstrumented
 	// before this feature runs, so scoping the watch server-side avoids needless
-	// watch-cache load from every unrelated pod in the cluster.
+	// watch-cache load from every unrelated pod in the cluster. Job-owned pods are
+	// included so their finalizer (see aibomdata.PodFinalizerName) can be found
+	// from the cache by releaseJobPods.
 	podFactory informers.SharedInformerFactory
 }
 
@@ -168,7 +175,7 @@ func New(clientset kubernetes.Interface, cfg Config) *Watcher {
 		podFactory: informers.NewSharedInformerFactoryWithOptions(
 			clientset, resyncPeriod,
 			informers.WithTweakListOptions(func(opts *metav1.ListOptions) {
-				opts.LabelSelector = fmt.Sprintf("%s=true,!batch.kubernetes.io/job-name", LabelInstrumented)
+				opts.LabelSelector = LabelInstrumented + "=true"
 			}),
 		),
 	}
@@ -273,15 +280,17 @@ func (w *Watcher) onJobEvent(obj interface{}) {
 		return
 	}
 
-	// Path B: job is complete or being deleted — run postprocessing
+	// Path B: job is complete or being deleted — run postprocessing. Every
+	// return below except a retry releases the Job and its pods (finishJob).
 	if job.Annotations != nil && job.Annotations[AnnotationPostprocess] != "" {
-		if hasFinalizer(job) {
-			w.removeFinalizer(context.TODO(), job)
-		}
+		w.finishJob(context.TODO(), job)
 		return
 	}
 
 	if !hasFinalizer(job) && !w.isJobFinished(job) {
+		// Deleted while running without ever qualifying: nothing to collect,
+		// but its pods still carry the webhook's finalizer.
+		w.releaseJobPods(context.TODO(), job)
 		return
 	}
 
@@ -293,9 +302,7 @@ func (w *Watcher) onJobEvent(obj interface{}) {
 		// will never reach collectAIBOM (the only other place that deletes
 		// it), clean it up here instead of leaking it forever.
 		w.deleteWorkloadIdentity(context.TODO(), job.Namespace, job.Name)
-		if hasFinalizer(job) {
-			w.removeFinalizer(context.TODO(), job)
-		}
+		w.finishJob(context.TODO(), job)
 		return
 	}
 
@@ -309,9 +316,7 @@ func (w *Watcher) onJobEvent(obj interface{}) {
 		if retries >= maxPostprocessRetries {
 			log.Printf("giving up on postprocessing %s/%s after %d retries; removing finalizer", job.Namespace, job.Name, retries)
 			w.deleteWorkloadIdentity(context.TODO(), job.Namespace, job.Name)
-			if hasFinalizer(job) {
-				w.removeFinalizer(context.TODO(), job)
-			}
+			w.finishJob(context.TODO(), job)
 			return
 		}
 		// Leave the finalizer in place so the next resync retries postprocess-job
@@ -321,8 +326,33 @@ func (w *Watcher) onJobEvent(obj interface{}) {
 		return
 	}
 
-	if hasFinalizer(job) {
-		w.removeFinalizer(context.TODO(), job)
+	w.finishJob(context.TODO(), job)
+}
+
+// finishJob releases a Job the watcher is done with: its pods' finalizer
+// first, then the Job's own.
+func (w *Watcher) finishJob(ctx context.Context, job *batchv1.Job) {
+	w.releaseJobPods(ctx, job)
+	w.removeFinalizer(ctx, job)
+}
+
+// releaseJobPods removes the finalizer the webhook puts on a Job's pods at
+// admission (#164). It reads the informer cache, so it's cheap enough to run
+// on every resync of a finished Job, which is what retries a failed removal.
+// Pods are matched by the Job's UID too, so an earlier run's Job being
+// cleaned up doesn't release a same-named rerun's pods.
+func (w *Watcher) releaseJobPods(ctx context.Context, job *batchv1.Job) {
+	selector := labels.Set{"batch.kubernetes.io/job-name": job.Name}
+	if job.UID != "" {
+		selector[jobControllerUIDLabel] = string(job.UID)
+	}
+	pods, err := w.podFactory.Core().V1().Pods().Lister().Pods(job.Namespace).List(labels.SelectorFromSet(selector))
+	if err != nil {
+		log.Printf("warning: could not list pods of %s/%s to release their finalizer: %v", job.Namespace, job.Name, err)
+		return
+	}
+	for _, pod := range pods {
+		w.removePodFinalizer(ctx, pod)
 	}
 }
 
@@ -358,7 +388,16 @@ func (w *Watcher) onPodEvent(obj interface{}) {
 	// Pods owned by a Job (or a JobSet's Jobs) are handled by onJobEvent's
 	// Job-level finalizer path — the Job controller sets this label on every
 	// pod it creates, so it reliably identifies pods already covered there.
-	if pod.Labels["batch.kubernetes.io/job-name"] != "" {
+	// onJobEvent also releases their finalizer, unless the Job is gone (it
+	// was deleted with --cascade=orphan, say, or replaced by a same-named
+	// rerun), which leaves nothing else to.
+	if jobName := pod.Labels["batch.kubernetes.io/job-name"]; jobName != "" {
+		if pod.DeletionTimestamp != nil && hasPodFinalizer(pod) {
+			job, err := w.factory.Batch().V1().Jobs().Lister().Jobs(pod.Namespace).Get(jobName)
+			if errors.IsNotFound(err) || (err == nil && string(job.UID) != pod.Labels[jobControllerUIDLabel]) {
+				w.removePodFinalizer(context.TODO(), pod)
+			}
+		}
 		return
 	}
 
@@ -398,7 +437,8 @@ func (w *Watcher) onPodEvent(obj interface{}) {
 		return
 	}
 
-	if err := w.createPostprocessJobForPod(context.TODO(), pod); err != nil {
+	annotated, err := w.createPostprocessJobForPod(context.TODO(), pod)
+	if err != nil {
 		if stderrors.Is(err, errPostprocessBusy) {
 			log.Printf("waiting to postprocess pod %s/%s: %v", pod.Namespace, pod.Name, err)
 			return
@@ -417,7 +457,9 @@ func (w *Watcher) onPodEvent(obj interface{}) {
 		return
 	}
 
-	w.removePodFinalizer(context.TODO(), pod)
+	// The annotation patch changed the pod's resourceVersion, so remove the
+	// finalizer from what it returned, not the copy this event carried.
+	w.removePodFinalizer(context.TODO(), annotated)
 }
 
 func (w *Watcher) shouldPostprocess(job *batchv1.Job) bool {
@@ -487,15 +529,23 @@ func (w *Watcher) addPodFinalizer(ctx context.Context, pod *corev1.Pod) error {
 	return nil
 }
 
+// removePodFinalizer patches at the pod's resourceVersion because the Job
+// controller removes its own tracking finalizer from a Job's pods around the
+// same time, and a merge patch of the finalizer list from a stale copy would
+// put it back. A conflict is left for the next event or resync to retry with
+// a fresh copy; the webhook has no get on pods to re-read it here.
 func (w *Watcher) removePodFinalizer(ctx context.Context, pod *corev1.Pod) {
-	patch, ok := finalizerRemovalPatch(pod.Finalizers, podFinalizerName, "")
+	patch, ok := finalizerRemovalPatch(pod.Finalizers, podFinalizerName, pod.ResourceVersion)
 	if !ok {
 		return
 	}
 	_, err := w.clientset.CoreV1().Pods(pod.Namespace).Patch(ctx, pod.Name, types.MergePatchType, patch, metav1.PatchOptions{})
-	if err != nil {
+	switch {
+	case errors.IsConflict(err):
+		log.Printf("pod %s/%s changed before its finalizer could be removed; retrying on its next update", pod.Namespace, pod.Name)
+	case err != nil:
 		log.Printf("warning: could not remove finalizer from pod %s/%s: %v", pod.Namespace, pod.Name, err)
-	} else {
+	default:
 		log.Printf("removed finalizer from pod %s/%s", pod.Namespace, pod.Name)
 	}
 }
@@ -525,16 +575,20 @@ func (w *Watcher) setPodPostprocessRetries(ctx context.Context, pod *corev1.Pod,
 }
 
 // isNamespaceOptedOut reports whether the namespace is known to exist and
-// doesn't carry the enabled label. Unlike !isNamespaceEnabled, a failed
-// lookup (informer not synced, namespace gone) is not "opted out": stripping
-// finalizers on the strength of a transient cache miss would throw away the
-// AIBOM of a workload in a namespace that is still enabled.
+// doesn't carry the enabled label, or is being deleted. Unlike
+// !isNamespaceEnabled, a failed lookup (informer not synced, namespace gone)
+// is not "opted out": stripping finalizers on the strength of a transient
+// cache miss would throw away the AIBOM of a workload in a namespace that is
+// still enabled. A namespace being deleted counts: its AIBOM would be created
+// in it and deleted with it, and the Role that lets us remove our finalizers
+// is deleted with it too, so waiting to postprocess can leave the namespace
+// stuck Terminating.
 func (w *Watcher) isNamespaceOptedOut(namespace string) bool {
 	ns, err := w.factory.Core().V1().Namespaces().Lister().Get(namespace)
 	if err != nil {
 		return false
 	}
-	return ns.Labels[LabelEnabled] != "true"
+	return ns.DeletionTimestamp != nil || ns.Labels[LabelEnabled] != "true"
 }
 
 func (w *Watcher) isNamespaceEnabled(namespace string) bool {
@@ -555,15 +609,21 @@ func (w *Watcher) isJobFinished(job *batchv1.Job) bool {
 // jobResult returns the Job's terminal condition ("Complete" or "Failed"), or
 // "" if it hasn't reached one (still running, or being deleted).
 func jobResult(job *batchv1.Job) string {
+	return string(terminalCondition(job).Type)
+}
+
+// terminalCondition is the Job's true Complete or Failed condition, or a zero
+// one if it has neither.
+func terminalCondition(job *batchv1.Job) batchv1.JobCondition {
 	for _, c := range job.Status.Conditions {
 		if c.Status != corev1.ConditionTrue {
 			continue
 		}
 		if c.Type == batchv1.JobComplete || c.Type == batchv1.JobFailed {
-			return string(c.Type)
+			return c
 		}
 	}
-	return ""
+	return batchv1.JobCondition{}
 }
 
 func podsRequestGPU(pods []corev1.Pod) bool {
@@ -884,9 +944,10 @@ func mergeDatasets(datasets []string) string {
 // buildPostprocessInputs reads the discovery, dataset, and storage data the
 // pods themselves already wrote into the data ConfigMap, and serializes
 // container command/args info for CLI-based model detection. jobResults maps a
-// Job name to its terminal condition (see jobResult) so each pod's containers
-// can be tagged with how the Job that owns them ended; nil for a bare pod.
-func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configMapName string, pods []corev1.Pod, jobResults map[string]string) (discoveries, datasets []string, containersJSON, storageJSON string) {
+// Job name to its terminal condition (see terminalCondition) so each pod's
+// containers can be tagged with how the Job that owns them ended; nil for a
+// bare pod.
+func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configMapName string, pods []corev1.Pod, jobResults map[string]batchv1.JobCondition) (discoveries, datasets []string, containersJSON, storageJSON string) {
 	dataCM, err := w.clientset.CoreV1().ConfigMaps(namespace).Get(ctx, configMapName, metav1.GetOptions{})
 	if err != nil {
 		if !errors.IsNotFound(err) {
@@ -998,6 +1059,9 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 		// gets its own AIBOM, and a prefill pod's throughput and latency
 		// figures mean little without knowing it only does prefill (#167).
 		ServingRole string `json:"serving_role,omitempty"`
+		// JobFailureReason is that Job's Failed condition reason
+		// (DeadlineExceeded, BackoffLimitExceeded, PodFailurePolicy, ...).
+		JobFailureReason string `json:"job_failure_reason,omitempty"`
 	}
 	var containers []containerInfo
 	for _, pod := range pods {
@@ -1033,7 +1097,11 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 				Command: c.Command,
 				Args:    c.Args,
 			}
-			ci.JobResult = jobResults[podJobName(&pod)]
+			cond := jobResults[podJobName(&pod)]
+			ci.JobResult = string(cond.Type)
+			if cond.Type == batchv1.JobFailed {
+				ci.JobFailureReason = cond.Reason
+			}
 			ci.ServingRole = pod.Labels[llmdRoleLabel]
 			if cs, ok := restarts[c.Name]; ok {
 				last := cs.LastTerminationState.Terminated
@@ -1076,7 +1144,7 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 // data gathered from the given pods. It does not patch AnnotationPostprocess back onto
 // the trigger resource — callers must do that themselves, since the trigger's kind
 // (Job vs Pod) determines which client to patch with.
-func (w *Watcher) createPostprocessJobCore(ctx context.Context, namespace, triggerName, triggerKind string, triggerUID types.UID, pods []corev1.Pod, annotations map[string]string, jobResults map[string]string) (string, error) {
+func (w *Watcher) createPostprocessJobCore(ctx context.Context, namespace, triggerName, triggerKind string, triggerUID types.UID, pods []corev1.Pod, annotations map[string]string, jobResults map[string]batchv1.JobCondition) (string, error) {
 	postprocessName := aibomdata.PostprocessJobName(namespace, triggerName)
 	// configMapName is the workload's own data ConfigMap, in its namespace,
 	// that its pods wrote into. inputsName is the merged copy the postprocess
@@ -1333,7 +1401,7 @@ func (w *Watcher) createPostprocessJob(ctx context.Context, job *batchv1.Job) er
 	// and each Job's terminal condition (#112): a pod of a Job that completed
 	// is not a failure even if an earlier attempt of it was.
 	annotations := collectAIBOMAnnotations(job.Annotations)
-	jobResults := map[string]string{job.Name: jobResult(job)}
+	jobResults := map[string]batchv1.JobCondition{job.Name: terminalCondition(job)}
 	if jobsetName := job.Labels["jobset.sigs.k8s.io/jobset-name"]; jobsetName != "" {
 		siblingJobs, err := w.clientset.BatchV1().Jobs(job.Namespace).List(ctx, metav1.ListOptions{
 			LabelSelector: fmt.Sprintf("jobset.sigs.k8s.io/jobset-name=%s", jobsetName),
@@ -1342,7 +1410,7 @@ func (w *Watcher) createPostprocessJob(ctx context.Context, job *batchv1.Job) er
 			for i := range siblingJobs.Items {
 				sibling := &siblingJobs.Items[i]
 				if _, ok := jobResults[sibling.Name]; !ok {
-					jobResults[sibling.Name] = jobResult(sibling)
+					jobResults[sibling.Name] = terminalCondition(sibling)
 				}
 				if len(annotations) == 0 {
 					if sa := collectAIBOMAnnotations(sibling.Annotations); len(sa) > 0 {
@@ -1371,21 +1439,21 @@ func (w *Watcher) createPostprocessJob(ctx context.Context, job *batchv1.Job) er
 // bare/ReplicaSet-owned pods (e.g. KServe predictors) that have no owning Job to trigger
 // postprocessing from. There is no JobSet-style sibling merging here since a bare pod has
 // no sibling workload to pull additional data from.
-func (w *Watcher) createPostprocessJobForPod(ctx context.Context, pod *corev1.Pod) error {
+func (w *Watcher) createPostprocessJobForPod(ctx context.Context, pod *corev1.Pod) (*corev1.Pod, error) {
 	annotations := collectAIBOMAnnotations(pod.Annotations)
 
 	postprocessName, err := w.createPostprocessJobCore(ctx, pod.Namespace, pod.Name, "Pod", pod.UID, []corev1.Pod{*pod}, annotations, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	patch := fmt.Sprintf(`{"metadata":{"annotations":{"%s":"%s"}}}`, AnnotationPostprocess, postprocessName)
-	_, err = w.clientset.CoreV1().Pods(pod.Namespace).Patch(ctx, pod.Name, types.MergePatchType, []byte(patch), metav1.PatchOptions{})
+	annotated, err := w.clientset.CoreV1().Pods(pod.Namespace).Patch(ctx, pod.Name, types.MergePatchType, []byte(patch), metav1.PatchOptions{})
 	if err != nil {
-		return fmt.Errorf("annotate original pod: %w", err)
+		return nil, fmt.Errorf("annotate original pod: %w", err)
 	}
 
-	return nil
+	return annotated, nil
 }
 
 // collectAIBOM runs once a postprocess Job finishes — succeeded or failed (see
