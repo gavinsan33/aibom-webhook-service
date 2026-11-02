@@ -1164,8 +1164,13 @@ _OPTIMIZER_ARG_MAP = {
     "--warmup_ratio": ("warmup_ratio", _finite_float),
     "--warmup_steps": ("warmup_steps", _int_or_float),
 }
+_PRECISION_ARG_MAP = {
+    "--bf16": ("bf16", bool),
+    "--fp16": ("fp16", bool),
+}
 _HF_OPTIMIZER_ARG_MAP = {
     **_OPTIMIZER_ARG_MAP,
+    **_PRECISION_ARG_MAP,
     "--optim": ("optimizer", str),
     "--optim_args": ("optim_args", str),
     "--lr_scheduler_type": ("lr_scheduler_type", str),
@@ -1187,6 +1192,14 @@ _TRL_ARG_MAP = {
     "--seed": ("random_seed", int),
     **_HF_OPTIMIZER_ARG_MAP,
 }
+
+def _pop_precision_flags(result):
+    """--bf16/--fp16 (bools) -> mixed_precision, as TrainingArguments reads them."""
+    bf16, fp16 = result.pop("bf16", False), result.pop("fp16", False)
+    if bf16 or fp16:
+        result["mixed_precision"] = "bf16" if bf16 else "fp16"
+    return result
+
 
 _TRL_SUBCOMMAND_RE = re.compile(r"^[a-z][a-z_]*$")
 
@@ -1215,7 +1228,7 @@ def detect_trl_from_command(command):
 
     # `--use_peft`, `--use_peft true` and `--use_peft=false` all occur.
     parsed, _ = _parse_flags(args, _TRL_ARG_MAP, "_", bool_values=True)
-    result = {"training_framework": "trl", **parsed}
+    result = _pop_precision_flags({"training_framework": "trl", **parsed})
 
     use_dora = result.pop("use_dora", False)
     use_rslora = result.pop("use_rslora", False)
@@ -1268,6 +1281,7 @@ _AXOLOTL_ARG_MAP = {
     **_OPTIMIZER_ARG_MAP,
     "--optimizer": ("optimizer", str),
     "--lr_scheduler": ("lr_scheduler_type", str),
+    **_PRECISION_ARG_MAP,
 }
 
 
@@ -1287,7 +1301,7 @@ def detect_axolotl_from_command(command):
     if args is None:
         return None
     parsed, _ = _parse_flags(args, _AXOLOTL_ARG_MAP, "_", bool_values=True)
-    result = {"training_framework": "axolotl", **parsed}
+    result = _pop_precision_flags({"training_framework": "axolotl", **parsed})
 
     adapter = (result.pop("adapter", "") or "").lower()
     load_in_4bit = result.pop("load_in_4bit", False)
@@ -1356,7 +1370,7 @@ def detect_llamafactory_from_command(command):
         # `train cfg.yaml key=value` (OmegaConf.from_cli) -> `--key=value`.
         args = ["--" + a for a in args[1:] if "=" in a and not a.startswith("-")]
     parsed, _ = _parse_flags(args, _LLAMAFACTORY_ARG_MAP, "_", bool_values=True)
-    result = {"training_framework": "llama-factory", **parsed}
+    result = _pop_precision_flags({"training_framework": "llama-factory", **parsed})
 
     ft = (result.pop("finetuning_type", "lora" if flag_mode else "") or "").lower()
     use_dora = result.pop("use_dora", False)
@@ -1499,11 +1513,18 @@ def detect_parallelization_from_command(tokens):
     Each command in a shell script is judged on its own, so a flag or a
     package name in an unrelated command doesn't count.
     """
+    result = {}
     for seg in _invocation_segments(tokens):
-        strategy = _segment_parallelization(seg)
-        if strategy:
-            return {"parallelization_strategy": strategy}
-    return None
+        if "parallelization_strategy" not in result:
+            strategy = _segment_parallelization(seg)
+            if strategy:
+                result["parallelization_strategy"] = strategy
+        if "mixed_precision" not in result:
+            # accelerate launch's flag, which trl also passes through.
+            mp = _find_flag_value([_underscore_flag(t) for t in seg], ("--mixed_precision",))
+            if mp in ("fp16", "bf16", "fp8"):
+                result["mixed_precision"] = mp
+    return result or None
 
 
 _HF_URI_RE = re.compile(r"^([^/@:]+(?:/[^/@:]+)?)(?:[@:]([^/]+))?(?:/.*)?$")
@@ -3179,6 +3200,80 @@ def training_optimizer_config(runtime_info, dm):
     return None
 
 
+_MIXED_PRECISION_VALUES = ("bf16", "fp16", "fp8")
+_HALF_DTYPES = {"bfloat16": "bf16", "float16": "fp16"}
+
+
+def training_mixed_precision(runtime_info, dm):
+    """(training.mixed_precision, how it was found). What applied it
+    (Accelerator, DeepSpeedEngine, an FSDP policy) outranks what declared it
+    (TrainingArguments, accelerate launch's env, the CLI)."""
+    def valid(value):
+        return value if value in _MIXED_PRECISION_VALUES else None
+
+    accelerator = runtime_info.get("accelerator_precision")
+    flags = runtime_info.get("precision_flags")
+    fsdp = runtime_info.get("fsdp_mixed_precision")
+    autocast = runtime_info.get("autocast")
+    autocast_dtypes = {
+        _HALF_DTYPES.get(entry.partition(":")[2])
+        for entry in (autocast if isinstance(autocast, list) else [])
+        if isinstance(entry, str)
+    } - {None}
+    candidates = (
+        (isinstance(accelerator, dict) and valid(accelerator.get("mixed_precision")), "accelerator"),
+        (valid(runtime_info.get("deepspeed_precision")), "deepspeed"),
+        (isinstance(fsdp, dict) and _HALF_DTYPES.get(fsdp.get("param_dtype")), "fsdp"),
+        (valid(runtime_info.get("mixed_precision")), "training_arguments"),
+        (isinstance(runtime_info.get("fp8"), dict) and "fp8", "fp8_hook"),
+        # A custom loop's torch.autocast, when it used one half dtype.
+        (len(autocast_dtypes) == 1 and next(iter(autocast_dtypes)), "autocast"),
+        (isinstance(flags, dict) and valid(flags.get("accelerate_mixed_precision")), "accelerate_env"),
+        (valid(dm.get("mixed_precision")), "cli_arg"),
+    )
+    for value, via in candidates:
+        if value:
+            return value, via
+    return None, None
+
+
+def training_precision(runtime_info):
+    """training.precision: TF32, autocast, FP8 and FSDP/DeepSpeed precision
+    settings from the runtime hooks, or None if none were seen."""
+    block = {}
+    flags = runtime_info.get("precision_flags")
+    if isinstance(flags, dict):
+        for key in ("tf32_matmul", "tf32_cudnn"):
+            if isinstance(flags.get(key), bool):
+                block[key] = flags[key]
+        if _short_or_none(flags.get("float32_matmul_precision"), 16):
+            block["float32_matmul_precision"] = flags["float32_matmul_precision"][:16]
+    autocast = runtime_info.get("autocast")
+    if isinstance(autocast, list):
+        entries = [e[:48] for e in autocast[:8] if isinstance(e, str) and e]
+        if entries:
+            block["autocast"] = entries
+    fp8 = runtime_info.get("fp8")
+    accelerator = runtime_info.get("accelerator_precision")
+    if not isinstance(fp8, dict) and isinstance(accelerator, dict) and accelerator.get("mixed_precision") == "fp8":
+        fp8 = {"backend": accelerator.get("fp8_backend")}
+    if isinstance(fp8, dict):
+        entry = {k: fp8[k][:64] for k in ("backend", "recipe") if _short_or_none(fp8.get(k))}
+        block["fp8"] = entry or {"backend": None}
+    fsdp = runtime_info.get("fsdp_mixed_precision")
+    if isinstance(fsdp, dict):
+        entry = {
+            k: fsdp[k][:64]
+            for k in ("policy", "param_dtype", "reduce_dtype", "buffer_dtype", "output_dtype")
+            if _short_or_none(fsdp.get(k))
+        }
+        if entry:
+            block["fsdp_mixed_precision"] = entry
+    if runtime_info.get("deepspeed_precision") in ("bf16", "fp16", "no"):
+        block["deepspeed"] = runtime_info["deepspeed_precision"]
+    return block or None
+
+
 def training_lr_scheduler(runtime_info, dm):
     """training.lr_scheduler from TrainingArguments, else the CLI. Not seen
     for a script that builds a torch.optim.lr_scheduler itself."""
@@ -3485,6 +3580,7 @@ def compile_aibom(
     # Training config
     if intent in ("training", "sft"):
         determinism = training_determinism(runtime_info)
+        mixed_precision, mixed_precision_via = training_mixed_precision(runtime_info, dm)
         optimizer_config = training_optimizer_config(runtime_info, dm)
         optimizer_settings = (optimizer_config or {}).get("params") or {}
         aibom["training"] = {
@@ -3521,7 +3617,9 @@ def compile_aibom(
                 _agreed_seed(determinism),
             ),
             "determinism": determinism,
-            "mixed_precision": runtime_info.get("mixed_precision"),
+            "mixed_precision": mixed_precision,
+            "mixed_precision_declared_via": mixed_precision_via,
+            "precision": training_precision(runtime_info),
             "parallelization_strategy": (
                 annotations.get("parallelization-strategy")
                 or runtime_info.get("parallelization_strategy")
