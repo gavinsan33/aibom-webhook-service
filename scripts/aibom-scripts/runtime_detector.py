@@ -1105,19 +1105,26 @@ def _gpu_device_count(device_map):
     return len(devices)
 
 
+# transformers loads its classes lazily: `transformers.TrainingArguments`
+# imports transformers.training_args on first access. Reading it from a hook
+# forced that import at whatever moment the hook ran -- e.g. while peft (whose
+# __init__ imports transformers) was half-initialized, so training_args'
+# `from peft import PeftMixedModel` raised. So each class is patched when its
+# own module finishes importing (the transformers.training_args and
+# transformers.modeling_utils triggers), and the hooks only read sys.modules.
 def _install_transformers_hook():
-    try:
-        import transformers
-    except ImportError:
-        _dbg("transformers hook: transformers not available, skipping")
-        return
+    _install_training_args_hook()
+    _install_from_pretrained_hook()
 
-    if "transformers" in _hooks_installed:
+
+def _install_training_args_hook():
+    training_args = sys.modules.get("transformers.training_args")
+    cls = getattr(training_args, "TrainingArguments", None)
+    if cls is None or "transformers_training_args" in _hooks_installed:
         return
-    _orig_ta_post_init = transformers.TrainingArguments.__post_init__
-    _orig_from_pretrained = transformers.PreTrainedModel.from_pretrained.__func__
-    _hooks_installed["transformers"] = True
-    _dbg("transformers hook: installed, patching TrainingArguments and PreTrainedModel.from_pretrained")
+    _orig_ta_post_init = cls.__post_init__
+    _hooks_installed["transformers_training_args"] = True
+    _dbg("transformers hook: installed, patching TrainingArguments")
 
     # TrainingArguments is a dataclass, and so are its subclasses (trl's
     # SFTConfig/DPOConfig/GRPOConfig, Seq2SeqTrainingArguments, ...). Each
@@ -1171,7 +1178,17 @@ def _install_transformers_hook():
         except Exception:
             _dbg_exc("transformers._patched_ta_post_init")
 
-    transformers.TrainingArguments.__post_init__ = _patched_ta_post_init
+    cls.__post_init__ = _patched_ta_post_init
+
+
+def _install_from_pretrained_hook():
+    modeling_utils = sys.modules.get("transformers.modeling_utils")
+    cls = getattr(modeling_utils, "PreTrainedModel", None)
+    if cls is None or "transformers_from_pretrained" in _hooks_installed:
+        return
+    _orig_from_pretrained = cls.from_pretrained.__func__
+    _hooks_installed["transformers_from_pretrained"] = True
+    _dbg("transformers hook: installed, patching PreTrainedModel.from_pretrained")
 
     # Only the process's first model load is recorded: a DPO reference model,
     # reward model or distillation teacher loaded afterwards would otherwise
@@ -1247,7 +1264,7 @@ def _install_transformers_hook():
             _dbg_exc("transformers._patched_from_pretrained")
         return model
 
-    transformers.PreTrainedModel.from_pretrained = classmethod(_patched_from_pretrained)
+    cls.from_pretrained = classmethod(_patched_from_pretrained)
 
 
 # ── peft LoraConfig hook ──────────────────────────────────────────────────────
@@ -1709,7 +1726,8 @@ _LAZY_TRIGGERS = {
     "datasets": _install_hf_datasets_hook,
     "torchvision": _install_torchvision_hook,
     "webdataset": _install_webdataset_hook,
-    "transformers": _install_transformers_hook,
+    "transformers.training_args": _install_training_args_hook,
+    "transformers.modeling_utils": _install_from_pretrained_hook,
     "peft": _install_peft_hook,
     "random": _install_random_seed_hook,
     # numpy 2 can import numpy.random lazily, on first attribute access.
@@ -1738,8 +1756,6 @@ class _PostImportHookFinder:
 
     def __init__(self, triggers):
         self._pending = dict(triggers)
-        # Hooks that raised, retried whenever another trigger fires.
-        self._failed = {}
         self._claim_lock = threading.Lock()
         self._resolving = threading.local()
 
@@ -1760,27 +1776,11 @@ class _PostImportHookFinder:
         hook = self._claim(name)
         if hook is None:
             return
-        # A module can finish importing inside another's import: peft's
-        # __init__ imports transformers, whose hook then reads the lazy
-        # transformers.TrainingArguments, which imports `from peft import ...`
-        # from the half-initialized peft and raises. A hook that failed is
-        # retried here, once the next trigger (peft itself, in that case) has
-        # finished importing.
-        # ponytail: nothing retries a hook that failed on the last trigger.
-        with self._claim_lock:
-            retries, self._failed = self._failed, {}
-        for failed_name, failed_hook in retries.items():
-            self._run(failed_name, failed_hook, "retrying")
-        self._run(name, hook, "finished importing,")
-
-    def _run(self, name, hook, what):
-        _dbg(f"Lazy hook: '{name}' {what} installing hook")
+        _dbg(f"Lazy hook: '{name}' finished importing, installing hook")
         try:
             hook()
         except Exception:
             _dbg_exc(f"install_hooks_lazy({name})")
-            with self._claim_lock:
-                self._failed[name] = hook
 
     def find_spec(self, fullname, path=None, target=None):
         if fullname not in self._pending:

@@ -198,6 +198,12 @@ def fake_transformers_module(monkeypatch):
     module.FakeSFTConfig = sft_config
     module.PreTrainedModel = FakePreTrainedModel
     monkeypatch.setitem(sys.modules, "transformers", module)
+    # Where the hooks look for them, as in real transformers.
+    for name, attr, cls in (("training_args", "TrainingArguments", training_arguments),
+                            ("modeling_utils", "PreTrainedModel", FakePreTrainedModel)):
+        sub = types.ModuleType(f"transformers.{name}")
+        setattr(sub, attr, cls)
+        monkeypatch.setitem(sys.modules, f"transformers.{name}", sub)
     return module
 
 

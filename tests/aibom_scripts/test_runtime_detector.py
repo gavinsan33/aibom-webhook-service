@@ -1175,12 +1175,12 @@ def test_shadowed_sitecustomize_errors_do_not_break_startup(hooks_dir, tmp_path)
     assert _run_probe(sys.executable, hooks_dir, tmp_path, extra_path=[other]) == "ACTIVE"
 
 
-def test_hook_that_failed_mid_import_is_retried(tmp_path):
+def test_transformers_hooks_never_force_a_lazy_import(tmp_path):
     # peft's __init__ imports transformers, so transformers finishes
-    # importing (and its hook fires) while peft is half-initialized. The
-    # hook's read of the lazy TrainingArguments imports a module that does
-    # `from peft import PeftMixedModel` and raises; it has to be retried once
-    # peft has finished.
+    # importing while peft is half-initialized. Reading the lazy
+    # transformers.TrainingArguments then would import training_args, whose
+    # `from peft import PeftMixedModel` raises. The hooks wait for
+    # training_args/modeling_utils to be imported by the app instead.
     pkgs = tmp_path / "pkgs"
     (pkgs / "peft").mkdir(parents=True)
     (pkgs / "peft" / "__init__.py").write_text(
@@ -1193,12 +1193,10 @@ def test_hook_that_failed_mid_import_is_retried(tmp_path):
     (pkgs / "transformers").mkdir()
     (pkgs / "transformers" / "__init__.py").write_text(
         "import importlib\n"
-        "class PreTrainedModel:\n"
-        "    @classmethod\n"
-        "    def from_pretrained(cls, name, *args, **kwargs): return cls()\n"
+        "_LAZY = {'TrainingArguments': '.training_args', 'PreTrainedModel': '.modeling_utils'}\n"
         "def __getattr__(name):\n"
-        "    if name == 'TrainingArguments':\n"
-        "        return importlib.import_module('.training_args', __name__).TrainingArguments\n"
+        "    if name in _LAZY:\n"
+        "        return getattr(importlib.import_module(_LAZY[name], __name__), name)\n"
         "    raise AttributeError(name)\n"
     )
     (pkgs / "transformers" / "training_args.py").write_text(
@@ -1209,6 +1207,12 @@ def test_hook_that_failed_mid_import_is_retried(tmp_path):
         "    learning_rate: float = 5e-5\n"
         "    def __post_init__(self): pass\n"
     )
+    (pkgs / "transformers" / "modeling_utils.py").write_text(
+        "from peft import PeftMixedModel\n"
+        "class PreTrainedModel:\n"
+        "    @classmethod\n"
+        "    def from_pretrained(cls, name, *args, **kwargs): return cls()\n"
+    )
     hooks = tmp_path / "aibom-hooks"
     hooks.mkdir()
     (hooks / "sitecustomize.py").write_text(open(rd.__file__).read())
@@ -1218,8 +1222,16 @@ def test_hook_that_failed_mid_import_is_retried(tmp_path):
         "PYTHONPATH": f"{hooks}:{pkgs}",
         "AIBOM_DATASET_DETECT": "1",
         "AIBOM_DATASET_OUTPUT": str(out),
+        "AIBOM_DEBUG": "1",
     }
-    script = "import peft, transformers\ntransformers.TrainingArguments(learning_rate=1e-3)\n"
-    subprocess.run([sys.executable, "-c", script], env=env, cwd=tmp_path, check=True, timeout=60)
+    script = (
+        "import peft, transformers\n"
+        "transformers.TrainingArguments(learning_rate=1e-3)\n"
+        "transformers.PreTrainedModel.from_pretrained('org/model')\n"
+    )
+    proc = subprocess.run([sys.executable, "-c", script], env=env, cwd=tmp_path, check=True,
+                          timeout=60, capture_output=True, text=True)
 
-    assert json.loads(out.read_text())["runtime_info"]["learning_rate"] == 1e-3
+    assert "EXCEPTION" not in proc.stderr
+    info = json.loads(out.read_text())["runtime_info"]
+    assert (info["learning_rate"], info["model_name"]) == (1e-3, "org/model")
