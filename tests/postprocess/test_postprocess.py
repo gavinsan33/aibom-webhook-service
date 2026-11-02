@@ -3916,3 +3916,66 @@ def test_axolotl_optimizer_flags():
     assert dm["optimizer"] == "adamw_bnb_8bit"
     assert pp.training_lr_scheduler({}, dm) == {"type": "cosine", "warmup_steps": 10, "declared_via": "cli_arg"}
     assert pp.training_optimizer_config({}, dm) == {"params": {"weight_decay": 0.0}, "declared_via": "cli_arg"}
+
+
+# ---------------------------------------------------------------------------
+# Numerical precision (#186)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("runtime_info,dm,expected", [
+    # What applied it outranks what declared it.
+    ({"accelerator_precision": {"mixed_precision": "fp8"}, "mixed_precision": "bf16"}, {}, ("fp8", "accelerator")),
+    ({"accelerator_precision": {"mixed_precision": "no"}, "deepspeed_precision": "fp16"}, {}, ("fp16", "deepspeed")),
+    ({"mixed_precision": "bf16"}, {"mixed_precision": "fp16"}, ("bf16", "training_arguments")),
+    ({"fsdp_mixed_precision": {"param_dtype": "bfloat16"}, "mixed_precision": "fp16"}, {}, ("bf16", "fsdp")),
+    ({"fsdp_mixed_precision": {"param_dtype": "float32"}}, {}, (None, None)),
+    ({"fp8": {"backend": "torchao"}}, {}, ("fp8", "fp8_hook")),
+    ({"autocast": ["cuda:bfloat16", "cpu:float32"]}, {}, ("bf16", "autocast")),
+    ({"autocast": ["cuda:bfloat16", "cuda:float16"]}, {}, (None, None)),  # ambiguous
+    ({"precision_flags": {"accelerate_mixed_precision": "bf16"}}, {}, ("bf16", "accelerate_env")),
+    ({"precision_flags": {"accelerate_mixed_precision": "no"}}, {"mixed_precision": "fp16"}, ("fp16", "cli_arg")),
+    ({"deepspeed_precision": "evil"}, {}, (None, None)),
+])
+def test_mixed_precision_sources(runtime_info, dm, expected):
+    assert pp.training_mixed_precision(runtime_info, dm) == expected
+
+
+def test_compile_aibom_reports_precision_block():
+    runtime_info = {
+        "mixed_precision": "bf16",
+        "precision_flags": {"tf32_matmul": True, "tf32_cudnn": True, "float32_matmul_precision": "high"},
+        "autocast": ["cuda:bfloat16"],
+        "accelerator_precision": {"mixed_precision": "fp8", "fp8_backend": "transformer_engine"},
+        "fsdp_mixed_precision": {"policy": "MixedPrecision", "param_dtype": "bfloat16", "reduce_dtype": "float32"},
+        "deepspeed_precision": "no",
+    }
+    training = _training_aibom(runtime_info)["training"]
+    assert (training["mixed_precision"], training["mixed_precision_declared_via"]) == ("fp8", "accelerator")
+    assert training["precision"] == {
+        "tf32_matmul": True, "tf32_cudnn": True, "float32_matmul_precision": "high",
+        "autocast": ["cuda:bfloat16"],
+        "fp8": {"backend": "transformer_engine"},
+        "fsdp_mixed_precision": {"policy": "MixedPrecision", "param_dtype": "bfloat16", "reduce_dtype": "float32"},
+        "deepspeed": "no",
+    }
+
+
+def test_precision_block_is_null_when_nothing_seen():
+    training = _training_aibom({})["training"]
+    assert training["precision"] is None
+    assert training["mixed_precision"] is None and training["mixed_precision_declared_via"] is None
+
+
+@pytest.mark.parametrize("command,expected", [
+    (["trl", "sft", "--bf16"], "bf16"),
+    (["trl", "sft", "--fp16", "true"], "fp16"),
+    (["trl", "sft", "--bf16", "false"], None),
+    (["llamafactory-cli", "train", "--bf16", "true"], "bf16"),
+    (["axolotl", "train", "cfg.yml", "--fp16"], "fp16"),
+    (["accelerate", "launch", "--mixed-precision", "bf16", "train.py"], "bf16"),
+    (["trl", "sft", "--mixed_precision=fp8"], "fp8"),
+    (["accelerate", "launch", "--mixed_precision", "no", "train.py"], None),
+])
+def test_cli_mixed_precision(command, expected):
+    assert pp.detect_model_from_containers([{"command": command}]).get("mixed_precision") == expected
