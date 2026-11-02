@@ -679,6 +679,7 @@ def _flush(final=True, in_signal=False):
     _capture_accelerate_config()
     if _training_activity:
         _capture_determinism_flags()
+        _capture_precision_flags()
 
     got_lock = _lock.acquire(timeout=0.5 if in_signal else -1)
     try:
@@ -1569,6 +1570,207 @@ def _capture_determinism_flags():
         _runtime_info["determinism_flags"] = flags
 
 
+# ── Numerical precision ─────────────────────────────────────────────────────
+#
+# Mixed precision is recorded from the objects that apply it, not from config
+# files: Accelerator (which resolves `accelerate launch --mixed_precision`,
+# its config file, ACCELERATE_MIXED_PRECISION and Trainer's bf16/fp16 into
+# one value), DeepSpeedEngine (its JSON config's bf16/fp16), FSDP's
+# MixedPrecision/MixedPrecisionPolicy, Transformer Engine's fp8 autocast,
+# torchao's float8 conversion, and torch.autocast for a custom loop. Each is
+# recorded once per process, from the first one built. None of these hooks
+# imports anything: each patches its module when the module itself finishes
+# importing. TF32 is a pair of global switches, read at flush time like the
+# determinism flags.
+
+_AUTOCAST_MAX = 8
+_autocast_seen = set()
+
+
+def _dtype_name(dtype):
+    return str(dtype).replace("torch.", "")[:32] if dtype is not None else None
+
+
+def _record_precision_once(key, value):
+    if not value or _in_dataloader_worker():
+        return
+    with _lock:
+        if key in _runtime_info:
+            return
+        _runtime_info[key] = value
+    _dbg(f"precision hook: {key}={value}")
+
+
+def _wrap_after(cls, name, record):
+    """Patch cls.<name> to call record(self) after it runs (once per class)."""
+    orig = cls.__dict__.get(name) if cls is not None else None
+    if orig is None or getattr(orig, "_aibom_wrapped", False):
+        return False
+
+    @functools.wraps(orig)
+    def wrapper(self, *args, **kwargs):
+        result = orig(self, *args, **kwargs)
+        try:
+            record(self)
+        except Exception:
+            _dbg_exc(f"precision hook ({cls.__name__}.{name})")
+        return result
+
+    wrapper._aibom_wrapped = True
+    setattr(cls, name, wrapper)
+    return True
+
+
+def _wrap_function(module, name, record):
+    """Patch module.<name> to call record(args, kwargs) before it runs."""
+    orig = getattr(module, name, None)
+    if orig is None or getattr(orig, "_aibom_wrapped", False):
+        return
+
+    @functools.wraps(orig)
+    def wrapper(*args, **kwargs):
+        try:
+            record(args, kwargs)
+        except Exception:
+            _dbg_exc(f"precision hook ({name})")
+        return orig(*args, **kwargs)
+
+    wrapper._aibom_wrapped = True
+    setattr(module, name, wrapper)
+
+
+def _record_autocast(ac):
+    if not getattr(ac, "_enabled", False) or _in_dataloader_worker():
+        return
+    entry = f"{getattr(ac, 'device', None)}:{_dtype_name(getattr(ac, 'fast_dtype', None))}"[:48]
+    with _lock:
+        if entry in _autocast_seen or len(_autocast_seen) >= _AUTOCAST_MAX:
+            return
+        _autocast_seen.add(entry)
+        _runtime_info["autocast"] = sorted(_autocast_seen)
+
+
+def _install_autocast_hook():
+    torch = sys.modules.get("torch")
+    autocast = getattr(getattr(getattr(torch, "amp", None), "autocast_mode", None), "autocast", None)
+    if "torch_autocast" in _hooks_installed or autocast is None:
+        return
+    # Its subclasses (torch.cuda.amp.autocast, ...) call it through super().
+    if _wrap_after(autocast, "__init__", _record_autocast):
+        _hooks_installed["torch_autocast"] = True
+
+
+_ACCELERATE_FP8_BACKENDS = {"te": "transformer_engine", "ao": "torchao", "msamp": "msamp"}
+
+
+def _record_accelerator(acc):
+    value = {}
+    mp = getattr(acc, "mixed_precision", None)
+    if isinstance(mp, str) and mp:
+        value["mixed_precision"] = mp[:16]
+    if mp == "fp8":
+        backend = str(getattr(acc, "fp8_backend", "") or "").lower()
+        if backend:
+            value["fp8_backend"] = _ACCELERATE_FP8_BACKENDS.get(backend, backend[:32])
+    _record_precision_once("accelerator_precision", value)
+
+
+def _install_accelerate_hook():
+    acc = getattr(sys.modules.get("accelerate"), "Accelerator", None)
+    if "accelerate" not in _hooks_installed and _wrap_after(acc, "__init__", _record_accelerator):
+        _hooks_installed["accelerate"] = True
+
+
+def _record_deepspeed_engine(engine):
+    if engine.bfloat16_enabled():
+        value = "bf16"
+    elif engine.fp16_enabled():
+        value = "fp16"
+    else:
+        value = "no"
+    _record_precision_once("deepspeed_precision", value)
+
+
+def _install_deepspeed_hook():
+    engine = getattr(sys.modules.get("deepspeed"), "DeepSpeedEngine", None)
+    if "deepspeed" not in _hooks_installed and _wrap_after(engine, "__init__", _record_deepspeed_engine):
+        _hooks_installed["deepspeed"] = True
+
+
+def _record_fsdp_policy(policy):
+    value = {"policy": type(policy).__name__[:64]}
+    # buffer_dtype is FSDP1's, output_dtype FSDP2's.
+    for attr in ("param_dtype", "reduce_dtype", "buffer_dtype", "output_dtype"):
+        name = _dtype_name(getattr(policy, attr, None))
+        if name:
+            value[attr] = name
+    _record_precision_once("fsdp_mixed_precision", value)
+
+
+def _install_fsdp_hook():
+    fsdp = sys.modules.get("torch.distributed.fsdp")
+    if fsdp is None or "fsdp_precision" in _hooks_installed:
+        return
+    _hooks_installed["fsdp_precision"] = True
+    for name in ("MixedPrecision", "MixedPrecisionPolicy"):
+        _wrap_after(getattr(fsdp, name, None), "__init__", _record_fsdp_policy)
+
+
+def _install_transformer_engine_hook():
+    te = sys.modules.get("transformer_engine.pytorch")
+    if te is None or "transformer_engine" in _hooks_installed:
+        return
+    _hooks_installed["transformer_engine"] = True
+
+    def record(args, kwargs):
+        if not kwargs.get("enabled", args[0] if args else True):
+            return
+        recipe = kwargs.get("fp8_recipe") or kwargs.get("recipe")
+        value = {"backend": "transformer_engine"}
+        if recipe is not None:
+            value["recipe"] = type(recipe).__name__[:64]
+        _record_precision_once("fp8", value)
+
+    # fp8_autocast, and autocast, its newer name.
+    for name in ("fp8_autocast", "autocast"):
+        _wrap_function(te, name, record)
+
+
+def _install_torchao_float8_hook():
+    float8 = sys.modules.get("torchao.float8")
+    if float8 is None or "torchao_float8" in _hooks_installed:
+        return
+    _hooks_installed["torchao_float8"] = True
+    _wrap_function(float8, "convert_to_float8_training",
+                   lambda args, kwargs: _record_precision_once("fp8", {"backend": "torchao"}))
+
+
+def _capture_precision_flags():
+    """TF32 switches (TrainingArguments(tf32=True) and
+    torch.set_float32_matmul_precision set these too) and the mixed precision
+    accelerate launch hands its ranks. torch is only read if imported."""
+    flags = {}
+    torch = sys.modules.get("torch")
+    if torch is not None:
+        try:
+            backends = getattr(torch, "backends", None)
+            matmul = getattr(getattr(backends, "cuda", None), "matmul", None)
+            for obj, key in ((matmul, "tf32_matmul"), (getattr(backends, "cudnn", None), "tf32_cudnn")):
+                value = getattr(obj, "allow_tf32", None)
+                if isinstance(value, bool):
+                    flags[key] = value
+            get_precision = getattr(torch, "get_float32_matmul_precision", None)
+            if callable(get_precision):
+                flags["float32_matmul_precision"] = str(get_precision())[:16]
+        except Exception:
+            _dbg_exc("_capture_precision_flags")
+    env = os.environ.get("ACCELERATE_MIXED_PRECISION")
+    if env:
+        flags["accelerate_mixed_precision"] = env[:16]
+    if flags:
+        _runtime_info["precision_flags"] = flags
+
+
 # ── Software versions ────────────────────────────────────────────────────────
 #
 # Only libraries the process actually imported are listed, so an image that
@@ -1710,6 +1912,12 @@ def install_hooks():
     _install_numpy_seed_hook()
     _install_torch_seed_hook()
     _install_torch_optimizer_hook()
+    _install_autocast_hook()
+    _install_accelerate_hook()
+    _install_deepspeed_hook()
+    _install_fsdp_hook()
+    _install_transformer_engine_hook()
+    _install_torchao_float8_hook()
     _register_durable_flush()
     _dbg(f"install_hooks: done, output will go to {_OUTPUT_PATH}")
 
@@ -1718,6 +1926,7 @@ def _install_torch_hooks():
     _install_dataloader_hook()
     _install_torch_seed_hook()
     _install_torch_optimizer_hook()
+    _install_autocast_hook()
 
 
 # Top-level module -> the hook to install once it has finished importing.
@@ -1732,6 +1941,11 @@ _LAZY_TRIGGERS = {
     "random": _install_random_seed_hook,
     # numpy 2 can import numpy.random lazily, on first attribute access.
     "numpy.random": _install_numpy_seed_hook,
+    "accelerate": _install_accelerate_hook,
+    "deepspeed": _install_deepspeed_hook,
+    "torch.distributed.fsdp": _install_fsdp_hook,
+    "transformer_engine.pytorch": _install_transformer_engine_hook,
+    "torchao.float8": _install_torchao_float8_hook,
 }
 
 
@@ -1877,6 +2091,7 @@ def reset():
     _optimizer_recorded = False
     _torch_build = None
     _package_versions.clear()
+    _autocast_seen.clear()
     with _lock:
         _detected_datasets.clear()
         _hf_dataset_key_registry.clear()
