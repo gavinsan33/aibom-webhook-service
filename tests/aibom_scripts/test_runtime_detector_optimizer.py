@@ -68,10 +68,21 @@ def test_reads_param_groups_not_defaults(fake_optim):
     # Trainer passes weight_decay per group, so `defaults` would show torch's
     # own 0.01 instead of what ran.
     rd.install_hooks()
-    fake_optim.AdamW([{"params": ["w"], "weight_decay": 0.05}, {"params": ["b"], "weight_decay": 0.0}])
+    fake_optim.AdamW([{"params": ["w1", "w2"], "weight_decay": 0.05}, {"params": ["b"], "weight_decay": 0.0}])
 
-    assert _constructed()["params"]["weight_decay"] == 0.05
-    assert _constructed()["varies_by_param_group"] == ["weight_decay"]
+    assert "weight_decay" not in _constructed()["params"]
+    assert _constructed()["params"]["lr"] == 1e-3  # shared
+    assert _constructed()["param_groups"] == [
+        {"weight_decay": 0.05, "param_tensors": 2},
+        {"weight_decay": 0.0, "param_tensors": 1},
+    ]
+
+
+def test_single_group_has_no_param_groups(fake_optim):
+    rd.install_hooks()
+    fake_optim.AdamW(["w"])
+
+    assert "param_groups" not in _constructed()
 
 
 def test_first_optimizer_wins(fake_optim):
