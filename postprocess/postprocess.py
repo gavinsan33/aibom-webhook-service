@@ -3099,58 +3099,77 @@ def _short_or_none(value, limit=128):
     return value[:limit] if isinstance(value, str) and value else None
 
 
-# TrainingArguments' and the CLIs' names for what torch calls betas/eps.
-_TA_OPTIMIZER_FIELDS = (
-    ("adam_beta1", "beta1"),
-    ("adam_beta2", "beta2"),
-    ("adam_epsilon", "epsilon"),
-    ("weight_decay", "weight_decay"),
-)
-_RESERVED_OPTIMIZER_KEYS = ("class", "declared_via", "varies_by_param_group")
+def _optimizer_setting(value):
+    """An optimizer setting as runtime_detector.py records it (a number, a
+    bool, or a short list of numbers such as betas), else None."""
+    if isinstance(value, bool) or _json_number(value) is not None:
+        return value
+    if isinstance(value, list) and 0 < len(value) <= 4 and all(_json_number(v) is not None for v in value):
+        return value
+    return None
 
 
-def training_optimizer_params(runtime_info, dm):
-    """training.optimizer_params: the hyperparameters of the optimizer the
-    run constructed, if the runtime hook saw one, else TrainingArguments'
-    optimizer fields, else the CLI's. Sources aren't mixed. runtime_info is
-    written inside the workload's container, so only numbers, bools and
-    short number lists are kept."""
+def _optimizer_settings(raw):
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    for key, value in list(raw.items())[:16]:
+        if isinstance(key, str) and key and _optimizer_setting(value) is not None:
+            out[key[:64]] = value
+    return out
+
+
+# TrainingArguments' Adam defaults, for a CLI that sets only one beta: trl,
+# LLaMA-Factory and Axolotl all hand these to TrainingArguments.
+_HF_ADAM_BETAS = (0.9, 0.999)
+
+
+def training_optimizer_config(runtime_info, dm):
+    """training.optimizer_config: the optimizer the run constructed, if the
+    runtime hook saw one (`runtime_optimizer`), else TrainingArguments'
+    optimizer fields, else the CLI's. Sources aren't mixed. Settings use
+    torch's names (lr, betas, eps, weight_decay, ...); `params` holds what
+    every param group shares, `param_groups` each group's differing settings
+    and tensor count. runtime_info is written inside the workload's
+    container, so only numbers, bools and short number lists are kept."""
     constructed = runtime_info.get("optimizer_constructed")
-    if isinstance(constructed, dict) and isinstance(constructed.get("params"), dict):
+    if isinstance(constructed, dict):
         out = {}
-        for key, value in list(constructed["params"].items())[:16]:
-            if not isinstance(key, str) or key in _RESERVED_OPTIMIZER_KEYS:
-                continue
-            if key == "betas" and isinstance(value, list) and len(value) == 2:
-                if all(_json_number(v) is not None for v in value):
-                    out["beta1"], out["beta2"] = value
-            elif key == "eps":
-                if _json_number(value) is not None:
-                    out["epsilon"] = value
-            elif isinstance(value, bool) or _json_number(value) is not None:
-                out[key[:64]] = value
-            elif isinstance(value, list) and 0 < len(value) <= 4 and all(
-                _json_number(v) is not None for v in value
-            ):
-                out[key[:64]] = value
-        varied = constructed.get("varies_by_param_group")
-        if isinstance(varied, list):
-            varied = [{"eps": "epsilon"}.get(k, k) for k in varied if isinstance(k, str)]
-            varied = [k for k in varied if k in out]
-            if varied:
-                out["varies_by_param_group"] = varied
         cls = _short_or_none(constructed.get("class"))
         if cls:
             out["class"] = cls
-        out["declared_via"] = "optimizer_constructed"
-        return out
+        params = _optimizer_settings(constructed.get("params"))
+        if params:
+            out["params"] = params
+        groups = constructed.get("param_groups")
+        if isinstance(groups, list):
+            cleaned = []
+            for group in groups[:32]:
+                if not isinstance(group, dict):
+                    continue
+                entry = _optimizer_settings({k: v for k, v in group.items() if k != "param_tensors"})
+                tensors = group.get("param_tensors")
+                if isinstance(tensors, int) and not isinstance(tensors, bool) and 0 <= tensors <= 2 ** 53 - 1:
+                    entry["param_tensors"] = tensors
+                cleaned.append(entry)
+            if any(cleaned):
+                out["param_groups"] = cleaned
+        if out:
+            out["declared_via"] = "runtime_optimizer"
+            return out
 
     for source, via in ((runtime_info, "training_arguments"), (dm, "cli_arg")):
-        out = {
-            field: source[key]
-            for key, field in _TA_OPTIMIZER_FIELDS
-            if _json_number(source.get(key)) is not None
-        }
+        params = {}
+        beta1, beta2 = (_json_number(source.get(k)) for k in ("adam_beta1", "adam_beta2"))
+        if beta1 is not None or beta2 is not None:
+            params["betas"] = [
+                beta1 if beta1 is not None else _HF_ADAM_BETAS[0],
+                beta2 if beta2 is not None else _HF_ADAM_BETAS[1],
+            ]
+        for key, name in (("adam_epsilon", "eps"), ("weight_decay", "weight_decay")):
+            if _json_number(source.get(key)) is not None:
+                params[name] = source[key]
+        out = {"params": params} if params else {}
         optim_args = _short_or_none(source.get("optim_args"), 256)
         if optim_args:
             out["optim_args"] = optim_args
@@ -3466,15 +3485,16 @@ def compile_aibom(
     # Training config
     if intent in ("training", "sft"):
         determinism = training_determinism(runtime_info)
-        optimizer_params = training_optimizer_params(runtime_info, dm)
+        optimizer_config = training_optimizer_config(runtime_info, dm)
+        optimizer_settings = (optimizer_config or {}).get("params") or {}
         aibom["training"] = {
             "optimizer": (
                 annotations.get("optimizer")
                 or runtime_info.get("optimizer")
                 or dm.get("optimizer")
-                or (optimizer_params or {}).get("class")
+                or (optimizer_config or {}).get("class")
             ),
-            "optimizer_params": optimizer_params,
+            "optimizer_config": optimizer_config,
             "lr_scheduler": training_lr_scheduler(runtime_info, dm),
             "learning_rate": _first_not_none(
                 _try_float(annotations.get("learning-rate")),
@@ -3482,7 +3502,7 @@ def compile_aibom(
                 dm.get("learning_rate"),
                 # A script that builds its optimizer itself, with no
                 # TrainingArguments or CLI flag.
-                (optimizer_params or {}).get("lr"),
+                optimizer_settings.get("lr"),
             ),
             "batch_size": _first_not_none(
                 _try_int(annotations.get("batch-size")),
