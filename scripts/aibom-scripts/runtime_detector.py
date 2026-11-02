@@ -1437,12 +1437,16 @@ def _install_torch_seed_hook():
 # records the hyperparameters that were actually used. They're read from
 # param_groups, not `defaults`: Trainer passes weight_decay per group (0 for
 # biases and norm weights) rather than as a constructor argument, so
-# `defaults` holds torch's own weight_decay. A value that differs between
-# groups is reported as its largest and listed in varies_by_param_group.
+# `defaults` holds torch's own weight_decay. Settings every group shares go in
+# `params`; when any differ, `param_groups` lists each group's differing
+# settings and its tensor count (the shape oc-aibom and the console plugin
+# read).
 # ponytail: the first optimizer a process builds wins; a second one (a GAN's
 # discriminator, a multi-optimizer script) isn't recorded.
 
 _OPTIMIZER_MAX_PARAMS = 16
+# ponytail: groups past this (per-layer LR decay) are dropped, not summarized.
+_OPTIMIZER_MAX_GROUPS = 32
 _optimizer_recorded = False
 
 
@@ -1470,25 +1474,28 @@ def _record_optimizer(optimizer):
         return
     _optimizer_recorded = True
     _training_activity = True
-    values = {}
-    for group in getattr(optimizer, "param_groups", None) or []:
+    groups = []
+    for group in (getattr(optimizer, "param_groups", None) or [])[:_OPTIMIZER_MAX_GROUPS]:
+        settings = {}
         for key, value in group.items():
-            if key != "params" and isinstance(key, str):
-                values.setdefault(key[:64], []).append(_optimizer_value(value))
-    params, varied = {}, []
-    for key in sorted(values):
-        vals = values[key]
-        if None in vals or len(params) >= _OPTIMIZER_MAX_PARAMS:
-            continue
-        if all(v == vals[0] for v in vals):
-            params[key] = vals[0]
-        elif all(map(_is_json_number, vals)):
-            params[key] = max(vals)
-            varied.append(key)
+            value = _optimizer_value(value) if key != "params" and isinstance(key, str) else None
+            if value is not None:
+                settings[key[:64]] = value
+        tensors = group.get("params")
+        groups.append((settings, len(tensors) if isinstance(tensors, list) else None))
+    keys = sorted({k for settings, _ in groups for k in settings})[:_OPTIMIZER_MAX_PARAMS]
+    first = groups[0][0] if groups else {}
+    shared = {k: first[k] for k in keys if all(k in g and g[k] == first.get(k) for g, _ in groups)}
     cls = type(optimizer)
-    observation = {"class": f"{cls.__module__}.{cls.__qualname__}"[:128], "params": params}
-    if varied:
-        observation["varies_by_param_group"] = varied
+    observation = {"class": f"{cls.__module__}.{cls.__qualname__}"[:128], "params": shared}
+    if len(shared) < len(keys):
+        observation["param_groups"] = [
+            {
+                **{k: settings[k] for k in keys if k not in shared and k in settings},
+                **({"param_tensors": tensors} if tensors is not None else {}),
+            }
+            for settings, tensors in groups
+        ]
     with _lock:
         _runtime_info["optimizer_constructed"] = observation
     _dbg(f"optimizer hook: captured {observation}")
