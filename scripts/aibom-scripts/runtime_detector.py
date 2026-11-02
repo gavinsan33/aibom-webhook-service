@@ -1738,6 +1738,8 @@ class _PostImportHookFinder:
 
     def __init__(self, triggers):
         self._pending = dict(triggers)
+        # Hooks that raised, retried whenever another trigger fires.
+        self._failed = {}
         self._claim_lock = threading.Lock()
         self._resolving = threading.local()
 
@@ -1758,11 +1760,27 @@ class _PostImportHookFinder:
         hook = self._claim(name)
         if hook is None:
             return
-        _dbg(f"Lazy hook: '{name}' finished importing, installing hook")
+        # A module can finish importing inside another's import: peft's
+        # __init__ imports transformers, whose hook then reads the lazy
+        # transformers.TrainingArguments, which imports `from peft import ...`
+        # from the half-initialized peft and raises. A hook that failed is
+        # retried here, once the next trigger (peft itself, in that case) has
+        # finished importing.
+        # ponytail: nothing retries a hook that failed on the last trigger.
+        with self._claim_lock:
+            retries, self._failed = self._failed, {}
+        for failed_name, failed_hook in retries.items():
+            self._run(failed_name, failed_hook, "retrying")
+        self._run(name, hook, "finished importing,")
+
+    def _run(self, name, hook, what):
+        _dbg(f"Lazy hook: '{name}' {what} installing hook")
         try:
             hook()
         except Exception:
             _dbg_exc(f"install_hooks_lazy({name})")
+            with self._claim_lock:
+                self._failed[name] = hook
 
     def find_spec(self, fullname, path=None, target=None):
         if fullname not in self._pending:

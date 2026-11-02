@@ -1173,3 +1173,53 @@ def test_shadowed_sitecustomize_errors_do_not_break_startup(hooks_dir, tmp_path)
     (other / "sitecustomize.py").write_text("raise RuntimeError('broken image sitecustomize')\n")
 
     assert _run_probe(sys.executable, hooks_dir, tmp_path, extra_path=[other]) == "ACTIVE"
+
+
+def test_hook_that_failed_mid_import_is_retried(tmp_path):
+    # peft's __init__ imports transformers, so transformers finishes
+    # importing (and its hook fires) while peft is half-initialized. The
+    # hook's read of the lazy TrainingArguments imports a module that does
+    # `from peft import PeftMixedModel` and raises; it has to be retried once
+    # peft has finished.
+    pkgs = tmp_path / "pkgs"
+    (pkgs / "peft").mkdir(parents=True)
+    (pkgs / "peft" / "__init__.py").write_text(
+        "import transformers\n"
+        "class PeftMixedModel: pass\n"
+        "class LoraConfig:\n"
+        "    def __init__(self, r=8, lora_alpha=16, **kwargs):\n"
+        "        self.r, self.lora_alpha, self.use_dora, self.use_rslora = r, lora_alpha, False, False\n"
+    )
+    (pkgs / "transformers").mkdir()
+    (pkgs / "transformers" / "__init__.py").write_text(
+        "import importlib\n"
+        "class PreTrainedModel:\n"
+        "    @classmethod\n"
+        "    def from_pretrained(cls, name, *args, **kwargs): return cls()\n"
+        "def __getattr__(name):\n"
+        "    if name == 'TrainingArguments':\n"
+        "        return importlib.import_module('.training_args', __name__).TrainingArguments\n"
+        "    raise AttributeError(name)\n"
+    )
+    (pkgs / "transformers" / "training_args.py").write_text(
+        "import dataclasses\n"
+        "from peft import PeftMixedModel\n"
+        "@dataclasses.dataclass\n"
+        "class TrainingArguments:\n"
+        "    learning_rate: float = 5e-5\n"
+        "    def __post_init__(self): pass\n"
+    )
+    hooks = tmp_path / "aibom-hooks"
+    hooks.mkdir()
+    (hooks / "sitecustomize.py").write_text(open(rd.__file__).read())
+    out = tmp_path / "out.json"
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "PYTHONPATH": f"{hooks}:{pkgs}",
+        "AIBOM_DATASET_DETECT": "1",
+        "AIBOM_DATASET_OUTPUT": str(out),
+    }
+    script = "import peft, transformers\ntransformers.TrainingArguments(learning_rate=1e-3)\n"
+    subprocess.run([sys.executable, "-c", script], env=env, cwd=tmp_path, check=True, timeout=60)
+
+    assert json.loads(out.read_text())["runtime_info"]["learning_rate"] == 1e-3
