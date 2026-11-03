@@ -1775,8 +1775,10 @@ def _record_fsdp_policy(policy):
         name = _dtype_name(getattr(policy, attr, None))
         if name:
             value[attr] = name
-    # FSDP1 builds an all-None MixedPrecision() when it's given none: that's
-    # no mixed precision, and must not claim the once-per-process slot.
+    # A policy with no dtypes isn't one the run chose: FSDP1 builds an
+    # all-None MixedPrecision() when given none, and fully_shard builds a
+    # dtype-less MixedPrecisionPolicy internally. Neither may claim the
+    # once-per-process slot.
     if len(value) > 1:
         _record_once("fsdp_mixed_precision", value)
 
