@@ -75,6 +75,8 @@ spec:
                   optional: true
           resources:
             requests:
+              memory: 8Gi
               nvidia.com/gpu: "2"
             limits:
+              memory: 20Gi
               nvidia.com/gpu: "2"
