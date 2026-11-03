@@ -1764,7 +1764,10 @@ def _record_fsdp_policy(policy):
         name = _dtype_name(getattr(policy, attr, None))
         if name:
             value[attr] = name
-    _record_once("fsdp_mixed_precision", value)
+    # fully_shard builds a dtype-less MixedPrecisionPolicy internally;
+    # that isn't one the run chose.
+    if len(value) > 1:
+        _record_once("fsdp_mixed_precision", value)
 
 
 def _install_fsdp_hook():
