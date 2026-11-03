@@ -273,6 +273,24 @@ def _capture_accelerate_config():
         if strategy:
             _runtime_info["parallelization_strategy"] = strategy
             _dbg(f"Captured parallelization_strategy={strategy} from {path}")
+        distributed = {}
+        for key, name in (("num_processes", "world_size"), ("num_machines", "nodes")):
+            if _positive_int(config.get(key)):
+                distributed[name] = config[key]
+        fsdp, deepspeed = config.get("fsdp_config"), config.get("deepspeed_config")
+        if strategy == "fsdp":
+            fsdp = fsdp if isinstance(fsdp, dict) else {}
+            distributed["fsdp"] = _fsdp_summary(
+                fsdp.get("fsdp_version"), fsdp.get("fsdp_sharding_strategy"),
+                fsdp.get("fsdp_reshard_after_forward"), fsdp.get("fsdp_offload_params"))
+        if strategy == "deepspeed":
+            deepspeed = deepspeed if isinstance(deepspeed, dict) else {}
+            distributed["deepspeed"] = _deepspeed_summary(
+                deepspeed.get("zero_stage"), deepspeed.get("offload_optimizer_device"),
+                deepspeed.get("offload_param_device"),
+            ) or _deepspeed_json_summary(deepspeed.get("deepspeed_config_file"))
+        if distributed:
+            _runtime_info["accelerate_config_distributed"] = distributed
     except Exception:
         _dbg_exc("_capture_accelerate_config")
 
@@ -680,6 +698,7 @@ def _flush(final=True, in_signal=False):
     if _training_activity:
         _capture_determinism_flags()
         _capture_precision_flags()
+        _capture_distributed_env()
 
     got_lock = _lock.acquire(timeout=0.5 if in_signal else -1)
     try:
@@ -1181,6 +1200,12 @@ def _install_training_args_hook():
                 info["mixed_precision"] = "bf16"
             elif getattr(self, "fp16", False):
                 info["mixed_precision"] = "fp16"
+            try:
+                distributed = _training_args_distributed(self)
+                if distributed:
+                    info["training_args_distributed"] = distributed
+            except Exception:
+                _dbg_exc("_training_args_distributed")
             with _lock:
                 _runtime_info.update(info)
             _dbg(f"transformers hook: captured TrainingArguments {info}")
@@ -1624,14 +1649,14 @@ def _dtype_name(dtype):
     return str(dtype).replace("torch.", "")[:32] if dtype is not None else None
 
 
-def _record_precision_once(key, value):
+def _record_once(key, value):
     if not value or _in_dataloader_worker():
         return
     with _lock:
         if key in _runtime_info:
             return
         _runtime_info[key] = value
-    _dbg(f"precision hook: {key}={value}")
+    _dbg(f"hook: {key}={value}")
 
 
 def _wrap_after(cls, name, record):
@@ -1646,7 +1671,7 @@ def _wrap_after(cls, name, record):
         try:
             record(self)
         except Exception:
-            _dbg_exc(f"precision hook ({cls.__name__}.{name})")
+            _dbg_exc(f"hook ({cls.__name__}.{name})")
         return result
 
     wrapper._aibom_wrapped = True
@@ -1665,7 +1690,7 @@ def _wrap_function(module, name, record):
         try:
             record(args, kwargs)
         except Exception:
-            _dbg_exc(f"precision hook ({name})")
+            _dbg_exc(f"hook ({name})")
         return orig(*args, **kwargs)
 
     wrapper._aibom_wrapped = True
@@ -1708,7 +1733,11 @@ def _record_accelerator(acc):
         backend = str(getattr(acc, "fp8_backend", "") or "").lower()
         if backend:
             value["fp8_backend"] = _ACCELERATE_FP8_BACKENDS.get(backend, backend[:32])
-    _record_precision_once("accelerator_precision", value)
+    _record_once("accelerator_precision", value)
+    try:
+        _record_accelerator_distributed(acc)
+    except Exception:
+        _dbg_exc("_record_accelerator_distributed")
 
 
 def _install_accelerate_hook():
@@ -1724,13 +1753,19 @@ def _record_deepspeed_engine(engine):
         value = "fp16"
     else:
         value = "no"
-    _record_precision_once("deepspeed_precision", value)
+    _record_once("deepspeed_precision", value)
+    _record_once("deepspeed_engine", _deepspeed_summary(
+        engine.zero_optimization_stage(), engine.zero_offload_optimizer(), engine.zero_offload_param()))
 
 
 def _install_deepspeed_hook():
-    engine = getattr(sys.modules.get("deepspeed"), "DeepSpeedEngine", None)
+    deepspeed = sys.modules.get("deepspeed")
+    engine = getattr(deepspeed, "DeepSpeedEngine", None)
     if "deepspeed" not in _hooks_installed and _wrap_after(engine, "__init__", _record_deepspeed_engine):
         _hooks_installed["deepspeed"] = True
+        # Sets num_stages after DeepSpeedEngine.__init__ returns.
+        _wrap_after(getattr(deepspeed, "PipelineEngine", None), "__init__",
+                    lambda e: _record_once("deepspeed_pipeline_stages", getattr(e, "num_stages", None)))
 
 
 def _record_fsdp_policy(policy):
@@ -1743,7 +1778,7 @@ def _record_fsdp_policy(policy):
     # FSDP1 builds an all-None MixedPrecision() when it's given none: that's
     # no mixed precision, and must not claim the once-per-process slot.
     if len(value) > 1:
-        _record_precision_once("fsdp_mixed_precision", value)
+        _record_once("fsdp_mixed_precision", value)
 
 
 def _install_fsdp_hook():
@@ -1753,6 +1788,11 @@ def _install_fsdp_hook():
     _hooks_installed["fsdp_precision"] = True
     for name in ("MixedPrecision", "MixedPrecisionPolicy"):
         _wrap_after(getattr(fsdp, name, None), "__init__", _record_fsdp_policy)
+    # FSDP1 wraps each submodule in its own instance, FSDP2 calls
+    # fully_shard per submodule; the first one is recorded.
+    _wrap_after(getattr(fsdp, "FullyShardedDataParallel", None), "__init__", lambda m: _record_once(
+        "fsdp_module", _fsdp_summary(1, getattr(m, "sharding_strategy", None), None, getattr(m, "cpu_offload", None))))
+    _wrap_function(fsdp, "fully_shard", _record_fully_shard)
 
 
 def _install_transformer_engine_hook():
@@ -1768,7 +1808,7 @@ def _install_transformer_engine_hook():
         value = {"backend": "transformer_engine"}
         if recipe is not None:
             value["recipe"] = type(recipe).__name__[:64]
-        _record_precision_once("fp8", value)
+        _record_once("fp8", value)
 
     # fp8_autocast, and autocast, its newer name.
     for name in ("fp8_autocast", "autocast"):
@@ -1781,7 +1821,7 @@ def _install_torchao_float8_hook():
         return
     _hooks_installed["torchao_float8"] = True
     _wrap_function(float8, "convert_to_float8_training",
-                   lambda args, kwargs: _record_precision_once("fp8", {"backend": "torchao"}))
+                   lambda args, kwargs: _record_once("fp8", {"backend": "torchao"}))
 
 
 def _capture_precision_flags():
@@ -1808,6 +1848,217 @@ def _capture_precision_flags():
         flags["accelerate_mixed_precision"] = env[:16]
     if flags:
         _runtime_info["precision_flags"] = flags
+
+
+# ── Distributed topology ─────────────────────────────────────────────────────
+#
+# What sharded or split the model, read from the object that applied it
+# (Accelerator, DeepSpeedEngine, the FSDP module, Megatron's
+# initialize_model_parallel, a named DeviceMesh), with the accelerate config
+# file and TrainingArguments as fallbacks for a run that dies before them.
+
+_FSDP_STRATEGIES = ("FULL_SHARD", "SHARD_GRAD_OP", "NO_SHARD", "HYBRID_SHARD", "HYBRID_SHARD_ZERO2")
+_OFFLOAD_DEVICES = ("none", "cpu", "nvme")
+_MESH_DIMS_MAX = 8
+
+
+def _fsdp_strategy_name(value):
+    """ShardingStrategy, its name, or its 1-based number (accelerate configs)."""
+    value = getattr(value, "name", value)
+    if isinstance(value, str) and value.isdigit():
+        value = int(value)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return _FSDP_STRATEGIES[value - 1] if 1 <= value <= len(_FSDP_STRATEGIES) else None
+    if isinstance(value, str) and value.upper() in _FSDP_STRATEGIES:
+        return value.upper()
+    return None
+
+
+def _offload_flag(value):
+    """FSDP1's CPUOffload, FSDP2's offload policy, or a plain bool."""
+    if isinstance(value, bool) or value is None:
+        return value
+    flag = getattr(value, "offload_params", None)
+    if isinstance(flag, bool):
+        return flag
+    # FSDP2's base OffloadPolicy means no offload.
+    return type(value).__name__ == "CPUOffloadPolicy"
+
+
+def _fsdp_summary(version=None, strategy=None, reshard=None, cpu_offload=None):
+    """reshard_after_forward is FSDP2's bool, but accelerate and transformers
+    also use the name for FSDP1's strategy, and when they do, the separate
+    sharding_strategy is a stale default."""
+    out = {}
+    if version in (1, 2):
+        out["version"] = version
+    if isinstance(reshard, bool):
+        out["reshard_after_forward"] = reshard
+    name = _fsdp_strategy_name(reshard) or _fsdp_strategy_name(strategy)
+    if name:
+        out["sharding_strategy"] = name
+    offload = _offload_flag(cpu_offload)
+    if offload is not None:
+        out["cpu_offload"] = offload
+    return out
+
+
+def _deepspeed_summary(stage, offload_optimizer=None, offload_param=None):
+    out = {}
+    if isinstance(stage, int) and not isinstance(stage, bool) and 0 <= stage <= 3:
+        out["zero_stage"] = stage
+    for key, device in (("offload_optimizer", offload_optimizer), ("offload_param", offload_param)):
+        device = getattr(device, "device", device)  # the engine's offload config
+        device = getattr(device, "value", device)   # OffloadDeviceEnum
+        if isinstance(device, str) and device.lower() in _OFFLOAD_DEVICES:
+            out[key] = device.lower()
+    return out
+
+
+def _deepspeed_json_summary(config):
+    """A DeepSpeed config dict, or the path to its JSON file."""
+    if isinstance(config, str) and os.path.isfile(config) and os.path.getsize(config) < 1 << 20:
+        with open(config) as f:
+            config = json.load(f)
+    if not isinstance(config, dict):
+        return {}
+    zero = config.get("zero_optimization")
+    if not isinstance(zero, dict):
+        return {}
+
+    def device(key):
+        return zero[key].get("device") if isinstance(zero.get(key), dict) else None
+
+    return _deepspeed_summary(zero.get("stage"), device("offload_optimizer"), device("offload_param"))
+
+
+def _training_args_distributed(args):
+    """FSDP/DeepSpeed settings TrainingArguments asked for. fsdp is True plus
+    fsdp_config on transformers 5, a list of options on 4.x."""
+    out = {}
+    fsdp = getattr(args, "fsdp", None)
+    if fsdp:
+        config = getattr(args, "fsdp_config", None)
+        config = config if isinstance(config, dict) else {}
+        options = fsdp.split() if isinstance(fsdp, str) else fsdp if isinstance(fsdp, (list, tuple)) else []
+        options = [str(getattr(o, "value", o)).lower() for o in options]
+        strategy = next((o for o in options if _fsdp_strategy_name(o)), None)
+        offload = config.get("cpu_offload", True if "offload" in options else None)
+        out["fsdp"] = _fsdp_summary(config.get("version"), strategy, config.get("reshard_after_forward"), offload)
+    deepspeed = getattr(args, "deepspeed", None)
+    if deepspeed:
+        out["deepspeed"] = _deepspeed_json_summary(deepspeed)
+    return out
+
+
+def _positive_int(value):
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
+def _record_accelerator_distributed(acc):
+    state = getattr(acc, "state", None)
+    value = {}
+    distributed_type = getattr(state, "distributed_type", None)
+    distributed_type = getattr(distributed_type, "value", distributed_type)
+    if isinstance(distributed_type, str) and distributed_type:
+        value["distributed_type"] = distributed_type[:32]
+    world = _positive_int(getattr(state, "num_processes", None))
+    if world:
+        value["world_size"] = world
+    plugin = getattr(state, "fsdp_plugin", None)
+    if plugin is not None:
+        value["fsdp"] = _fsdp_summary(
+            getattr(plugin, "fsdp_version", None), getattr(plugin, "sharding_strategy", None),
+            getattr(plugin, "reshard_after_forward", None), getattr(plugin, "cpu_offload", None))
+    plugin = getattr(state, "deepspeed_plugin", None)
+    if plugin is not None:
+        value["deepspeed"] = _deepspeed_summary(
+            getattr(plugin, "zero_stage", None), getattr(plugin, "offload_optimizer_device", None),
+            getattr(plugin, "offload_param_device", None))
+    _record_once("accelerator_distributed", value)
+
+
+def _record_fully_shard(args, kwargs):
+    value = _fsdp_summary(2, None, kwargs.get("reshard_after_forward"), kwargs.get("offload_policy"))
+    # A 2-D mesh is HSDP: replicate across one dim, shard across the other.
+    if getattr(kwargs.get("mesh"), "ndim", None) == 2:
+        value["sharding_strategy"] = "HYBRID_SHARD"
+    _record_once("fsdp_module", value)
+
+
+def _install_megatron_hook():
+    parallel_state = sys.modules.get("megatron.core.parallel_state")
+    if parallel_state is None or "megatron" in _hooks_installed:
+        return
+    _hooks_installed["megatron"] = True
+
+    def record(args, kwargs):
+        def size(name, index=None):
+            if name in kwargs:
+                return _positive_int(kwargs[name])
+            return _positive_int(args[index]) if index is not None and index < len(args) else None
+
+        value = {
+            "tensor": size("tensor_model_parallel_size", 0) or 1,
+            "pipeline": size("pipeline_model_parallel_size", 1) or 1,
+            "context": size("context_parallel_size") or 1,
+            "expert": size("expert_model_parallel_size") or 1,
+        }
+        virtual = size("virtual_pipeline_model_parallel_size", 2)
+        if virtual:
+            value["virtual_pipeline"] = virtual
+        _record_once("megatron_parallel", value)
+
+    # megatron.core.mpu is the same module object.
+    _wrap_function(parallel_state, "initialize_model_parallel", record)
+
+
+def _install_device_mesh_hook():
+    device_mesh = sys.modules.get("torch.distributed.device_mesh")
+    if device_mesh is None or "device_mesh" in _hooks_installed:
+        return
+    _hooks_installed["device_mesh"] = True
+    orig = getattr(device_mesh, "init_device_mesh", None)
+
+    def record(args, kwargs):
+        names = kwargs.get("mesh_dim_names")
+        shape = kwargs.get("mesh_shape", args[1] if len(args) > 1 else None)
+        # An unnamed mesh (FSDP2's default 1-D one) says nothing about the split.
+        if not names or not isinstance(shape, (tuple, list)) or len(names) != len(shape):
+            return
+        _record_once("device_mesh", {
+            str(n)[:32]: s for n, s in list(zip(names, shape))[:_MESH_DIMS_MAX] if _positive_int(s)
+        })
+
+    _wrap_function(device_mesh, "init_device_mesh", record)
+    # torch.distributed re-exports it; bound before this hook if torch.distributed
+    # was already imported.
+    dist = sys.modules.get("torch.distributed")
+    if dist is not None and getattr(dist, "init_device_mesh", None) is orig:
+        dist.init_device_mesh = device_mesh.init_device_mesh
+
+
+def _capture_distributed_env():
+    """World size from the launcher's env: torchrun (and accelerate launch,
+    which uses it), the DeepSpeed launcher, Open MPI."""
+    def env_int(*names):
+        for name in names:
+            value = os.environ.get(name, "")
+            if value.isdigit() and int(value) > 0:
+                return int(value)
+        return None
+
+    world = env_int("WORLD_SIZE", "OMPI_COMM_WORLD_SIZE")
+    if not world:
+        return
+    value = {"world_size": world}
+    local = env_int("LOCAL_WORLD_SIZE", "LOCAL_SIZE", "OMPI_COMM_WORLD_LOCAL_SIZE")
+    if local:
+        value["local_world_size"] = local
+    nodes = env_int("GROUP_WORLD_SIZE") or (world // local if local and world % local == 0 else None)
+    if nodes:
+        value["nodes"] = nodes
+    _runtime_info["distributed_env"] = value
 
 
 # ── Software versions ────────────────────────────────────────────────────────
@@ -1955,6 +2206,8 @@ def install_hooks():
     _install_accelerate_hook()
     _install_deepspeed_hook()
     _install_fsdp_hook()
+    _install_device_mesh_hook()
+    _install_megatron_hook()
     _install_transformer_engine_hook()
     _install_torchao_float8_hook()
     _register_durable_flush()
@@ -1983,6 +2236,8 @@ _LAZY_TRIGGERS = {
     "accelerate": _install_accelerate_hook,
     "deepspeed": _install_deepspeed_hook,
     "torch.distributed.fsdp": _install_fsdp_hook,
+    "torch.distributed.device_mesh": _install_device_mesh_hook,
+    "megatron.core.parallel_state": _install_megatron_hook,
     "transformer_engine.pytorch": _install_transformer_engine_hook,
     "torchao.float8": _install_torchao_float8_hook,
 }
