@@ -1182,6 +1182,26 @@ def _install_training_args_hook():
     cls.__post_init__ = _patched_ta_post_init
 
 
+def _record_requested_model(name, kwargs):
+    """What a load asked for, recorded before it runs, so a process killed
+    mid-load (an OOM loading full-precision weights on every rank) still
+    reports it. The finished load overwrites these with the model's own
+    values; a load that raises removes them."""
+    info = {"model_name": str(name)}
+    dtype = kwargs.get("dtype", kwargs.get("torch_dtype"))
+    if dtype is not None and dtype != "auto":
+        info["dtype"] = str(dtype).replace("torch.", "")
+    if kwargs.get("device_map") is not None:
+        info["model_device_map"] = str(kwargs["device_map"])
+    try:
+        with _lock:
+            _runtime_info.update(info)
+    except Exception:
+        _dbg_exc("transformers._record_requested_model")
+        return {}
+    return info
+
+
 def _install_from_pretrained_hook():
     modeling_utils = sys.modules.get("transformers.modeling_utils")
     cls = getattr(modeling_utils, "PreTrainedModel", None)
@@ -1203,11 +1223,16 @@ def _install_from_pretrained_hook():
     def _patched_from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
         primary = not claimed[0]
         claimed[0] = True
+        requested = _record_requested_model(pretrained_model_name_or_path, kwargs) if primary else {}
         try:
             model = _orig_from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs)
         except BaseException:
             if primary:
                 claimed[0] = False
+                with _lock:
+                    for key, value in requested.items():
+                        if _runtime_info.get(key) == value:
+                            del _runtime_info[key]
             raise
         if not primary:
             return model

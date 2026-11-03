@@ -871,6 +871,51 @@ def test_transformers_hook_failed_first_load_doesnt_claim(fake_transformers_modu
     assert rd._runtime_info["model_name"] == "good"
 
 
+def test_transformers_hook_records_request_before_the_load_finishes(fake_transformers_module, monkeypatch):
+    # A rank OOM-killed while loading weights never returns from
+    # from_pretrained; what it asked for is already recorded.
+    rd.install_hooks()
+    import transformers
+
+    seen = {}
+
+    def _loading(self, *args, **kwargs):
+        seen.update(rd._runtime_info)
+
+    monkeypatch.setattr(transformers.PreTrainedModel, "__init__", _loading)
+    transformers.PreTrainedModel.from_pretrained("ibm-granite/granite-3.3-2b-instruct",
+                                                 torch_dtype="torch.float32", device_map="auto")
+
+    assert seen["model_name"] == "ibm-granite/granite-3.3-2b-instruct"
+    assert seen["dtype"] == "float32"
+    assert seen["model_device_map"] == "auto"
+
+
+def test_transformers_hook_failed_load_drops_its_request(fake_transformers_module, monkeypatch):
+    rd.install_hooks()
+    import transformers
+
+    def _missing(self, *args, **kwargs):
+        raise OSError("not found")
+
+    monkeypatch.setattr(transformers.PreTrainedModel, "__init__", _missing)
+    with pytest.raises(OSError):
+        transformers.PreTrainedModel.from_pretrained("bad", torch_dtype="bfloat16", device_map="auto")
+
+    for key in ("model_name", "dtype", "model_device_map"):
+        assert key not in rd._runtime_info
+
+
+def test_transformers_hook_auto_dtype_is_not_recorded(fake_transformers_module, monkeypatch):
+    rd.install_hooks()
+    import transformers
+
+    monkeypatch.setattr(transformers.PreTrainedModel, "__init__", lambda self, *a, **k: None)
+    transformers.PreTrainedModel.from_pretrained("m", dtype="auto")
+
+    assert "dtype" not in rd._runtime_info
+
+
 @pytest.mark.parametrize("device_map, count", [
     ({"": 0}, 1),
     (0, 1),
