@@ -1500,6 +1500,70 @@ def _segment_parallelization(segment):
     return None
 
 
+_MEGATRON_SIZE_FLAGS = (
+    ("--tensor_model_parallel_size", "tensor"),
+    ("--pipeline_model_parallel_size", "pipeline"),
+    ("--context_parallel_size", "context"),
+    ("--expert_model_parallel_size", "expert"),
+)
+
+
+def _positive(value):
+    if isinstance(value, bool):
+        return None
+    value = _try_int(value)
+    return value if value and 0 < value < 2 ** 31 else None
+
+
+def _segment_distributed(segment):
+    """World size and parallel degrees one command asks for: torchrun's
+    --nnodes/--nproc_per_node, the DeepSpeed launcher's --num_nodes/--num_gpus,
+    mpirun's -np, accelerate launch's --num_machines/--num_processes (which
+    trl passes through), Megatron's size flags and accelerate launch's
+    --zero_stage/--fsdp_* flags."""
+    tokens = [_underscore_flag(t) for t in segment]
+    launcher = _launcher_of(segment)
+    out = {}
+
+    def flag(*names):
+        return _find_flag_value(tokens, names)
+
+    nodes = local = world = None
+    if launcher == "torchrun":
+        local = _positive(flag("--nproc_per_node"))
+        # torchrun's defaults are one node, one process.
+        low, _, high = (flag("--nnodes") or "1").partition(":")
+        nodes = _positive(low) if not high or high == low else None
+    elif launcher == "deepspeed":
+        nodes, local = _positive(flag("--num_nodes")), _positive(flag("--num_gpus"))
+    elif launcher == "mpirun":
+        world = _positive(_find_flag_value(tokens, ("-np", "-n", "--np")))
+    world = world or _positive(flag("--num_processes")) or (nodes * local if nodes and local else None)
+    nodes = nodes or _positive(flag("--num_machines"))
+    if not local and world and nodes and world % nodes == 0:
+        local = world // nodes
+    # A single process says nothing about distribution.
+    if (world or 0) > 1 or (nodes or 0) > 1 or (local or 0) > 1:
+        for key, value in (("world_size", world), ("nodes", nodes), ("local_world_size", local)):
+            if value:
+                out[key] = value
+    for name, key in _MEGATRON_SIZE_FLAGS:
+        if _positive(flag(name)):
+            out[key] = _positive(flag(name))
+    zero_stage = _try_int(flag("--zero_stage"))
+    if zero_stage in (0, 1, 2, 3):
+        out["deepspeed"] = {"zero_stage": zero_stage}
+    fsdp = {}
+    if _try_int(flag("--fsdp_version")) in (1, 2):
+        fsdp["version"] = _try_int(flag("--fsdp_version"))
+    strategy = _fsdp_strategy(flag("--fsdp_sharding_strategy"))
+    if strategy:
+        fsdp["sharding_strategy"] = strategy
+    if fsdp:
+        out["fsdp"] = fsdp
+    return out
+
+
 def detect_parallelization_from_command(tokens):
     """Best-effort detection of a distributed-training parallelization
     strategy, independent of which training tool (trl, a custom script, ...)
@@ -1519,6 +1583,10 @@ def detect_parallelization_from_command(tokens):
             strategy = _segment_parallelization(seg)
             if strategy:
                 result["parallelization_strategy"] = strategy
+        if "distributed" not in result:
+            distributed = _segment_distributed(seg)
+            if distributed:
+                result["distributed"] = distributed
         if "mixed_precision" not in result:
             # accelerate launch's flag, which trl also passes through.
             mp = _find_flag_value([_underscore_flag(t) for t in seg], ("--mixed_precision",))
@@ -3276,6 +3344,169 @@ def training_precision(runtime_info):
     return block or None
 
 
+_FSDP_STRATEGY_NAMES = ("FULL_SHARD", "SHARD_GRAD_OP", "NO_SHARD", "HYBRID_SHARD", "HYBRID_SHARD_ZERO2")
+_OFFLOAD_DEVICES = ("none", "cpu", "nvme")
+_PARALLEL_SIZE_FIELDS = (
+    ("tensor", "tensor_parallel_size", "tensor_parallel"),
+    ("pipeline", "pipeline_parallel_size", "pipeline_parallel"),
+    ("context", "context_parallel_size", "context_parallel"),
+    ("expert", "expert_parallel_size", "expert_parallel"),
+)
+# DeviceMesh dim names used by accelerate's ParallelismConfig and torchtitan.
+_MESH_DIM_SIZES = {"tp": "tensor", "pp": "pipeline", "cp": "context", "ep": "expert"}
+_MESH_DATA_DIMS = ("dp", "dp_replicate", "dp_shard")
+
+
+def _fsdp_strategy(value):
+    """A sharding strategy name, or accelerate's 1-based number for one."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) or (isinstance(value, str) and value.isdigit()):
+        index = int(value)
+        return _FSDP_STRATEGY_NAMES[index - 1] if 1 <= index <= len(_FSDP_STRATEGY_NAMES) else None
+    if isinstance(value, str) and value.upper() in _FSDP_STRATEGY_NAMES:
+        return value.upper()
+    return None
+
+
+def _clean_fsdp(block):
+    if not isinstance(block, dict):
+        return None
+    out = {}
+    if block.get("version") in (1, 2) and not isinstance(block.get("version"), bool):
+        out["version"] = block["version"]
+    if _fsdp_strategy(block.get("sharding_strategy")):
+        out["sharding_strategy"] = _fsdp_strategy(block["sharding_strategy"])
+    for key in ("reshard_after_forward", "cpu_offload"):
+        if isinstance(block.get(key), bool):
+            out[key] = block[key]
+    return out
+
+
+def _clean_deepspeed(block):
+    if not isinstance(block, dict):
+        return None
+    out = {}
+    if block.get("zero_stage") in (0, 1, 2, 3) and not isinstance(block.get("zero_stage"), bool):
+        out["zero_stage"] = block["zero_stage"]
+    for key in ("offload_optimizer", "offload_param"):
+        if block.get(key) in _OFFLOAD_DEVICES:
+            out[key] = block[key]
+    return out
+
+
+def _first_block(sources, clean):
+    """The highest-ranked source's settings, with fields it lacks filled from
+    lower ones: they all describe the same FSDP or DeepSpeed setup, read at
+    different stages (the module FSDP built, the plugin, the config)."""
+    out, via = None, None
+    for block, source in sources:
+        block = clean(block)
+        if block is None:
+            continue
+        if out is None:
+            out, via = dict(block), source
+        else:
+            for key, value in block.items():
+                out.setdefault(key, value)
+    if out is not None:
+        out["declared_via"] = via
+    return out
+
+
+def training_distributed(runtime_info, dm, strategy=None):
+    """training.distributed: world size, parallel degrees and FSDP/DeepSpeed
+    settings, plus `strategies`, every kind of parallelism seen (so FSDP + TP
+    is expressible, unlike parallelization_strategy). None if nothing was seen."""
+    def block(key, sub=None):
+        value = runtime_info.get(key) if key else dm.get("distributed")
+        if sub is not None:
+            value = value.get(sub) if isinstance(value, dict) else None
+        return value if isinstance(value, dict) else None
+
+    accelerator, accelerate_config = block("accelerator_distributed"), block("accelerate_config_distributed")
+    training_args, cli = block("training_args_distributed"), block(None)
+    out = {}
+
+    for source, via in ((block("distributed_env"), "environment"), (accelerator, "accelerator"),
+                        (accelerate_config, "accelerate_config"), (cli, "cli_arg")):
+        if not source:
+            continue
+        world, nodes, local = (_positive(source.get(k)) if isinstance(source.get(k), int) else None
+                               for k in ("world_size", "nodes", "local_world_size"))
+        if not (world or nodes or local):
+            continue
+        if not local and world and nodes and world % nodes == 0:
+            local = world // nodes
+        for key, value in (("world_size", world), ("nodes", nodes), ("processes_per_node", local)):
+            if value:
+                out[key] = value
+        out["world_declared_via"] = via
+        break
+
+    sizes, sizes_via = {}, None
+    megatron, mesh = block("megatron_parallel"), block("device_mesh")
+    if megatron:
+        sizes = {k: _positive(megatron.get(k)) for k, _, _ in _PARALLEL_SIZE_FIELDS}
+        sizes_via = "megatron"
+        world = out.get("world_size")
+        split = (sizes["tensor"] or 1) * (sizes["pipeline"] or 1) * (sizes["context"] or 1)
+        if world and world % split == 0:
+            sizes["data"] = world // split
+    elif mesh:
+        dims = {str(k): _positive(v) for k, v in list(mesh.items())[:8] if _positive(v)}
+        if dims:
+            out["device_mesh"] = {k[:32]: v for k, v in dims.items()}
+            sizes = {size: dims.get(dim) for dim, size in _MESH_DIM_SIZES.items()}
+            data = [dims[d] for d in _MESH_DATA_DIMS if d in dims]
+            sizes["data"] = math.prod(data) if data else None
+            sizes_via = "device_mesh"
+    elif cli and any(_positive(cli.get(k)) for k, _, _ in _PARALLEL_SIZE_FIELDS):
+        sizes = {k: _positive(cli.get(k)) for k, _, _ in _PARALLEL_SIZE_FIELDS}
+        sizes_via = "cli_arg"
+    stages = runtime_info.get("deepspeed_pipeline_stages")
+    if not sizes.get("pipeline") and isinstance(stages, int) and _positive(stages):
+        sizes["pipeline"] = stages
+        sizes_via = sizes_via or "deepspeed_engine"
+    for key, field, _ in _PARALLEL_SIZE_FIELDS + (("data", "data_parallel_size", None),):
+        if sizes.get(key):
+            out[field] = sizes[key]
+    if sizes_via and any(sizes.values()):
+        out["parallel_sizes_declared_via"] = sizes_via
+
+    fsdp = _first_block((
+        (runtime_info.get("fsdp_module"), "fsdp_module"),
+        (block("accelerator_distributed", "fsdp"), "accelerator"),
+        (block("training_args_distributed", "fsdp"), "training_arguments"),
+        (block("accelerate_config_distributed", "fsdp"), "accelerate_config"),
+        (block(None, "fsdp"), "cli_arg"),
+    ), _clean_fsdp)
+    deepspeed = _first_block((
+        (runtime_info.get("deepspeed_engine"), "deepspeed_engine"),
+        (block("accelerator_distributed", "deepspeed"), "accelerator"),
+        (block("training_args_distributed", "deepspeed"), "training_arguments"),
+        (block("accelerate_config_distributed", "deepspeed"), "accelerate_config"),
+        (block(None, "deepspeed"), "cli_arg"),
+    ), _clean_deepspeed)
+    if fsdp:
+        out["fsdp"] = fsdp
+    if deepspeed:
+        out["deepspeed"] = deepspeed
+
+    strategies = [name for name, present in (("fsdp", fsdp), ("deepspeed", deepspeed)) if present]
+    strategies += [name for key, _, name in _PARALLEL_SIZE_FIELDS if (sizes.get(key) or 0) > 1]
+    data = sizes.get("data")
+    # FSDP and ZeRO are themselves data parallel; only plain replication is named.
+    if not fsdp and not deepspeed and ((data or 0) > 1 or (data is None and (out.get("world_size") or 0) > 1
+                                                           and len(strategies) == 0)):
+        strategies.insert(0, "data_parallel")
+    if not strategies and strategy:
+        strategies = [strategy]
+    if strategies:
+        out["strategies"] = strategies
+    return out or None
+
+
 def training_lr_scheduler(runtime_info, dm):
     """training.lr_scheduler from TrainingArguments, else the CLI. Not seen
     for a script that builds a torch.optim.lr_scheduler itself."""
@@ -3585,6 +3816,20 @@ def compile_aibom(
         mixed_precision, mixed_precision_via = training_mixed_precision(runtime_info, dm)
         optimizer_config = training_optimizer_config(runtime_info, dm)
         optimizer_settings = (optimizer_config or {}).get("params") or {}
+        parallelization_strategy = (
+            annotations.get("parallelization-strategy")
+            or runtime_info.get("parallelization_strategy")
+            or dm.get("parallelization_strategy")
+            # Lowest priority: in-script sharding (device_map) seen by the runtime hook.
+            or ("model_parallel" if (runtime_info.get("model_device_count") or 0) > 1 else None)
+        )
+        distributed = training_distributed(runtime_info, dm, parallelization_strategy)
+        if not parallelization_strategy and distributed:
+            # A raw script's FSDP/DeepSpeed/Megatron setup, with no CLI signal.
+            first = (distributed.get("strategies") or [None])[0]
+            parallelization_strategy = (
+                first if first in ("data_parallel", "fsdp", "deepspeed") else "model_parallel" if first else None
+            )
         aibom["training"] = {
             "optimizer": (
                 annotations.get("optimizer")
@@ -3622,13 +3867,8 @@ def compile_aibom(
             "mixed_precision": mixed_precision,
             "mixed_precision_declared_via": mixed_precision_via,
             "precision": training_precision(runtime_info),
-            "parallelization_strategy": (
-                annotations.get("parallelization-strategy")
-                or runtime_info.get("parallelization_strategy")
-                or dm.get("parallelization_strategy")
-                # Lowest priority: in-script sharding (device_map) seen by the runtime hook.
-                or ("model_parallel" if (runtime_info.get("model_device_count") or 0) > 1 else None)
-            ),
+            "parallelization_strategy": parallelization_strategy,
+            "distributed": distributed,
         }
 
     # Fine-tuning config
