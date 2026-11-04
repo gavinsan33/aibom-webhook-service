@@ -1,0 +1,76 @@
+# FSDP2 across 3 GPUs: the same LoRA SFT as granite-lora-finetune-fsdp.yaml
+# (FSDP1 on 2 GPUs), with `fsdp_version: 2` and an odd world size. Exercises
+# training.distributed's FSDP2 path (reshard_after_forward, version 2, via
+# fully_shard) and a world size that isn't a power of two.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: aibom-granite-lora-finetune-fsdp-3gpu
+  namespace: project-gavin-test
+  annotations:
+    aibom.io/experiment-intent: sft
+    aibom.io/experiment-name: granite-lora-sft-fsdp2-3gpu-benchmark
+
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: finetune
+          image: nvcr.io/nvidia/pytorch:26.03-py3
+          command:
+            - sh
+            - -c
+            - |
+              pip install --no-cache-dir -U trl peft datasets accelerate && \
+              export PATH="$HOME/.local/bin:$PATH" && \
+              cat > /tmp/my_fsdp_config.yaml <<'EOF'
+              distributed_type: FSDP
+              fsdp_config:
+                fsdp_version: 2
+                fsdp_reshard_after_forward: true
+                fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP
+                fsdp_cpu_ram_efficient_loading: true
+              num_processes: 3
+              EOF
+              trl sft \
+                --model_name_or_path ibm-granite/granite-3.3-2b-instruct \
+                --dtype bfloat16 \
+                --dataset_name tatsu-lab/alpaca \
+                --dataset_text_field text \
+                --output_dir /tmp/output \
+                --use_peft true \
+                --lora_r 16 \
+                --lora_alpha 32 \
+                --lora_dropout 0.05 \
+                --lora_target_modules q_proj k_proj v_proj o_proj \
+                --per_device_train_batch_size 4 \
+                --gradient_accumulation_steps 4 \
+                --learning_rate 2e-4 \
+                --num_train_epochs 1 \
+                --max_steps 50 \
+                --logging_steps 5 \
+                --bf16 true \
+                --accelerate_config /tmp/my_fsdp_config.yaml \
+                --report_to none
+          env:
+            - name: HOME
+              value: /tmp
+            - name: AIBOM_DEBUG
+              value: "1"
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: HF_TOKEN
+                  optional: true
+          resources:
+            requests:
+              memory: 8Gi
+              nvidia.com/gpu: "3"
+            limits:
+              memory: 20Gi
+              nvidia.com/gpu: "3"
