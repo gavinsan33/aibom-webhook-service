@@ -174,3 +174,30 @@ func findInitContainer(patches []PatchOperation, name string) *corev1.Container 
 	}
 	return nil
 }
+
+// A PyTorchJob worker is postprocessed by the watcher's pod path, under its
+// own pod name, so it must not be pointed at a ConfigMap or identity named
+// after the PyTorchJob (#105).
+func TestMutate_PyTorchJobPod_UsesPodNamedTrigger(t *testing.T) {
+	m, clientset := newTestMutatorWithClientset()
+	patches, err := m.Mutate(podWithOwner("PyTorchJob"), "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if src := findVolume(patches, "aibom-token").VolumeSource.Projected.Sources[0]; src.ServiceAccountToken == nil {
+		t.Error("expected the shared-token fallback, not a per-job identity")
+	}
+	if _, err := clientset.CoreV1().ServiceAccounts("default").Get(t.Context(), aibomdata.WorkloadIdentityName("test-job"), metav1.GetOptions{}); err == nil {
+		t.Error("no identity should be provisioned under the PyTorchJob's name")
+	}
+	for _, p := range patches {
+		if p.Path != "/spec/initContainers" {
+			continue
+		}
+		for _, env := range p.Value.([]corev1.Container)[0].Env {
+			if env.Name == "AIBOM_DATA_CONFIGMAP" {
+				t.Errorf("AIBOM_DATA_CONFIGMAP = %q, want it unset so the pod name is used", env.Value)
+			}
+		}
+	}
+}

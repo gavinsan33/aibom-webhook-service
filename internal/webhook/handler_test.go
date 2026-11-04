@@ -123,10 +123,11 @@ func TestShouldMutate_JobOwner(t *testing.T) {
 	}
 }
 
-func TestShouldMutate_JobSetOwner(t *testing.T) {
+// JobSet never owns a pod directly, so it isn't an owner kind (#105).
+func TestShouldMutate_JobSetOwner_NotMatched(t *testing.T) {
 	m := newTestMutator()
-	if !m.shouldMutate(podWithOwner("JobSet"), "") {
-		t.Error("expected pod with JobSet owner to match")
+	if m.shouldMutate(podWithOwner("JobSet"), "") {
+		t.Error("a CPU-only pod with a JobSet owner should not match")
 	}
 }
 
@@ -137,10 +138,11 @@ func TestShouldMutate_PyTorchJobOwner(t *testing.T) {
 	}
 }
 
-func TestShouldMutate_RayJobOwner(t *testing.T) {
+// RayJob never owns a pod directly, so it isn't an owner kind (#105).
+func TestShouldMutate_RayJobOwner_NotMatched(t *testing.T) {
 	m := newTestMutator()
-	if !m.shouldMutate(podWithOwner("RayJob"), "") {
-		t.Error("expected pod with RayJob owner to match")
+	if m.shouldMutate(podWithOwner("RayJob"), "") {
+		t.Error("a CPU-only pod with a RayJob owner should not match")
 	}
 }
 
