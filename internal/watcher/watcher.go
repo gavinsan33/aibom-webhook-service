@@ -183,13 +183,19 @@ func New(clientset kubernetes.Interface, cfg Config) *Watcher {
 	w.factory.Batch().V1().Jobs().Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    w.onJobEvent,
 		UpdateFunc: func(_, newObj interface{}) { w.onJobEvent(newObj) },
-		DeleteFunc: w.onJobEvent,
+		DeleteFunc: func(obj interface{}) {
+			w.onJobEvent(obj)
+			w.onJobDeleted(obj)
+		},
 	})
 
 	w.podFactory.Core().V1().Pods().Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    w.onPodEvent,
 		UpdateFunc: func(_, newObj interface{}) { w.onPodEvent(newObj) },
-		DeleteFunc: w.onPodEvent,
+		DeleteFunc: func(obj interface{}) {
+			w.onPodEvent(obj)
+			w.onPodDeleted(obj)
+		},
 	})
 
 	// Ensure the namespace informer is created so it syncs with the factory.
@@ -1588,6 +1594,56 @@ func (w *Watcher) triggerReplaced(ppJob *batchv1.Job, namespace, name string) bo
 		return false
 	}
 	return string(current.GetUID()) != uid
+}
+
+// onJobDeleted removes the data ConfigMap and identity of a Job that was never
+// postprocessed (#105). Every instrumented Job pod writes one, qualifying or
+// not; collectAIBOM only cleans up after a postprocess. Waiting for the
+// Job's deletion, rather than its completion, keeps a non-qualifying JobSet
+// sibling's data readable for the sibling that does qualify.
+func (w *Watcher) onJobDeleted(obj interface{}) {
+	job, ok := obj.(*batchv1.Job)
+	if !ok {
+		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
+		if !ok {
+			return
+		}
+		if job, ok = tombstone.Obj.(*batchv1.Job); !ok {
+			return
+		}
+	}
+	if job.Labels[LabelPostprocessFor] != "" || job.Annotations[AnnotationPostprocess] != "" || !w.isNamespaceEnabled(job.Namespace) {
+		return
+	}
+	// A same-named rerun shares the names, and its pods may already be writing.
+	if current, err := w.factory.Batch().V1().Jobs().Lister().Jobs(job.Namespace).Get(job.Name); err == nil && current.UID != job.UID {
+		return
+	}
+	w.deleteWorkloadDataConfigMap(context.TODO(), job.Namespace, job.Name)
+	w.deleteWorkloadIdentity(context.TODO(), job.Namespace, job.Name)
+}
+
+// onPodDeleted is onJobDeleted for pods the pod path owns. They have no
+// per-job identity (the webhook only provisions one for Job pods).
+func (w *Watcher) onPodDeleted(obj interface{}) {
+	pod, ok := obj.(*corev1.Pod)
+	if !ok {
+		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
+		if !ok {
+			return
+		}
+		if pod, ok = tombstone.Obj.(*corev1.Pod); !ok {
+			return
+		}
+	}
+	if pod.Labels["batch.kubernetes.io/job-name"] != "" || pod.Labels[LabelInstrumented] != "true" ||
+		pod.Annotations[AnnotationPostprocess] != "" || !w.isNamespaceEnabled(pod.Namespace) {
+		return
+	}
+	if current, err := w.podFactory.Core().V1().Pods().Lister().Pods(pod.Namespace).Get(pod.Name); err == nil && current.UID != pod.UID {
+		return
+	}
+	w.deleteWorkloadDataConfigMap(context.TODO(), pod.Namespace, pod.Name)
 }
 
 func (w *Watcher) deleteWorkloadDataConfigMap(ctx context.Context, namespace, triggerName string) {
