@@ -2769,3 +2769,63 @@ func TestOnPodEvent_FinishedPodIsPostprocessed(t *testing.T) {
 		t.Error("finished pod should be annotated as postprocessed")
 	}
 }
+
+// #105: a Job deleted without ever being postprocessed (it didn't qualify)
+// leaves no data ConfigMap or identity behind.
+func TestOnJobDeleted_CleansUpNeverPostprocessedJob(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	job := completedJob("cpu-job", "test-ns")
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: aibomdata.ConfigMapName("cpu-job"), Namespace: "test-ns"}}
+	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: aibomdata.WorkloadIdentityName("cpu-job"), Namespace: "test-ns"}}
+	client := fake.NewSimpleClientset(ns, cm, sa)
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "aibom-postprocess:latest"})
+	startWatcher(t, w)
+
+	w.onJobDeleted(job)
+
+	if _, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), cm.Name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("data configmap should be deleted, got err=%v", err)
+	}
+	if _, err := client.CoreV1().ServiceAccounts("test-ns").Get(context.TODO(), sa.Name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("workload identity should be deleted, got err=%v", err)
+	}
+}
+
+func TestOnJobDeleted_LeavesPostprocessedJobAndReruns(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	postprocessed := completedJob("done-job", "test-ns")
+	postprocessed.Annotations = map[string]string{AnnotationPostprocess: "pp"}
+	old := completedJob("rerun-job", "test-ns")
+	old.UID = "first-run"
+	rerun := completedJob("rerun-job", "test-ns")
+	rerun.UID = "second-run"
+	doneCM := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: aibomdata.ConfigMapName("done-job"), Namespace: "test-ns"}}
+	rerunCM := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: aibomdata.ConfigMapName("rerun-job"), Namespace: "test-ns"}}
+	client := fake.NewSimpleClientset(ns, rerun, doneCM, rerunCM)
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "aibom-postprocess:latest"})
+	startWatcher(t, w)
+
+	w.onJobDeleted(postprocessed)
+	w.onJobDeleted(old)
+
+	for _, name := range []string{doneCM.Name, rerunCM.Name} {
+		if _, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), name, metav1.GetOptions{}); err != nil {
+			t.Errorf("%s should be left in place, got err=%v", name, err)
+		}
+	}
+}
+
+func TestOnPodDeleted_CleansUpNeverPostprocessedPod(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	pod := instrumentedBarePod("cpu-pod", "test-ns")
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: aibomdata.ConfigMapName("cpu-pod"), Namespace: "test-ns"}}
+	client := fake.NewSimpleClientset(ns, cm)
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "aibom-postprocess:latest"})
+	startWatcher(t, w)
+
+	w.onPodDeleted(pod)
+
+	if _, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), cm.Name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("data configmap should be deleted, got err=%v", err)
+	}
+}
