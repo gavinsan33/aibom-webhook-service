@@ -2695,3 +2695,24 @@ func TestBuildPostprocessInputs_ReadsSiblingFromItsOwnJobsConfigMap(t *testing.T
 		t.Errorf("discoveries = %v, want %v", discoveries, want)
 	}
 }
+
+// A pod-path pod that finishes (a PyTorchJob worker, a bare GPU pod run to
+// completion) is postprocessed then, not only once it's deleted.
+func TestOnPodEvent_FinishedPodIsPostprocessed(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	pod := instrumentedBarePod("trainer-master-0", "test-ns")
+	pod.Status.Phase = corev1.PodSucceeded
+	client := fake.NewSimpleClientset(ns, pod)
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "aibom-postprocess:latest"})
+	startWatcher(t, w)
+
+	w.onPodEvent(pod)
+
+	if _, err := client.BatchV1().Jobs("aibom-system").Get(context.TODO(), ppName("test-ns", pod.Name), metav1.GetOptions{}); err != nil {
+		t.Fatalf("postprocess job not created for a finished pod: %v", err)
+	}
+	updated, _ := client.CoreV1().Pods("test-ns").Get(context.TODO(), pod.Name, metav1.GetOptions{})
+	if updated.Annotations[AnnotationPostprocess] == "" {
+		t.Error("finished pod should be annotated as postprocessed")
+	}
+}

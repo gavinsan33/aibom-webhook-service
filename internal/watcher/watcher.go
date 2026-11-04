@@ -356,9 +356,11 @@ func (w *Watcher) releaseJobPods(ctx context.Context, job *batchv1.Job) {
 	}
 }
 
-// onPodEvent is the Pod-level equivalent of onJobEvent, for bare/ReplicaSet-owned pods
-// (e.g. KServe InferenceService predictors) that have no owning Job to hang a finalizer
-// on. These pods never "complete" — the only postprocessing trigger is deletion.
+// onPodEvent is the Pod-level equivalent of onJobEvent, for pods with no owning
+// Job to hang a finalizer on: bare/ReplicaSet-owned pods (e.g. KServe
+// InferenceService predictors) and PyTorchJob workers. Postprocessing triggers
+// when the pod reaches a terminal phase or is deleted; a long-running server
+// pod never finishes, so for it that's deletion.
 func (w *Watcher) onPodEvent(obj interface{}) {
 	pod, ok := obj.(*corev1.Pod)
 	if !ok {
@@ -405,7 +407,8 @@ func (w *Watcher) onPodEvent(obj interface{}) {
 		return
 	}
 
-	if pod.DeletionTimestamp == nil {
+	deleting := pod.DeletionTimestamp != nil
+	if !deleting && !podFinished(pod) {
 		// Path A: pod is running — add finalizer if it qualifies
 		if hasPodFinalizer(pod) {
 			return
@@ -419,7 +422,9 @@ func (w *Watcher) onPodEvent(obj interface{}) {
 		return
 	}
 
-	// Path B: pod is being deleted — run postprocessing
+	// Path B: pod finished or is being deleted — run postprocessing. A
+	// finished pod is still there to read, so like a finished Job it doesn't
+	// need the finalizer.
 	if pod.Annotations != nil && pod.Annotations[AnnotationPostprocess] != "" {
 		if hasPodFinalizer(pod) {
 			w.removePodFinalizer(context.TODO(), pod)
@@ -427,7 +432,7 @@ func (w *Watcher) onPodEvent(obj interface{}) {
 		return
 	}
 
-	if !hasPodFinalizer(pod) {
+	if deleting && !hasPodFinalizer(pod) {
 		// Never qualified while running (or missed the add event) — nothing to do.
 		return
 	}
@@ -468,6 +473,10 @@ func (w *Watcher) shouldPostprocess(job *batchv1.Job) bool {
 		return false
 	}
 	return podsRequestGPU(pods) || len(collectAIBOMAnnotations(job.Annotations)) > 0
+}
+
+func podFinished(pod *corev1.Pod) bool {
+	return pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed
 }
 
 func shouldPostprocessPod(pod *corev1.Pod) bool {
