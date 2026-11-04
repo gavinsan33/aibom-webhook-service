@@ -994,13 +994,32 @@ func mergeDatasets(datasets []string) string {
 // Job name to its terminal condition (see terminalCondition) so each pod's
 // containers can be tagged with how the Job that owns them ended; nil for a
 // bare pod.
+//
+// Each pod's data is read from its own Job's ConfigMap, the one the webhook
+// pointed it at (#105): a JobSet sibling writes to its own child Job's, not
+// the triggering Job's. Bare pods, and Job pods of the trigger itself, use
+// configMapName.
 func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configMapName string, pods []corev1.Pod, jobResults map[string]batchv1.JobCondition) (discoveries, datasets []string, containersJSON, storageJSON string) {
-	dataCM, err := w.clientset.CoreV1().ConfigMaps(namespace).Get(ctx, configMapName, metav1.GetOptions{})
-	if err != nil {
-		if !errors.IsNotFound(err) {
-			log.Printf("warning: could not read data configmap %s/%s: %v", namespace, configMapName, err)
+	dataCMs := map[string]*corev1.ConfigMap{}
+	dataCMFor := func(pod *corev1.Pod) *corev1.ConfigMap {
+		name := configMapName
+		if job := pod.Labels["batch.kubernetes.io/job-name"]; job != "" {
+			name = aibomdata.ConfigMapName(job)
 		}
-		dataCM = nil
+		if cm, ok := dataCMs[name]; ok {
+			return cm
+		}
+		cm, err := w.clientset.CoreV1().ConfigMaps(namespace).Get(ctx, name, metav1.GetOptions{})
+		switch {
+		case errors.IsNotFound(err):
+			log.Printf("no data configmap %s/%s; pods writing to it contribute no discovery or dataset data", namespace, name)
+			cm = nil
+		case err != nil:
+			log.Printf("warning: could not read data configmap %s/%s: %v", namespace, name, err)
+			cm = nil
+		}
+		dataCMs[name] = cm
+		return cm
 	}
 
 	signingKey, err := w.fetchDiscoverySigningKey(ctx, namespace)
@@ -1014,7 +1033,7 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 
 	dsByPod := make(map[string]string, len(pods))
 	for _, pod := range pods {
-		disc, discSig, ds, dsSig, storage, storageSig := extractDataFromPod(&pod, dataCM)
+		disc, discSig, ds, dsSig, storage, storageSig := extractDataFromPod(&pod, dataCMFor(&pod))
 		if disc != "" && signingKey != nil && !verifySignature(signingKey, disc, discSig) {
 			log.Printf("warning: dropping unverified discovery data for pod %s/%s (missing or invalid signature)", namespace, pod.Name)
 			disc = ""
