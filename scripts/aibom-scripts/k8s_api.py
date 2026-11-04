@@ -162,11 +162,11 @@ def _postprocess_job_name(trigger_name):
 def resolve_data_configmap_name():
     """Returns the data ConfigMap name discovery/dataset scripts should write
     into. Prefers the webhook-injected AIBOM_DATA_CONFIGMAP env var, which is
-    reliable for Job/JobSet/PyTorchJob/RayJob-owned pods (their trigger name
+    reliable for Job-owned pods, JobSet pods included (their trigger name
     comes from ownerReferences, already set before admission).
 
-    Falls back to deriving it from POD_NAME for bare/ReplicaSet-owned pods
-    (e.g. KServe predictors): their own pod name isn't assigned yet when the
+    Falls back to deriving it from POD_NAME for every other pod
+    (KServe predictors, PyTorchJob workers): a pod name isn't assigned yet when the
     mutating webhook runs (the API server hasn't resolved generateName to a
     real name at that point), so the webhook can't bake in a static value for
     them — see mutator.go's dataConfigMapEnvVar. POD_NAME, a downward API

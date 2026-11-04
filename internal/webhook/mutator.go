@@ -19,11 +19,12 @@ import (
 // hanging apiserver call here must not indefinitely delay pod admission.
 const workloadIdentityProvisionTimeout = 5 * time.Second
 
+// matchedOwnerKinds are the owners whose pods are instrumented with or without
+// a GPU request. JobSet and RayJob never own a pod directly (JobSet pods are
+// owned by its Jobs, KubeRay pods by a RayCluster), so they aren't listed.
 var matchedOwnerKinds = map[string]bool{
 	"Job":        true,
-	"JobSet":     true,
 	"PyTorchJob": true,
-	"RayJob":     true,
 }
 
 type Mutator struct {
@@ -267,14 +268,19 @@ func (m *Mutator) isPostprocessPod(pod *corev1.Pod, requesterUsername string) bo
 
 // hasJobOwner reports whether pod has a plain batch/v1 Job in its
 // ownerReferences — narrower than hasMatchingOwner, which also matches
-// JobSet/PyTorchJob/RayJob; postprocess Jobs are always plain Jobs.
+// PyTorchJob; postprocess Jobs are always plain Jobs.
 func hasJobOwner(pod *corev1.Pod) bool {
+	return jobOwnerName(pod) != ""
+}
+
+// jobOwnerName is the name of pod's batch/v1 Job owner, "" if it has none.
+func jobOwnerName(pod *corev1.Pod) string {
 	for _, ref := range pod.OwnerReferences {
 		if ref.Kind == "Job" {
-			return true
+			return ref.Name
 		}
 	}
-	return false
+	return ""
 }
 
 // stripSpoofedInstrumentationClaims returns JSON patches removing any
@@ -312,9 +318,8 @@ func hasMatchingOwner(pod *corev1.Pod) bool {
 // ensurePodWorkloadIdentity provisions a per-job identity for pod (see
 // identity.go's ensureWorkloadIdentity) and returns the Secret name to
 // mount as this pod's token, or "" if that isn't applicable -- no
-// Clientset configured, or the pod has no owner whose name is known at
-// admission time (see dataConfigMapEnvVar's doc comment: a bare pod's own
-// name doesn't exist yet when it's created via generateName) -- or
+// Clientset configured, or the pod has no Job owner (see
+// dataConfigMapEnvVar's doc comment) -- or
 // provisioning failed. Any failure here is logged and swallowed, never
 // returned as a Mutate error: this service fails open (failurePolicy:
 // Ignore), and a Kubernetes API hiccup while provisioning RBAC must not
@@ -323,7 +328,7 @@ func (m *Mutator) ensurePodWorkloadIdentity(pod *corev1.Pod) string {
 	if m.Clientset == nil {
 		return ""
 	}
-	if !hasMatchingOwner(pod) {
+	if !hasJobOwner(pod) {
 		return ""
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), workloadIdentityProvisionTimeout)
@@ -341,23 +346,23 @@ func (m *Mutator) ensurePodWorkloadIdentity(pod *corev1.Pod) string {
 
 // triggerName returns the identity the watcher will later use to name the
 // postprocess Job/data ConfigMap for this pod: the owning Job's name for
-// Job/JobSet/PyTorchJob/RayJob-owned pods, or the pod's own name for bare
-// GPU pods (e.g. KServe predictors) — mirroring watcher.go's onJobEvent
-// (Job path) and onPodEvent (bare pod path).
+// Job-owned pods (JobSet pods included, through their child Job), or the
+// pod's own name for everything else (KServe predictors, PyTorchJob workers)
+// — mirroring watcher.go's onJobEvent (Job path) and onPodEvent (pod path).
+// A PyTorchJob is not a trigger of its own: the watcher only sees its pods,
+// which carry no batch.kubernetes.io/job-name label (#105).
 func triggerName(pod *corev1.Pod) string {
-	for _, ref := range pod.OwnerReferences {
-		if matchedOwnerKinds[ref.Kind] {
-			return ref.Name
-		}
+	if name := jobOwnerName(pod); name != "" {
+		return name
 	}
 	return pod.Name
 }
 
 // dataConfigMapEnvVar returns the static AIBOM_DATA_CONFIGMAP env var, but
 // only when triggerName(pod) is reliably known at admission time — i.e. the
-// pod has a matching owner (its name comes from ownerReferences, already set
-// before admission). For a bare/ReplicaSet-owned pod with no such owner
-// (e.g. a KServe predictor), triggerName falls back to pod.Name, which is
+// pod has a Job owner (its name comes from ownerReferences, already set
+// before admission). For any other pod (e.g. a KServe predictor),
+// triggerName falls back to pod.Name, which is
 // EMPTY at this point for any pod created via generateName — the API server
 // hasn't assigned the real name yet when this webhook runs. Baking in
 // aibomdata.ConfigMapName("") here would silently point every write at a
@@ -366,7 +371,7 @@ func triggerName(pod *corev1.Pod) string {
 // derives the same name at runtime from POD_NAME (a downward API value,
 // resolved by the kubelet after the real name exists).
 func dataConfigMapEnvVar(pod *corev1.Pod) (corev1.EnvVar, bool) {
-	if !hasMatchingOwner(pod) {
+	if !hasJobOwner(pod) {
 		return corev1.EnvVar{}, false
 	}
 	return corev1.EnvVar{Name: "AIBOM_DATA_CONFIGMAP", Value: aibomdata.ConfigMapName(triggerName(pod))}, true
@@ -400,8 +405,8 @@ func (m *Mutator) buildDiscoveryInitContainer(pod *corev1.Pod) corev1.Container 
 	// Only pods KServe itself already labeled as a predictor get this one —
 	// a single-field label downward API reference fails pod admission
 	// outright if the referenced label isn't present on the pod, so this
-	// can't be added unconditionally for every workload kind (Job/JobSet/
-	// PyTorchJob/RayJob pods have no such label).
+	// can't be added unconditionally for every workload kind (Job and
+	// PyTorchJob pods have no such label).
 	if pod.Labels[aibomdata.LabelKServeInferenceService] != "" {
 		env = append(env, downwardAPIEnv(
 			"INFERENCESERVICE_NAME",
