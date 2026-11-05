@@ -650,7 +650,7 @@ def _merge_output(existing, data, info):
     last-writer-wins per key, except the git_* keys, which are one
     observation of one checkout: a process that captured any replaces the
     whole group, so a commit from one working tree is never labelled with the
-    branch (or dirty flag) of another (#107), and software_versions, whose
+    branch (or dirty flag) of another, and software_versions, whose
     package lists are unioned."""
     existing_ds = existing.get("datasets", [])
     by_key = {_dataset_identity(e): e for e in existing_ds}

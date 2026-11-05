@@ -177,7 +177,7 @@ func findInitContainer(patches []PatchOperation, name string) *corev1.Container 
 
 // A PyTorchJob worker is postprocessed by the watcher's pod path, under its
 // own pod name, so it must not be pointed at a ConfigMap or identity named
-// after the PyTorchJob (#105).
+// after the PyTorchJob.
 func TestMutate_PyTorchJobPod_UsesPodNamedTrigger(t *testing.T) {
 	m, clientset := newTestMutatorWithClientset()
 	patches, err := m.Mutate(podWithOwner("PyTorchJob"), "")

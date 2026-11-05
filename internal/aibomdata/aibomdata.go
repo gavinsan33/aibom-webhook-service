@@ -30,7 +30,7 @@ const (
 	// PodFinalizerName holds an instrumented pod until the watcher has read it.
 	// The watcher adds it to bare pods (KServe predictors); the webhook adds
 	// it to Job-owned pods at admission, since a Job's controller deletes its
-	// pods on activeDeadlineSeconds before marking the Job Failed (#164).
+	// pods on activeDeadlineSeconds before marking the Job Failed.
 	PodFinalizerName = "aibom.io/log-extraction-pod"
 
 	// LabelKServeInferenceService is the label KServe applies to every predictor
