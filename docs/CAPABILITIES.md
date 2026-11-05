@@ -134,12 +134,15 @@ Every `dataset.auto_detected[]` entry gets `matches_declared` — whether its na
 
 | Hook | Captures |
 |---|---|
-| `transformers.TrainingArguments.__post_init__` | learning rate, batch size, epochs, optimizer, random seed, `data_seed` and `full_determinism` (→ `training.determinism`), `training.mixed_precision` (`bf16`/`fp16` flags; not the weights' dtype) |
+| `transformers.TrainingArguments.__post_init__` | learning rate, batch size, epochs, optimizer, `adam_beta1`/`adam_beta2`/`adam_epsilon`/`weight_decay`/`optim_args` (→ `training.optimizer_config`), `lr_scheduler_type`/`warmup_ratio`/`warmup_steps` (→ `training.lr_scheduler`), random seed, `data_seed` and `full_determinism` (→ `training.determinism`), `training.mixed_precision` (`bf16`/`fp16` flags; not the weights' dtype) |
 | `transformers.PreTrainedModel.from_pretrained` | model name, `device_map` and how many accelerators it resolved to, architecture (`config.architectures[0]`), dtype, quantization method (bitsandbytes/GPTQ/AWQ/HQQ/AQLM class-name or flag detection), quantization bit width. Only the process's **first** model load is recorded, so a DPO reference, reward or teacher model loaded afterwards doesn't replace the trained model; one loaded *before* it still would |
 | `peft.LoraConfig.__init__` | LoRA rank, LoRA alpha, adaptation method (`dora`/`rslora`/`lora`; `lora` becomes `qlora` when the runtime hooks also saw a quantized base model, in either order) |
+| `torch.optim.Optimizer.__init__` | the first optimizer the process constructs (Trainer's, DeepSpeed's, bitsandbytes' or the script's own): its class and the hyperparameters it actually ran with → `training.optimizer_config`. Fills `training.optimizer` and `training.learning_rate` when nothing else did |
 | `random.seed`, `numpy.random.seed`, `torch.manual_seed` (and `torch.random.manual_seed`) | each generator's seed → `training.determinism.seeds.{python,numpy,torch}`, the most recent explicit value; `training.determinism.seed_history` lists the distinct values when a generator was seeded with more than one |
 
 **Determinism** (`training.determinism`, #175). Besides the seeds above, these are read when the process flushes, if it did training work (seeded a generator, built a `DataLoader` or `TrainingArguments`): `torch.backends.cudnn.deterministic`/`.benchmark` (→ `cudnn_deterministic`/`cudnn_benchmark`), `torch.are_deterministic_algorithms_enabled()` (→ `deterministic_algorithms`, plus `deterministic_algorithms_warn_only` when set), `CUBLAS_WORKSPACE_CONFIG` (→ `cublas_workspace_config`) and the `PYTHONHASHSEED` the interpreter started with (→ `python_hash_seed`). `transformers.enable_full_determinism` sets the torch flags and the env var, so they are captured too. The block is `null` when none of this was seen. When every generator's seed agrees, that value also fills `training.random_seed` if nothing else did.
+
+**Optimizer and scheduler** (`training.optimizer_config`, `training.lr_scheduler`, #176). `optimizer_config` comes from one source, never mixed, recorded in `declared_via`: the constructed optimizer (`runtime_optimizer`, with its `class`), else TrainingArguments (`training_arguments`), else CLI flags (`cli_arg`). Settings use torch's names (`lr`, `betas`, `eps`, `weight_decay`, `momentum`, `fused`, ...). The constructed optimizer's are read from its param groups, since Trainer sets `weight_decay` per group (0 for biases and norm weights) instead of passing it to the constructor: `params` holds what every group shares, and `param_groups` each group's differing settings with its `param_tensors` count. TrainingArguments' and the CLI's `optim_args` string is kept as `optim_args`. `training.optimizer` stays the name string: the annotation, TrainingArguments' `optim`, the CLI's, else the constructed class (`torch.optim.sgd.SGD`). `lr_scheduler` has `type`, `warmup_ratio` and `warmup_steps` from TrainingArguments, else the CLI; on transformers 5, which dropped `warmup_ratio`, a fractional `warmup_steps` is the ratio. Not captured: a second optimizer in the same process, and schedulers a script builds itself (`torch.optim.lr_scheduler.*`).
 
 Some seeds are ignored on purpose: the ones torch sets inside `DataLoader` workers (including `worker_init_fn`, e.g. transformers' `seed_worker`), and any set on ranks other than `RANK=0`, which differ by design under accelerate's `set_seed(device_specific=True)`. Not captured: local generators (`numpy.random.default_rng`, `RandomState`, `torch.Generator`) and `torch.cuda.manual_seed*` called on its own.
 
@@ -177,13 +180,16 @@ Also surfaced as `inference.served_model_name`, `max_num_seqs`, `seed`, `trust_r
 | `--per_device_train_batch_size` | `training.batch_size` |
 | `--num_train_epochs` | `training.epochs` |
 | `--seed` | `training.random_seed` |
+| `--optim` | `training.optimizer` |
+| `--adam_beta1`, `--adam_beta2`, `--adam_epsilon`, `--weight_decay`, `--optim_args` | `training.optimizer_config` |
+| `--lr_scheduler_type`, `--warmup_ratio`, `--warmup_steps` | `training.lr_scheduler` |
 
 *Axolotl* (`axolotl train <config> [overrides]`, modern kebab-case or legacy `-m axolotl.cli.train` snake-case) and *LLaMA-Factory* (`llamafactory-cli train`) are detected the same way, setting `training_framework` and the model/LoRA/training fields under the same names as trl. Both are config-file driven and **the YAML is not read** (same limit as `trl --config`): Axolotl reports only CLI overrides, LLaMA-Factory only flag-mode values; a pure config-file run still reports `training_framework` and an intent, nothing more.
 
 | Tool | Model flag | Adapter → `fine_tuning.adaptation_method` | Other flags |
 |---|---|---|---|
-| Axolotl | `--base-model` / `--base_model` | `--adapter` (`qlora`, or `lora` + `--load-in-4bit` → `qlora`) | `--lora-r`, `--lora-alpha`, `--learning-rate`, `--micro-batch-size`, `--num-epochs`, `--seed` |
-| LLaMA-Factory | `--model_name_or_path` | `--finetuning_type lora` (+ `--quantization_bit` → `qlora`, `--use_dora` → `dora`, `--use_rslora` → `rslora`; `full`/`freeze` → none) | `--lora_rank`, `--lora_alpha`, `--learning_rate`, `--per_device_train_batch_size`, `--num_train_epochs`, `--seed` |
+| Axolotl | `--base-model` / `--base_model` | `--adapter` (`qlora`, or `lora` + `--load-in-4bit` → `qlora`) | `--lora-r`, `--lora-alpha`, `--learning-rate`, `--micro-batch-size`, `--num-epochs`, `--seed`, `--optimizer`, `--adam-beta1`/`-beta2`/`-epsilon`, `--weight-decay`, `--lr-scheduler`, `--warmup-steps`/`-ratio` |
+| LLaMA-Factory | `--model_name_or_path` | `--finetuning_type lora` (+ `--quantization_bit` → `qlora`, `--use_dora` → `dora`, `--use_rslora` → `rslora`; `full`/`freeze` → none) | `--lora_rank`, `--lora_alpha`, `--learning_rate`, `--per_device_train_batch_size`, `--num_train_epochs`, `--seed`, and trl's optimizer/scheduler flags |
 
 LLaMA-Factory's `--dataset` is not parsed as the declared dataset name (comma-separated, keyed to `dataset_info.json`); runtime detection and `aibom.io/dataset-*` annotations still apply.
 
@@ -306,7 +312,6 @@ These are explicit non-goals, not gaps waiting to close:
 
 Gaps that are open issues rather than non-goals:
 
-- Optimizer parameters beyond the name: betas, epsilon, weight decay, scheduler (#176).
 - DataLoader shuffle, sampler type and `drop_last` (#177).
 - Training TP/PP/EP degrees, world size, ZeRO stage, FSDP sharding strategy (#178).
 - Beam search and generation parameters beyond temperature/top_p/top_k (#179).
