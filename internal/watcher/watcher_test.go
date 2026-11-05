@@ -2507,7 +2507,7 @@ func TestCreatePostprocessJob_WaitsForEarlierRunsPostprocessJob(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Job pods held by the webhook's pod finalizer (#164)
+// Job pods held by the webhook's pod finalizer
 // ---------------------------------------------------------------------------
 
 func heldPod(jobName, namespace string, deleting bool) *corev1.Pod {
@@ -2678,7 +2678,7 @@ func TestRunningJobPod_KeepsPodFinalizer(t *testing.T) {
 	}
 }
 
-// #105: a JobSet sibling writes to its own child Job's data ConfigMap, so
+// A JobSet sibling writes to its own child Job's data ConfigMap, so
 // that's where its discovery data has to be read from.
 func TestBuildPostprocessInputs_ReadsSiblingFromItsOwnJobsConfigMap(t *testing.T) {
 	server := instrumentedPod("server", "ns")
@@ -2717,7 +2717,7 @@ func TestOnPodEvent_FinishedPodIsPostprocessed(t *testing.T) {
 	}
 }
 
-// #105: a Job deleted without ever being postprocessed (it didn't qualify)
+// A Job deleted without ever being postprocessed (it didn't qualify)
 // leaves no data ConfigMap or identity behind.
 func TestOnJobDeleted_CleansUpNeverPostprocessedJob(t *testing.T) {
 	ns := enabledNamespace("test-ns")

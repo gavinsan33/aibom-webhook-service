@@ -343,7 +343,7 @@ func (w *Watcher) finishJob(ctx context.Context, job *batchv1.Job) {
 }
 
 // releaseJobPods removes the finalizer the webhook puts on a Job's pods at
-// admission (#164). It reads the informer cache, so it's cheap enough to run
+// admission. It reads the informer cache, so it's cheap enough to run
 // on every resync of a finished Job, which is what retries a failed removal.
 // Pods are matched by the Job's UID too, so an earlier run's Job being
 // cleaned up doesn't release a same-named rerun's pods.
@@ -980,7 +980,7 @@ func mergeDatasets(datasets []string) string {
 // bare pod.
 //
 // Each pod's data is read from its own Job's ConfigMap, the one the webhook
-// pointed it at (#105): a JobSet sibling writes to its own child Job's, not
+// pointed it at: a JobSet sibling writes to its own child Job's, not
 // the triggering Job's. Bare pods, and Job pods of the trigger itself, use
 // configMapName.
 func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configMapName string, pods []corev1.Pod, jobResults map[string]batchv1.JobCondition) (discoveries, datasets []string, containersJSON, storageJSON string) {
@@ -1597,7 +1597,7 @@ func (w *Watcher) triggerReplaced(ppJob *batchv1.Job, namespace, name string) bo
 }
 
 // onJobDeleted removes the data ConfigMap and identity of a Job that was never
-// postprocessed (#105). Every instrumented Job pod writes one, qualifying or
+// postprocessed. Every instrumented Job pod writes one, qualifying or
 // not; collectAIBOM only cleans up after a postprocess. Waiting for the
 // Job's deletion, rather than its completion, keeps a non-qualifying JobSet
 // sibling's data readable for the sibling that does qualify.
