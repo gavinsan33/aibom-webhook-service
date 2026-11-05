@@ -1,0 +1,83 @@
+# DeepSpeed ZeRO-3 with CPU optimizer offload across 2 GPUs: the same LoRA
+# SFT as granite-lora-finetune-fsdp.yaml, through an accelerate config with
+# `distributed_type: DEEPSPEED`. Exercises training.distributed's DeepSpeed
+# path (zero_stage and offload read from the DeepSpeedEngine itself, the
+# accelerate config as fallback) and DeepSpeed's own precision record.
+#
+# CPU offload uses DeepSpeed's CPU Adam, which is JIT-compiled on first use
+# (a few minutes; the nvcr.io PyTorch image ships the compiler and CUDA
+# headers it needs). zero3_init_flag loads the weights already partitioned,
+# so no rank holds a full copy in RAM.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: aibom-granite-lora-finetune-deepspeed
+  namespace: project-gavin-test
+  annotations:
+    aibom.io/experiment-intent: sft
+    aibom.io/experiment-name: granite-lora-sft-zero3-benchmark
+
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: finetune
+          image: nvcr.io/nvidia/pytorch:26.03-py3
+          command:
+            - sh
+            - -c
+            - |
+              pip install --no-cache-dir -U trl peft datasets accelerate deepspeed && \
+              export PATH="$HOME/.local/bin:$PATH" && \
+              cat > /tmp/my_deepspeed_config.yaml <<'EOF'
+              distributed_type: DEEPSPEED
+              deepspeed_config:
+                zero_stage: 3
+                offload_optimizer_device: cpu
+                offload_param_device: none
+                zero3_init_flag: true
+                zero3_save_16bit_model: true
+              num_processes: 2
+              EOF
+              trl sft \
+                --model_name_or_path ibm-granite/granite-3.3-2b-instruct \
+                --dtype bfloat16 \
+                --dataset_name tatsu-lab/alpaca \
+                --dataset_text_field text \
+                --output_dir /tmp/output \
+                --use_peft true \
+                --lora_r 16 \
+                --lora_alpha 32 \
+                --lora_dropout 0.05 \
+                --lora_target_modules q_proj k_proj v_proj o_proj \
+                --per_device_train_batch_size 4 \
+                --gradient_accumulation_steps 4 \
+                --learning_rate 2e-4 \
+                --num_train_epochs 1 \
+                --max_steps 50 \
+                --logging_steps 5 \
+                --bf16 true \
+                --accelerate_config /tmp/my_deepspeed_config.yaml \
+                --report_to none
+          env:
+            - name: HOME
+              value: /tmp
+            - name: AIBOM_DEBUG
+              value: "1"
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: HF_TOKEN
+                  optional: true
+          resources:
+            requests:
+              memory: 8Gi
+              nvidia.com/gpu: "2"
+            limits:
+              memory: 20Gi
+              nvidia.com/gpu: "2"

@@ -91,6 +91,32 @@ It deliberately uses `trl`'s own `accelerate launch` passthrough (`--num_process
 oc apply -f examples/granite-lora-finetune-multigpu.yaml
 ```
 
+## Example: FSDP LoRA Fine-Tuning (2 and 3 GPUs)
+
+`examples/granite-lora-finetune-fsdp.yaml` runs the same LoRA fine-tune with FSDP1 on 2 GPUs, through an accelerate config file written at runtime and passed with `--accelerate_config`. `examples/granite-lora-finetune-fsdp-3gpu.yaml` is the same run with FSDP2 (`fsdp_version: 2`) on 3 GPUs. Both load the weights in bf16 and only on rank 0 (`fsdp_cpu_ram_efficient_loading`); without that, each rank loads a full fp32 copy into RAM and the pod OOMs. Check `training.distributed` in the AIBOM: world size, nodes, and the FSDP version and strategy read from the FSDP module itself (see [Distributed Topology](../CLAUDE.md#distributed-topology-178)).
+
+```bash
+# Needs a node with 2 (or 3) schedulable GPUs
+oc apply -f examples/granite-lora-finetune-fsdp.yaml
+oc apply -f examples/granite-lora-finetune-fsdp-3gpu.yaml
+```
+
+## Example: DeepSpeed ZeRO-3 LoRA Fine-Tuning
+
+`examples/granite-lora-finetune-deepspeed.yaml` runs the same fine-tune on 2 GPUs with DeepSpeed ZeRO-3 and the optimizer offloaded to CPU, through an accelerate config with `distributed_type: DEEPSPEED`. `training.distributed.deepspeed` should report `zero_stage: 3` and `offload_optimizer: cpu` via `deepspeed_engine`, read from the engine rather than the config. The first step is slow while DeepSpeed compiles its CPU Adam extension.
+
+```bash
+oc apply -f examples/granite-lora-finetune-deepspeed.yaml
+```
+
+## Example: Multi-Node LoRA Fine-Tuning
+
+`examples/granite-lora-finetune-multinode.yaml` is a JobSet running plain DDP on 2 pods × 2 GPUs with `torchrun --nnodes 2`, pod 0 acting as the rendezvous host through the JobSet's headless Service. Both pods belong to one Indexed Job, so there is one AIBOM listing both; `training.distributed` should report `world_size: 4`, `nodes: 2`, `processes_per_node: 2` and `strategies: ["data_parallel"]`. Uses all 4 GPUs the `project-gavin-test` quota allows.
+
+```bash
+oc apply -f examples/granite-lora-finetune-multinode.yaml
+```
+
 ## Example: Raw `transformers.Trainer` LoRA Fine-Tuning
 
 The `examples/granite-lora-finetune-raw-trainer.yaml` file runs the same LoRA fine-tune as the examples above, but via a custom Python script that calls `transformers.Trainer`/`peft.LoraConfig` directly instead of the `trl sft` CLI — no CLI flags at all for `postprocess.py`'s command-line detectors to see.

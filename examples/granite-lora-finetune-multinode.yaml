@@ -1,0 +1,98 @@
+# Multi-node DDP: the same LoRA SFT as the other granite examples, on 2 pods
+# x 2 GPUs, launched with `torchrun --nnodes 2` instead of trl's own
+# accelerate passthrough. Exercises training.distributed's world size and
+# node count (torchrun's WORLD_SIZE/LOCAL_WORLD_SIZE/GROUP_WORLD_SIZE in each
+# rank, and its --nnodes/--nproc_per_node flags as the fallback).
+#
+# One Indexed Job with 2 pods, so the webhook compiles a single AIBOM listing
+# both. Each pod's completion index is its torchrun node rank, and pod 0 is
+# the rendezvous host, reached through the JobSet's headless Service
+# (<jobset>-<replicatedJob>-<jobIndex>-<podIndex>.<jobset>). The scheduler
+# may still put both pods on one machine; torchrun counts them as 2 nodes
+# either way.
+#
+# Memory requests are 4Gi per pod: the namespace quota caps requests at 10Gi
+# in total. Weights load in bf16, ~5 GB per rank.
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: aibom-granite-multinode
+  namespace: project-gavin-test
+spec:
+  failurePolicy:
+    maxRestarts: 0
+  replicatedJobs:
+    - name: workers
+      replicas: 1
+      template:
+        metadata:
+          annotations:
+            aibom.io/experiment-intent: sft
+            aibom.io/experiment-name: granite-lora-sft-multinode-ddp
+        spec:
+          parallelism: 2
+          completions: 2
+          completionMode: Indexed
+          backoffLimit: 0
+          template:
+            spec:
+              restartPolicy: Never
+              tolerations:
+                - operator: Exists
+              containers:
+                - name: finetune
+                  image: nvcr.io/nvidia/pytorch:26.03-py3
+                  command:
+                    - sh
+                    - -c
+                    - |
+                      pip install --no-cache-dir -U trl peft datasets accelerate && \
+                      torchrun \
+                        --nnodes 2 \
+                        --nproc_per_node 2 \
+                        --node_rank "$JOB_COMPLETION_INDEX" \
+                        --master_addr aibom-granite-multinode-workers-0-0.aibom-granite-multinode \
+                        --master_port 29500 \
+                        -m trl.scripts.sft \
+                        --model_name_or_path ibm-granite/granite-3.3-2b-instruct \
+                        --dtype bfloat16 \
+                        --dataset_name tatsu-lab/alpaca \
+                        --dataset_text_field text \
+                        --output_dir /tmp/output \
+                        --use_peft true \
+                        --lora_r 16 \
+                        --lora_alpha 32 \
+                        --lora_dropout 0.05 \
+                        --lora_target_modules q_proj k_proj v_proj o_proj \
+                        --per_device_train_batch_size 4 \
+                        --gradient_accumulation_steps 4 \
+                        --learning_rate 2e-4 \
+                        --num_train_epochs 1 \
+                        --max_steps 50 \
+                        --logging_steps 5 \
+                        --bf16 true \
+                        --report_to none
+                  env:
+                    - name: HOME
+                      value: /tmp
+                    - name: AIBOM_DEBUG
+                      value: "1"
+                    # No InfiniBand between pods: NCCL uses TCP over the pod network.
+                    - name: NCCL_SOCKET_IFNAME
+                      value: eth0
+                    - name: HF_TOKEN
+                      valueFrom:
+                        secretKeyRef:
+                          name: hf-token-secret
+                          key: HF_TOKEN
+                          optional: true
+                  ports:
+                    - containerPort: 29500
+                      name: rendezvous
+                  resources:
+                    requests:
+                      memory: 4Gi
+                      nvidia.com/gpu: "2"
+                    limits:
+                      memory: 18Gi
+                      nvidia.com/gpu: "2"
