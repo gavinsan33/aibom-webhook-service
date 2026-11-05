@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"slices"
 	"strings"
 	"time"
 
@@ -175,6 +176,19 @@ func (m *Mutator) Mutate(pod *corev1.Pod, requesterUsername string) ([]PatchOper
 			Path:  "/metadata/labels/aibom.io~1instrumented",
 			Value: "true",
 		})
+	}
+
+	// Hold Job-owned pods until the watcher has read them: a Job that hits
+	// activeDeadlineSeconds (or a podFailurePolicy FailJob rule) has its pods
+	// deleted by its own controller before it's marked Failed, leaving nothing
+	// to build the AIBOM from (#164). Keyed on the same label the watcher
+	// routes Job pods by; it releases the finalizer once it's done with the Job.
+	if pod.Labels["batch.kubernetes.io/job-name"] != "" && !slices.Contains(pod.Finalizers, aibomdata.PodFinalizerName) {
+		if pod.Finalizers == nil {
+			patches = append(patches, PatchOperation{Op: "add", Path: "/metadata/finalizers", Value: []string{aibomdata.PodFinalizerName}})
+		} else {
+			patches = append(patches, PatchOperation{Op: "add", Path: "/metadata/finalizers/-", Value: aibomdata.PodFinalizerName})
+		}
 	}
 
 	// Add instrumented-by annotation

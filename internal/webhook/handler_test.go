@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gavinsan33/aibom-webhook-service/internal/aibomdata"
 	jsonpatch "gopkg.in/evanphx/json-patch.v4"
 	admissionv1 "k8s.io/api/admission/v1"
 	authenticationv1 "k8s.io/api/authentication/v1"
@@ -1271,5 +1272,58 @@ func TestHandleAdmission_AllowsUnrelatedConfigMapFromAnyIdentity(t *testing.T) {
 	}
 	if !resp.Response.Allowed {
 		t.Errorf("expected Allowed=true for an unrelated ConfigMap, got denied: %v", resp.Response.Result)
+	}
+}
+
+// Job-owned pods are held by a finalizer so a Job whose controller deletes
+// them on activeDeadlineSeconds still has pods for the watcher to read (#164).
+// Both patch shapes are applied to the pod, since a wrong path fails
+// admission rather than any assertion on the patch list.
+func TestMutate_JobPodGetsPodFinalizer(t *testing.T) {
+	m := newTestMutator()
+
+	for name, tc := range map[string]struct {
+		existing, want []string
+	}{
+		"no finalizers yet":       {nil, []string{aibomdata.PodFinalizerName}},
+		"job-tracking already on": {[]string{"batch.kubernetes.io/job-tracking"}, []string{"batch.kubernetes.io/job-tracking", aibomdata.PodFinalizerName}},
+		"already present":         {[]string{aibomdata.PodFinalizerName}, []string{aibomdata.PodFinalizerName}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			jobPod := podWithOwner("Job")
+			jobPod.Labels = map[string]string{"batch.kubernetes.io/job-name": "test-job"}
+			jobPod.Finalizers = tc.existing
+			patches, err := m.Mutate(jobPod, "")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			original, _ := json.Marshal(jobPod)
+			patchJSON, _ := json.Marshal(patches)
+			decoded, err := jsonpatch.DecodePatch(patchJSON)
+			if err != nil {
+				t.Fatalf("decode patch: %v", err)
+			}
+			mutated, err := decoded.Apply(original)
+			if err != nil {
+				t.Fatalf("patches don't apply to the pod: %v", err)
+			}
+			var got corev1.Pod
+			if err := json.Unmarshal(mutated, &got); err != nil {
+				t.Fatalf("unmarshal mutated pod: %v", err)
+			}
+			if strings.Join(got.Finalizers, ",") != strings.Join(tc.want, ",") {
+				t.Errorf("finalizers = %v, want %v", got.Finalizers, tc.want)
+			}
+		})
+	}
+
+	patches, err := m.Mutate(podWithGPU(), "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, p := range patches {
+		if strings.HasPrefix(p.Path, "/metadata/finalizers") {
+			t.Errorf("a pod with no Job owner gets its finalizer from the watcher, not admission: %+v", p)
+		}
 	}
 }

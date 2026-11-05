@@ -3124,6 +3124,12 @@ def compile_aibom(
         pod_job_result(p.get("pod_name"), containers or []) == "Failed" for p in pods
     ):
         status = "Failed"
+    # Pods killed for running past the Job's activeDeadlineSeconds report the
+    # kill itself ("Error", exit 143); the deadline is what actually ended it.
+    if status != "OOMKilled" and any(
+        c.get("job_failure_reason") == "DeadlineExceeded" for c in containers or []
+    ):
+        status = "DeadlineExceeded"
 
     aibom["execution_metadata"] = {
         "job_id": JOB_NAME,
