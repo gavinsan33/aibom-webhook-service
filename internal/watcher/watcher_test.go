@@ -259,7 +259,10 @@ func TestIsJobFinished(t *testing.T) {
 }
 
 func TestIsNamespaceEnabled(t *testing.T) {
-	client := fake.NewSimpleClientset(enabledNamespace("enabled-ns"), disabledNamespace("disabled-ns"))
+	dying := enabledNamespace("dying-ns")
+	now := metav1.Now()
+	dying.DeletionTimestamp = &now
+	client := fake.NewSimpleClientset(enabledNamespace("enabled-ns"), disabledNamespace("disabled-ns"), dying)
 	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "busybox:latest"})
 	startWatcher(t, w)
 
@@ -271,6 +274,9 @@ func TestIsNamespaceEnabled(t *testing.T) {
 	}
 	if w.isNamespaceEnabled("nonexistent") {
 		t.Error("expected nonexistent namespace to be disabled")
+	}
+	if w.isNamespaceEnabled("dying-ns") {
+		t.Error("expected a namespace being deleted to be disabled")
 	}
 }
 

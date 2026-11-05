@@ -2156,6 +2156,81 @@ def test_compile_aibom_reports_mixed_precision_separately_from_dtype():
     assert aibom["training"]["mixed_precision"] == "bf16"
 
 
+def _training_aibom(runtime_info, annotations=None):
+    return pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info=runtime_info,
+        annotations={"experiment-intent": "training", **(annotations or {})}, telemetry=None,
+    )
+
+
+def test_compile_aibom_reports_determinism_block():
+    runtime_info = {
+        "seeds": {"values": {"python": 42, "numpy": 42, "torch": 1234},
+                  "history": {"torch": [42, 1234]}},
+        "data_seed": 7,
+        "full_determinism": True,
+        "determinism_flags": {
+            "cudnn_deterministic": True, "cudnn_benchmark": False,
+            "deterministic_algorithms": True, "deterministic_algorithms_warn_only": True,
+            "cublas_workspace_config": ":4096:8", "python_hash_seed": "0",
+        },
+    }
+    assert _training_aibom(runtime_info)["training"]["determinism"] == {
+        "seeds": {"python": 42, "numpy": 42, "torch": 1234},
+        "seed_history": {"torch": [42, 1234]},
+        "data_seed": 7,
+        "full_determinism": True,
+        "cudnn_deterministic": True,
+        "cudnn_benchmark": False,
+        "deterministic_algorithms": True,
+        "deterministic_algorithms_warn_only": True,
+        "cublas_workspace_config": ":4096:8",
+        "python_hash_seed": "0",
+    }
+
+
+def test_compile_aibom_determinism_is_none_without_observations():
+    assert _training_aibom({})["training"]["determinism"] is None
+
+
+def test_compile_aibom_determinism_drops_malformed_values():
+    # runtime_info is written from inside the workload's container.
+    runtime_info = {
+        "seeds": {"values": {"python": [1], "torch": True, "numpy": 2 ** 60, "other": 1},
+                  "history": {"torch": [1], "python": "nope"}},
+        "data_seed": "seven",
+        "full_determinism": "yes",
+        "determinism_flags": {"cudnn_benchmark": "true", "cudnn_deterministic": False, "extra": 1},
+    }
+    assert _training_aibom(runtime_info)["training"]["determinism"] == {
+        "seeds": {"numpy": str(2 ** 60)},  # past 2**53: kept JCS-safe
+        "data_seed": "seven",
+        "cudnn_deterministic": False,
+    }
+
+
+def test_compile_aibom_determinism_aibom_stays_signable():
+    runtime_info = {"seeds": {"values": {"torch": 2 ** 63}}}
+    rfc8785 = pytest.importorskip("rfc8785")
+    rfc8785.dumps(_training_aibom(runtime_info))
+
+
+@pytest.mark.parametrize("seeds,expected", [
+    ({"python": 42, "numpy": 42, "torch": 42}, 42),
+    ({"torch": 7}, 7),
+    ({"python": 42, "torch": 1234}, None),
+    ({"python": "abc"}, None),
+])
+def test_compile_aibom_random_seed_falls_back_to_agreed_seed(seeds, expected):
+    aibom = _training_aibom({"seeds": {"values": seeds}})
+    assert aibom["training"]["random_seed"] == expected
+
+
+def test_compile_aibom_training_arguments_seed_wins_over_direct_seeds():
+    runtime_info = {"random_seed": 42, "seeds": {"values": {"torch": 1234}}}
+    assert _training_aibom(runtime_info)["training"]["random_seed"] == 42
+
+
 def test_compile_aibom_runtime_lora_on_quantized_base_is_qlora():
     # Independent of whether LoraConfig or the quantized load came first (#109).
     runtime_info = {"adaptation_method": "lora", "quantization_method": "bitsandbytes"}
