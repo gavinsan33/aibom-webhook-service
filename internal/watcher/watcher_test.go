@@ -2281,13 +2281,13 @@ func TestBuildPostprocessInputs_RankZeroNewestAttemptFirst(t *testing.T) {
 		pod("job-0-old", "0", 2*time.Hour),
 		pod("job-0-new", "0", time.Minute),
 	}
-	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "cm-name", Namespace: "ns"}, Data: map[string]string{}}
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: aibomdata.ConfigMapName("job"), Namespace: "ns"}, Data: map[string]string{}}
 	for _, p := range pods {
 		cm.Data["dataset-"+p.Name+".json"] = p.Name
 	}
 	w := &Watcher{clientset: fake.NewSimpleClientset(cm)}
 
-	_, datasets, _, _ := w.buildPostprocessInputs(context.Background(), "ns", "cm-name", pods, nil)
+	_, datasets, _, _ := w.buildPostprocessInputs(context.Background(), "ns", cm.Name, pods, nil)
 
 	if want := []string{"job-0-new", "job-0-old", "job-1-a"}; !reflect.DeepEqual(datasets, want) {
 		t.Errorf("dataset merge order = %v, want %v", datasets, want)
@@ -2507,7 +2507,7 @@ func TestCreatePostprocessJob_WaitsForEarlierRunsPostprocessJob(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Job pods held by the webhook's pod finalizer (#164)
+// Job pods held by the webhook's pod finalizer
 // ---------------------------------------------------------------------------
 
 func heldPod(jobName, namespace string, deleting bool) *corev1.Pod {
@@ -2675,5 +2675,104 @@ func TestRunningJobPod_KeepsPodFinalizer(t *testing.T) {
 	got, _ := client.CoreV1().Pods("test-ns").Get(context.TODO(), pod.Name, metav1.GetOptions{})
 	if !hasPodFinalizer(got) {
 		t.Error("a deleted pod of a still-running Job must stay held until the Job finishes")
+	}
+}
+
+// A JobSet sibling writes to its own child Job's data ConfigMap, so
+// that's where its discovery data has to be read from.
+func TestBuildPostprocessInputs_ReadsSiblingFromItsOwnJobsConfigMap(t *testing.T) {
+	server := instrumentedPod("server", "ns")
+	client := instrumentedPod("client", "ns")
+	serverCM := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: aibomdata.ConfigMapName("server"), Namespace: "ns"},
+		Data: map[string]string{"discovery-server-pod.json": `{"from":"server"}`}}
+	clientCM := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: aibomdata.ConfigMapName("client"), Namespace: "ns"},
+		Data: map[string]string{"discovery-client-pod.json": `{"from":"client"}`}}
+	w := &Watcher{clientset: fake.NewSimpleClientset(serverCM, clientCM)}
+
+	discoveries, _, _, _ := w.buildPostprocessInputs(context.Background(), "ns", serverCM.Name, []corev1.Pod{*server, *client}, nil)
+
+	if want := []string{`{"from":"server"}`, `{"from":"client"}`}; !reflect.DeepEqual(discoveries, want) {
+		t.Errorf("discoveries = %v, want %v", discoveries, want)
+	}
+}
+
+// A pod-path pod that finishes (a PyTorchJob worker, a bare GPU pod run to
+// completion) is postprocessed then, not only once it's deleted.
+func TestOnPodEvent_FinishedPodIsPostprocessed(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	pod := instrumentedBarePod("trainer-master-0", "test-ns")
+	pod.Status.Phase = corev1.PodSucceeded
+	client := fake.NewSimpleClientset(ns, pod)
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "aibom-postprocess:latest"})
+	startWatcher(t, w)
+
+	w.onPodEvent(pod)
+
+	if _, err := client.BatchV1().Jobs("aibom-system").Get(context.TODO(), ppName("test-ns", pod.Name), metav1.GetOptions{}); err != nil {
+		t.Fatalf("postprocess job not created for a finished pod: %v", err)
+	}
+	updated, _ := client.CoreV1().Pods("test-ns").Get(context.TODO(), pod.Name, metav1.GetOptions{})
+	if updated.Annotations[AnnotationPostprocess] == "" {
+		t.Error("finished pod should be annotated as postprocessed")
+	}
+}
+
+// A Job deleted without ever being postprocessed (it didn't qualify)
+// leaves no data ConfigMap or identity behind.
+func TestOnJobDeleted_CleansUpNeverPostprocessedJob(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	job := completedJob("cpu-job", "test-ns")
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: aibomdata.ConfigMapName("cpu-job"), Namespace: "test-ns"}}
+	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: aibomdata.WorkloadIdentityName("cpu-job"), Namespace: "test-ns"}}
+	client := fake.NewSimpleClientset(ns, cm, sa)
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "aibom-postprocess:latest"})
+	startWatcher(t, w)
+
+	w.onJobDeleted(job)
+
+	if _, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), cm.Name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("data configmap should be deleted, got err=%v", err)
+	}
+	if _, err := client.CoreV1().ServiceAccounts("test-ns").Get(context.TODO(), sa.Name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("workload identity should be deleted, got err=%v", err)
+	}
+}
+
+func TestOnJobDeleted_LeavesPostprocessedJobAndReruns(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	postprocessed := completedJob("done-job", "test-ns")
+	postprocessed.Annotations = map[string]string{AnnotationPostprocess: "pp"}
+	old := completedJob("rerun-job", "test-ns")
+	old.UID = "first-run"
+	rerun := completedJob("rerun-job", "test-ns")
+	rerun.UID = "second-run"
+	doneCM := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: aibomdata.ConfigMapName("done-job"), Namespace: "test-ns"}}
+	rerunCM := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: aibomdata.ConfigMapName("rerun-job"), Namespace: "test-ns"}}
+	client := fake.NewSimpleClientset(ns, rerun, doneCM, rerunCM)
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "aibom-postprocess:latest"})
+	startWatcher(t, w)
+
+	w.onJobDeleted(postprocessed)
+	w.onJobDeleted(old)
+
+	for _, name := range []string{doneCM.Name, rerunCM.Name} {
+		if _, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), name, metav1.GetOptions{}); err != nil {
+			t.Errorf("%s should be left in place, got err=%v", name, err)
+		}
+	}
+}
+
+func TestOnPodDeleted_CleansUpNeverPostprocessedPod(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	pod := instrumentedBarePod("cpu-pod", "test-ns")
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: aibomdata.ConfigMapName("cpu-pod"), Namespace: "test-ns"}}
+	client := fake.NewSimpleClientset(ns, cm)
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "aibom-postprocess:latest"})
+	startWatcher(t, w)
+
+	w.onPodDeleted(pod)
+
+	if _, err := client.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), cm.Name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("data configmap should be deleted, got err=%v", err)
 	}
 }

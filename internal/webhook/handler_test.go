@@ -123,10 +123,11 @@ func TestShouldMutate_JobOwner(t *testing.T) {
 	}
 }
 
-func TestShouldMutate_JobSetOwner(t *testing.T) {
+// JobSet never owns a pod directly, so it isn't an owner kind.
+func TestShouldMutate_JobSetOwner_NotMatched(t *testing.T) {
 	m := newTestMutator()
-	if !m.shouldMutate(podWithOwner("JobSet"), "") {
-		t.Error("expected pod with JobSet owner to match")
+	if m.shouldMutate(podWithOwner("JobSet"), "") {
+		t.Error("a CPU-only pod with a JobSet owner should not match")
 	}
 }
 
@@ -137,10 +138,11 @@ func TestShouldMutate_PyTorchJobOwner(t *testing.T) {
 	}
 }
 
-func TestShouldMutate_RayJobOwner(t *testing.T) {
+// RayJob never owns a pod directly, so it isn't an owner kind.
+func TestShouldMutate_RayJobOwner_NotMatched(t *testing.T) {
 	m := newTestMutator()
-	if !m.shouldMutate(podWithOwner("RayJob"), "") {
-		t.Error("expected pod with RayJob owner to match")
+	if m.shouldMutate(podWithOwner("RayJob"), "") {
+		t.Error("a CPU-only pod with a RayJob owner should not match")
 	}
 }
 
@@ -1276,7 +1278,7 @@ func TestHandleAdmission_AllowsUnrelatedConfigMapFromAnyIdentity(t *testing.T) {
 }
 
 // Job-owned pods are held by a finalizer so a Job whose controller deletes
-// them on activeDeadlineSeconds still has pods for the watcher to read (#164).
+// them on activeDeadlineSeconds still has pods for the watcher to read.
 // Both patch shapes are applied to the pod, since a wrong path fails
 // admission rather than any assertion on the patch list.
 func TestMutate_JobPodGetsPodFinalizer(t *testing.T) {

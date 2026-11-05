@@ -183,13 +183,19 @@ func New(clientset kubernetes.Interface, cfg Config) *Watcher {
 	w.factory.Batch().V1().Jobs().Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    w.onJobEvent,
 		UpdateFunc: func(_, newObj interface{}) { w.onJobEvent(newObj) },
-		DeleteFunc: w.onJobEvent,
+		DeleteFunc: func(obj interface{}) {
+			w.onJobEvent(obj)
+			w.onJobDeleted(obj)
+		},
 	})
 
 	w.podFactory.Core().V1().Pods().Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    w.onPodEvent,
 		UpdateFunc: func(_, newObj interface{}) { w.onPodEvent(newObj) },
-		DeleteFunc: w.onPodEvent,
+		DeleteFunc: func(obj interface{}) {
+			w.onPodEvent(obj)
+			w.onPodDeleted(obj)
+		},
 	})
 
 	// Ensure the namespace informer is created so it syncs with the factory.
@@ -337,7 +343,7 @@ func (w *Watcher) finishJob(ctx context.Context, job *batchv1.Job) {
 }
 
 // releaseJobPods removes the finalizer the webhook puts on a Job's pods at
-// admission (#164). It reads the informer cache, so it's cheap enough to run
+// admission. It reads the informer cache, so it's cheap enough to run
 // on every resync of a finished Job, which is what retries a failed removal.
 // Pods are matched by the Job's UID too, so an earlier run's Job being
 // cleaned up doesn't release a same-named rerun's pods.
@@ -356,9 +362,11 @@ func (w *Watcher) releaseJobPods(ctx context.Context, job *batchv1.Job) {
 	}
 }
 
-// onPodEvent is the Pod-level equivalent of onJobEvent, for bare/ReplicaSet-owned pods
-// (e.g. KServe InferenceService predictors) that have no owning Job to hang a finalizer
-// on. These pods never "complete" — the only postprocessing trigger is deletion.
+// onPodEvent is the Pod-level equivalent of onJobEvent, for pods with no owning
+// Job to hang a finalizer on: bare/ReplicaSet-owned pods (e.g. KServe
+// InferenceService predictors) and PyTorchJob workers. Postprocessing triggers
+// when the pod reaches a terminal phase or is deleted; a long-running server
+// pod never finishes, so for it that's deletion.
 func (w *Watcher) onPodEvent(obj interface{}) {
 	pod, ok := obj.(*corev1.Pod)
 	if !ok {
@@ -405,7 +413,8 @@ func (w *Watcher) onPodEvent(obj interface{}) {
 		return
 	}
 
-	if pod.DeletionTimestamp == nil {
+	deleting := pod.DeletionTimestamp != nil
+	if !deleting && !podFinished(pod) {
 		// Path A: pod is running — add finalizer if it qualifies
 		if hasPodFinalizer(pod) {
 			return
@@ -419,7 +428,9 @@ func (w *Watcher) onPodEvent(obj interface{}) {
 		return
 	}
 
-	// Path B: pod is being deleted — run postprocessing
+	// Path B: pod finished or is being deleted — run postprocessing. A
+	// finished pod is still there to read, so like a finished Job it doesn't
+	// need the finalizer.
 	if pod.Annotations != nil && pod.Annotations[AnnotationPostprocess] != "" {
 		if hasPodFinalizer(pod) {
 			w.removePodFinalizer(context.TODO(), pod)
@@ -427,7 +438,7 @@ func (w *Watcher) onPodEvent(obj interface{}) {
 		return
 	}
 
-	if !hasPodFinalizer(pod) {
+	if deleting && !hasPodFinalizer(pod) {
 		// Never qualified while running (or missed the add event) — nothing to do.
 		return
 	}
@@ -468,6 +479,10 @@ func (w *Watcher) shouldPostprocess(job *batchv1.Job) bool {
 		return false
 	}
 	return podsRequestGPU(pods) || len(collectAIBOMAnnotations(job.Annotations)) > 0
+}
+
+func podFinished(pod *corev1.Pod) bool {
+	return pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed
 }
 
 func shouldPostprocessPod(pod *corev1.Pod) bool {
@@ -963,13 +978,32 @@ func mergeDatasets(datasets []string) string {
 // Job name to its terminal condition (see terminalCondition) so each pod's
 // containers can be tagged with how the Job that owns them ended; nil for a
 // bare pod.
+//
+// Each pod's data is read from its own Job's ConfigMap, the one the webhook
+// pointed it at: a JobSet sibling writes to its own child Job's, not
+// the triggering Job's. Bare pods, and Job pods of the trigger itself, use
+// configMapName.
 func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configMapName string, pods []corev1.Pod, jobResults map[string]batchv1.JobCondition) (discoveries, datasets []string, containersJSON, storageJSON string) {
-	dataCM, err := w.clientset.CoreV1().ConfigMaps(namespace).Get(ctx, configMapName, metav1.GetOptions{})
-	if err != nil {
-		if !errors.IsNotFound(err) {
-			log.Printf("warning: could not read data configmap %s/%s: %v", namespace, configMapName, err)
+	dataCMs := map[string]*corev1.ConfigMap{}
+	dataCMFor := func(pod *corev1.Pod) *corev1.ConfigMap {
+		name := configMapName
+		if job := pod.Labels["batch.kubernetes.io/job-name"]; job != "" {
+			name = aibomdata.ConfigMapName(job)
 		}
-		dataCM = nil
+		if cm, ok := dataCMs[name]; ok {
+			return cm
+		}
+		cm, err := w.clientset.CoreV1().ConfigMaps(namespace).Get(ctx, name, metav1.GetOptions{})
+		switch {
+		case errors.IsNotFound(err):
+			log.Printf("no data configmap %s/%s; pods writing to it contribute no discovery or dataset data", namespace, name)
+			cm = nil
+		case err != nil:
+			log.Printf("warning: could not read data configmap %s/%s: %v", namespace, name, err)
+			cm = nil
+		}
+		dataCMs[name] = cm
+		return cm
 	}
 
 	signingKey, err := w.fetchDiscoverySigningKey(ctx, namespace)
@@ -983,7 +1017,7 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 
 	dsByPod := make(map[string]string, len(pods))
 	for _, pod := range pods {
-		disc, discSig, ds, dsSig, storage, storageSig := extractDataFromPod(&pod, dataCM)
+		disc, discSig, ds, dsSig, storage, storageSig := extractDataFromPod(&pod, dataCMFor(&pod))
 		if disc != "" && signingKey != nil && !verifySignature(signingKey, disc, discSig) {
 			log.Printf("warning: dropping unverified discovery data for pod %s/%s (missing or invalid signature)", namespace, pod.Name)
 			disc = ""
@@ -1560,6 +1594,56 @@ func (w *Watcher) triggerReplaced(ppJob *batchv1.Job, namespace, name string) bo
 		return false
 	}
 	return string(current.GetUID()) != uid
+}
+
+// onJobDeleted removes the data ConfigMap and identity of a Job that was never
+// postprocessed. Every instrumented Job pod writes one, qualifying or
+// not; collectAIBOM only cleans up after a postprocess. Waiting for the
+// Job's deletion, rather than its completion, keeps a non-qualifying JobSet
+// sibling's data readable for the sibling that does qualify.
+func (w *Watcher) onJobDeleted(obj interface{}) {
+	job, ok := obj.(*batchv1.Job)
+	if !ok {
+		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
+		if !ok {
+			return
+		}
+		if job, ok = tombstone.Obj.(*batchv1.Job); !ok {
+			return
+		}
+	}
+	if job.Labels[LabelPostprocessFor] != "" || job.Annotations[AnnotationPostprocess] != "" || !w.isNamespaceEnabled(job.Namespace) {
+		return
+	}
+	// A same-named rerun shares the names, and its pods may already be writing.
+	if current, err := w.factory.Batch().V1().Jobs().Lister().Jobs(job.Namespace).Get(job.Name); err == nil && current.UID != job.UID {
+		return
+	}
+	w.deleteWorkloadDataConfigMap(context.TODO(), job.Namespace, job.Name)
+	w.deleteWorkloadIdentity(context.TODO(), job.Namespace, job.Name)
+}
+
+// onPodDeleted is onJobDeleted for pods the pod path owns. They have no
+// per-job identity (the webhook only provisions one for Job pods).
+func (w *Watcher) onPodDeleted(obj interface{}) {
+	pod, ok := obj.(*corev1.Pod)
+	if !ok {
+		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
+		if !ok {
+			return
+		}
+		if pod, ok = tombstone.Obj.(*corev1.Pod); !ok {
+			return
+		}
+	}
+	if pod.Labels["batch.kubernetes.io/job-name"] != "" || pod.Labels[LabelInstrumented] != "true" ||
+		pod.Annotations[AnnotationPostprocess] != "" || !w.isNamespaceEnabled(pod.Namespace) {
+		return
+	}
+	if current, err := w.podFactory.Core().V1().Pods().Lister().Pods(pod.Namespace).Get(pod.Name); err == nil && current.UID != pod.UID {
+		return
+	}
+	w.deleteWorkloadDataConfigMap(context.TODO(), pod.Namespace, pod.Name)
 }
 
 func (w *Watcher) deleteWorkloadDataConfigMap(ctx context.Context, namespace, triggerName string) {
