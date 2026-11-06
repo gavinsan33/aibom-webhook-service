@@ -4,7 +4,7 @@ A Kubernetes mutating admission webhook that automatically instruments AI worklo
 
 When the workload finishes, a postprocess Job compiles everything (hardware, datasets, model and training config, git provenance, Prometheus telemetry) into a signed, immutable `AIBOM` custom resource in the workload's namespace. To browse, filter, and compare AIBOMs, use the companion tools:
 
-- [`oc-aibom`](https://github.com/gavinsan33/oc-aibom): a `kubectl`/`oc` plugin (`oc aibom list|describe|diff|compare`). It also verifies the AIBOM's signature.
+- [`oc-aibom`](https://github.com/gavinsan33/oc-aibom): a `kubectl`/`oc` plugin (`oc aibomrun list|describe|diff|compare`). It also verifies the AIBOM's signature.
 - [`aibom-console-plugin`](https://github.com/gavinsan33/aibom-console-plugin): an OpenShift web console plugin with list, detail, and compare views and telemetry charts.
 
 **Full documentation lives in [`docs/`](docs/index.md)** (built with MkDocs). This README only covers what the project does and how to install it.
@@ -49,22 +49,28 @@ These steps need a cluster-admin. `--kube-as-user=system:admin` impersonates one
 
 Re-run step 2 whenever the scripts change; a stale `aibom-scripts` ConfigMap can fail pod startup in the namespace. After a workload completes:
 
-Preferred: the `oc aibom` plugin (install [`oc-aibom`](https://github.com/gavinsan33/oc-aibom) first; `aibom` is a plugin subcommand, not a built-in `oc` one), or the console plugin in the web UI:
+Preferred: the `oc aibomrun` plugin (install [`oc-aibom`](https://github.com/gavinsan33/oc-aibom) first; `aibomrun` is a plugin subcommand, not a built-in `oc` one), or the console plugin in the web UI:
 
 ```bash
 # Requires the oc-aibom plugin
-oc aibom list -n <namespace>
-oc aibom describe <name> -n <namespace>
+oc aibomrun list -n <namespace>
+oc aibomrun describe <name> -n <namespace>
 ```
 
 Fallback, with no plugin needed (standard `oc`/`kubectl` on the `AIBOM` custom resource):
 
 ```bash
-oc get aiboms -n <namespace>
-oc get aibom <name> -n <namespace> -o yaml
+oc get aibomrun -n <namespace>
+oc get aibomrun <name> -n <namespace> -o yaml
 ```
 
 Without a published chart, `just deploy`, `just deploy-buildconfig`, and `just setup-namespace` do the same from a checkout; see [Development](docs/reference/development.md).
+
+## Related projects
+
+[k8s-aibom](https://github.com/GoogleCloudPlatform/k8s-aibom) is an unprivileged controller that inventories the AI workloads running in a cluster and writes one CycloneDX ML-BOM per serving workload, with evidence and a confidence tier on every attribute. It is the serving-side inventory for people who didn't run the workload; this project is the run record for the people who did.
+
+Both projects define a kind `AIBOM` with plural `aiboms`, in different API groups (`aibom.io` here, `aibom.k8saibom.dev` there), so they can be installed on the same cluster. Use the short name `aibomrun` (or `aiboms.aibom.io`) for this project's resources; `aibom` is k8s-aibom's short name, and a bare `kubectl get aiboms` resolves to whichever CRD the API server lists first. The `oc-aibom` CLI installs as `oc aibomrun`, leaving `kubectl aibom` to k8s-aibom's krew plugin.
 
 ## Documentation
 

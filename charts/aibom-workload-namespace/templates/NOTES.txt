@@ -2,5 +2,5 @@
 
   oc label namespace {{ .Release.Namespace }} aibom.io/enabled=true
 
-List AIBOMs once a workload finishes:  oc get aiboms -n {{ .Release.Namespace }}
+List AIBOMs once a workload finishes:  oc get aibomrun -n {{ .Release.Namespace }}
 Check the install with:  helm test {{ .Release.Name }} -n {{ .Release.Namespace }}

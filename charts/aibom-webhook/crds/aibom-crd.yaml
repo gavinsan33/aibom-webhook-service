@@ -9,8 +9,12 @@ spec:
     plural: aiboms
     singular: aibom
     kind: AIBOM
+    # Not "aibom": k8s-aibom's AIBOM CRD (aibom.k8saibom.dev) has that short
+    # name, and on a cluster running both, `kubectl get aibom` resolves to
+    # whichever the API server lists first. The kind and plural are still
+    # shared, so fully qualify them (aiboms.aibom.io) or use this.
     shortNames:
-      - aibom
+      - aibomrun
   versions:
     - name: v1alpha1
       served: true
@@ -99,8 +103,12 @@ spec:
     kind: AIBOMTelemetry
     shortNames:
       - aibomtel
-    categories:
-      - aibom
+    # No category: kubectl expands a category before a short name, so the
+    # old "aibom" category made `kubectl get aibom` list AIBOMTelemetry
+    # objects instead of AIBOMs, and would also capture k8s-aibom's short
+    # name. Empty rather than omitted so `kubectl apply` removes it from a
+    # CRD Helm created, which has no last-applied annotation to diff against.
+    categories: []
   versions:
     - name: v1alpha1
       served: true

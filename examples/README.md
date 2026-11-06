@@ -44,7 +44,7 @@ The `examples/llm-d-inference.yaml` file runs a single llm-d decode pod laid out
 oc apply -f examples/llm-d-inference.yaml
 
 # The postprocess Job runs in the webhook namespace once the pod is deleted
-oc get aibom -n project-gavin-test
+oc get aibomrun -n project-gavin-test
 ```
 
 ## Example: vLLM via RHOAI/KServe Model Serving
