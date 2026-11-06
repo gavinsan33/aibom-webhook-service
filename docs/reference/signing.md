@@ -8,7 +8,7 @@ Three kinds of Secret sign different parts of the pipeline. The workload-namespa
 | `aibom-dataset-hmac-key` | `hmac-key` | Dataset data published by the `aibom-dataset-sidecar` | The sidecar only. The watcher reads it to verify. |
 | `aibom-compiled-signing-key-<namespace>`, in the webhook's namespace | `ed25519-key` | The compiled AIBOM's `spec.data` for that namespace | The `aibom-postprocess` Job only |
 
-The two HMAC keys are shared secrets between the webhook's own components. The Ed25519 key is asymmetric so that `oc aibom` and anyone holding an archived AIBOM can verify a signature without being able to forge one. Its public half is embedded in each AIBOM (`spec.signaturePublicKey`) and published in the `aibom-compiled-signing-public-key` ConfigMap, the cluster-side anchor that `oc aibom describe` cross-checks. The `oc aibom describe` page in the CLI docs lists each result it can report.
+The two HMAC keys are shared secrets between the webhook's own components. The Ed25519 key is asymmetric so that `oc aibomrun` and anyone holding an archived AIBOM can verify a signature without being able to forge one. Its public half is embedded in each AIBOM (`spec.signaturePublicKey`) and published in the `aibom-compiled-signing-public-key` ConfigMap, the cluster-side anchor that `oc aibomrun describe` cross-checks. The `oc aibomrun describe` page in the CLI docs lists each result it can report.
 
 The signatures are a tamper check, not proof the content is true. [Detected Fields](../CAPABILITIES.md) covers what each field does and doesn't guarantee.
 
@@ -43,7 +43,7 @@ There is no rotation command. A key changes only if its Secret is deleted and th
 | Key | Effect of a change |
 |-----|--------------------|
 | Discovery or dataset HMAC key | Pods already running were signed with the old key, so the watcher can't verify their data. It drops those entries and logs them, and the AIBOM is missing that pod's hardware or dataset data. Pods started after the change are unaffected. |
-| Compiled AIBOM key | New AIBOMs are signed with the new key, and the `aibom-compiled-signing-public-key` ConfigMap is overwritten with its public half. Existing AIBOMs keep their own embedded key and still verify against it, but `oc aibom describe` reports them as `KEY MISMATCH`, because the live anchor no longer matches. |
+| Compiled AIBOM key | New AIBOMs are signed with the new key, and the `aibom-compiled-signing-public-key` ConfigMap is overwritten with its public half. Existing AIBOMs keep their own embedded key and still verify against it, but `oc aibomrun describe` reports them as `KEY MISMATCH`, because the live anchor no longer matches. |
 
 Namespaces installed before signing existed have no Secret. The watcher treats that as "verification unavailable" and passes the data through unverified instead of dropping it. A Secret that exists but can't be read for another reason, such as a missing grant, is also passed through, with a logged warning.
 
