@@ -17,6 +17,10 @@ Run these in order, as a cluster-admin, for each upgrade:
 
 Existing AIBOMs are not changed by any of this.
 
+## Short name `aibomrun`
+
+The `AIBOM` CRD's short name changed from `aibom` to `aibomrun`, and the `AIBOMTelemetry` CRD no longer declares the `aibom` category, so the project no longer claims [k8s-aibom](https://github.com/GoogleCloudPlatform/k8s-aibom)'s short name. The category was also why `oc get aibom` listed `AIBOMTelemetry` objects rather than AIBOMs: kubectl expands a category before it looks up a short name. Both changes take effect once the CRDs are re-applied (step 1 above). After that, `oc get aibom` fails unless k8s-aibom is installed, so update scripts to `oc get aibomrun` or `oc get aiboms.aibom.io`. The CLI was renamed at the same time and is now `oc aibomrun`; reinstall it as described in its docs.
+
 ## Image caching (OpenShift)
 
 On OpenShift, `cacheImages.enabled` (default `true`) creates `ImageStream`s that mirror the injected images into the cluster's internal registry, and points the injection flags at that registry. On a `helm upgrade` into this from an earlier version:

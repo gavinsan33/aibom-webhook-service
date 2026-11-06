@@ -8,23 +8,25 @@ Because `AIBOM` is namespaced, it follows ordinary Kubernetes RBAC: a user with 
 
 `spec` is immutable once created. The CRD rejects any update that changes it, even from a user with `update` or `patch` on `aiboms.aibom.io`. Deletion is still governed by ordinary `delete` RBAC.
 
-Preferred: the `oc aibom` plugin from [`oc-aibom`](https://github.com/gavinsan33/oc-aibom) (a plugin subcommand, not built into `oc`), or the console plugin in the web UI:
+Preferred: the `oc aibomrun` plugin from [`oc-aibom`](https://github.com/gavinsan33/oc-aibom) (a plugin subcommand, not built into `oc`), or the console plugin in the web UI:
 
 ```bash
 # Requires the oc-aibom plugin
-oc aibom list -n <namespace>
-oc aibom describe <name> -n <namespace>
+oc aibomrun list -n <namespace>
+oc aibomrun describe <name> -n <namespace>
 ```
 
 Fallback, with no plugin needed (standard `oc`/`kubectl`):
 
 ```bash
 # List AIBOMs in a namespace
-oc get aiboms -n <namespace>
+oc get aibomrun -n <namespace>
 
 # Inspect one, including the full compiled AIBOM under spec.data
-oc get aibom <name> -n <namespace> -o yaml
+oc get aibomrun <name> -n <namespace> -o yaml
 ```
+
+`aibomrun` is the short name of `aiboms.aibom.io`. Don't use `aibom` or a bare `aiboms`: [k8s-aibom](https://github.com/GoogleCloudPlatform/k8s-aibom) defines a kind `AIBOM` too, and on a cluster with both those names resolve to whichever CRD the API server lists first.
 
 ## Spec fields
 
@@ -47,7 +49,7 @@ The AIBOM itself holds only summary statistics per metric. A downsampled copy of
 **Finding it.** The object is in the AIBOM's namespace, labeled `aibom.io/job-name`, with a random name. Use the name in `spec.data.telemetry_series_ref`, not a naming convention:
 
 ```bash
-oc get aibom <name> -n <namespace> -o jsonpath='{.spec.data.telemetry_series_ref.name}'
+oc get aibomrun <name> -n <namespace> -o jsonpath='{.spec.data.telemetry_series_ref.name}'
 oc get aibomtel <series-name> -n <namespace> -o jsonpath='{.spec.seriesJson}'
 ```
 
@@ -63,7 +65,7 @@ Values are in raw base units (bytes, bytes per second, cores, MiB, watts, percen
 
 **Resolution.** The series covers each pod's full run at up to about 200 points per metric; on very large runs the per-pod `series` may be dropped to fit the size cap.
 
-**Integrity.** The object isn't signed itself. The AIBOM's signed `spec.data.telemetry_series_ref` holds the SHA-256 and size of `spec.seriesJson`, and `oc aibom describe` checks the object against them on its `Telemetry Series:` line. It reports a match as fully verified only when the AIBOM's own signature is valid, since without that the digest could be forged along with the series. Only the postprocess Job's ServiceAccount can create these objects.
+**Integrity.** The object isn't signed itself. The AIBOM's signed `spec.data.telemetry_series_ref` holds the SHA-256 and size of `spec.seriesJson`, and `oc aibomrun describe` checks the object against them on its `Telemetry Series:` line. It reports a match as fully verified only when the AIBOM's own signature is valid, since without that the digest could be forged along with the series. Only the postprocess Job's ServiceAccount can create these objects.
 
 AIBOMs from before this resource existed reference a ConfigMap instead, with `configmap` and `key` fields in place of `kind` and `name`. They aren't migrated.
 
