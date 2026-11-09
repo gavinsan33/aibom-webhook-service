@@ -1384,32 +1384,33 @@ func (w *Watcher) createPostprocessJobCore(ctx context.Context, namespace, trigg
 		return "", fmt.Errorf("create postprocess job: %w", err)
 	}
 	if err == nil {
-		w.ownDataConfigMap(ctx, created, inputsName)
+		w.ownDataConfigMap(ctx, inputsName, created)
 	}
 
 	log.Printf("created postprocess job %s/%s for %s/%s", w.namespace, postprocessName, namespace, triggerName)
 	return postprocessName, nil
 }
 
-// ownDataConfigMap makes the postprocess Job the owner of its data ConfigMap,
-// so the TTL controller's removal of a retained failed Job takes the ConfigMap
-// with it instead of leaking it (#112). Skipped when the Job has no UID yet.
-func (w *Watcher) ownDataConfigMap(ctx context.Context, owner *batchv1.Job, configMapName string) {
-	if owner.UID == "" {
+// ownDataConfigMap makes owners (all in configMapName's namespace) the owners
+// of that ConfigMap, so Kubernetes deletes it once they're all gone: the
+// postprocess Job owns its inputs ConfigMap, so the TTL controller's removal
+// of a retained failed Job takes the ConfigMap with it instead of leaking it
+// (#112), and onJobDeleted hands a deleted JobSet sibling's data ConfigMap to
+// the siblings that still have to read it (#105). Owners with no UID yet are
+// skipped.
+func (w *Watcher) ownDataConfigMap(ctx context.Context, configMapName string, owners ...*batchv1.Job) {
+	var refs []metav1.OwnerReference
+	for _, owner := range owners {
+		if owner.UID != "" {
+			refs = append(refs, metav1.OwnerReference{APIVersion: "batch/v1", Kind: "Job", Name: owner.Name, UID: owner.UID})
+		}
+	}
+	if len(refs) == 0 {
 		return
 	}
-	patch, _ := json.Marshal(map[string]any{
-		"metadata": map[string]any{
-			"ownerReferences": []metav1.OwnerReference{{
-				APIVersion: "batch/v1",
-				Kind:       "Job",
-				Name:       owner.Name,
-				UID:        owner.UID,
-			}},
-		},
-	})
-	if _, err := w.clientset.CoreV1().ConfigMaps(owner.Namespace).Patch(ctx, configMapName, types.MergePatchType, patch, metav1.PatchOptions{}); err != nil {
-		log.Printf("warning: could not make postprocess job %s/%s own its data configmap %s: %v", owner.Namespace, owner.Name, configMapName, err)
+	patch, _ := json.Marshal(map[string]any{"metadata": map[string]any{"ownerReferences": refs}})
+	if _, err := w.clientset.CoreV1().ConfigMaps(owners[0].Namespace).Patch(ctx, configMapName, types.MergePatchType, patch, metav1.PatchOptions{}); err != nil {
+		log.Printf("warning: could not hand data configmap %s/%s to its owner jobs: %v", owners[0].Namespace, configMapName, err)
 	}
 }
 
@@ -1659,8 +1660,37 @@ func (w *Watcher) onJobDeleted(obj interface{}) {
 	if current, err := w.factory.Batch().V1().Jobs().Lister().Jobs(job.Namespace).Get(job.Name); err == nil && current.UID != job.UID {
 		return
 	}
-	w.deleteWorkloadDataConfigMap(context.TODO(), job.Namespace, job.Name)
+	// A JobSet sibling still to be postprocessed reads this Job's ConfigMap
+	// too (buildPostprocessInputs), and the whole JobSet is often deleted at
+	// once, so a sibling held by its finalizer may not have read it yet. Hand
+	// the ConfigMap to those siblings instead: Kubernetes deletes it once
+	// they're gone, which is after they've been read.
+	if pending := w.unpostprocessedJobSetSiblings(job); len(pending) > 0 {
+		w.ownDataConfigMap(context.TODO(), aibomdata.ConfigMapName(job.Name), pending...)
+	} else {
+		w.deleteWorkloadDataConfigMap(context.TODO(), job.Namespace, job.Name)
+	}
 	w.deleteWorkloadIdentity(context.TODO(), job.Namespace, job.Name)
+}
+
+// unpostprocessedJobSetSiblings returns the other Jobs of job's JobSet that
+// hold the finalizer but haven't been postprocessed yet.
+func (w *Watcher) unpostprocessedJobSetSiblings(job *batchv1.Job) []*batchv1.Job {
+	jobset := job.Labels["jobset.sigs.k8s.io/jobset-name"]
+	if jobset == "" {
+		return nil
+	}
+	siblings, err := w.factory.Batch().V1().Jobs().Lister().Jobs(job.Namespace).List(labels.SelectorFromSet(labels.Set{"jobset.sigs.k8s.io/jobset-name": jobset}))
+	if err != nil {
+		return nil
+	}
+	var pending []*batchv1.Job
+	for _, sibling := range siblings {
+		if sibling.UID != job.UID && hasFinalizer(sibling) && sibling.Annotations[AnnotationPostprocess] == "" {
+			pending = append(pending, sibling)
+		}
+	}
+	return pending
 }
 
 // onPodDeleted is onJobDeleted for pods the pod path owns. They have no

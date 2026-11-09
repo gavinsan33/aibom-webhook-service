@@ -2829,3 +2829,46 @@ func TestOnPodDeleted_CleansUpNeverPostprocessedPod(t *testing.T) {
 		t.Errorf("data configmap should be deleted, got err=%v", err)
 	}
 }
+
+// #105: a JobSet deleted all at once removes a non-qualifying sibling before
+// the qualifying one, held by its finalizer, has read the sibling's data. The
+// sibling's ConfigMap is handed to it rather than deleted; once it's been
+// postprocessed, a later sibling deletion just deletes.
+func TestOnJobDeleted_JobSetSiblingDataKeptForPendingTrigger(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	jobsetLabel := map[string]string{"jobset.sigs.k8s.io/jobset-name": "js"}
+	server := completedJob("js-server-0", "test-ns")
+	server.Labels = jobsetLabel
+	server.Finalizers = []string{finalizerName}
+	server.Status = batchv1.JobStatus{} // still running
+	client := completedJob("js-client-0", "test-ns")
+	client.Labels = jobsetLabel
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: aibomdata.ConfigMapName(client.Name), Namespace: "test-ns"}}
+	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: aibomdata.WorkloadIdentityName(client.Name), Namespace: "test-ns"}}
+	clientset := fake.NewSimpleClientset(ns, server, cm, sa)
+	w := New(clientset, Config{Namespace: "aibom-system", PostprocessImage: "aibom-postprocess:latest"})
+	startWatcher(t, w)
+
+	w.onJobDeleted(client)
+
+	got, err := clientset.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), cm.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("sibling data configmap should be kept for the pending trigger: %v", err)
+	}
+	if refs := got.OwnerReferences; len(refs) != 1 || refs[0].UID != server.UID {
+		t.Errorf("ownerReferences = %v, want the pending trigger %s", refs, server.Name)
+	}
+	if _, err := clientset.CoreV1().ServiceAccounts("test-ns").Get(context.TODO(), sa.Name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("sibling identity should be deleted, got err=%v", err)
+	}
+
+	server.Annotations = map[string]string{AnnotationPostprocess: "pp"}
+	if _, err := clientset.BatchV1().Jobs("test-ns").Update(context.TODO(), server, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	w.onJobDeleted(client)
+	if _, err := clientset.CoreV1().ConfigMaps("test-ns").Get(context.TODO(), cm.Name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("once the trigger is postprocessed the sibling configmap should be deleted, got err=%v", err)
+	}
+}
