@@ -1,0 +1,116 @@
+# Single-GPU LoRA fine-tuning with Axolotl (supervised fine-tuning / SFT).
+#
+# Runs Axolotl's `axolotl train <config> [overrides]` CLI. CLI-arg detection
+# reads the overrides (--base-model, --adapter, --lora-r, ...) into the AIBOM's
+# model/fine_tuning fields; the config YAML itself runs in the container and the
+# webhook's postprocess step can't read it, so (exactly like `trl --config`)
+# only the command-line overrides are picked up. Dataset composition is still
+# auto-detected at runtime by runtime_detector.py.
+#
+# WHY NOT THE OFFICIAL axolotlai/axolotl IMAGE:
+# That image installs Python in a venv (/workspace/axolotl-venv) owned by its own
+# build user. OpenShift's default (restricted-v2 SCC) runs every container as an
+# arbitrary high UID that doesn't own those files, so it can't execute the venv
+# python -> "exec: .../python: Permission denied". (The vendor image would work
+# only with a privileged SCC, e.g. `oc adm policy add-scc-to-user anyuid -z
+# default -n <ns>` as cluster-admin.) Instead this uses a plain python image,
+# whose Python is world-accessible, and pip-installs axolotl at startup so it
+# runs under the arbitrary UID with no SCC changes. HOME/HF_HOME/PATH point at
+# writable /tmp for the arbitrary UID.
+#
+# WHY python:3.11 AND NOT pytorch/pytorch:
+# axolotl pins a current torch; a PyTorch base ships its own (older) torch +
+# matching torchvision/torchaudio, and the pip install then upgrades torch alone,
+# leaving torchvision/torchaudio mismatched ("torchvision has no attribute
+# 'extension'"). Starting from a base with NO torch lets axolotl pull one fully
+# self-consistent stack (torch + torchvision + torchaudio + bundled CUDA wheels;
+# GPU works via the node's NVIDIA driver). python:3.11 (not -slim) is used because
+# torch needs libgomp1, which the slim image omits.
+#
+# Plain LoRA (not QLoRA): QLoRA needs bitsandbytes with a matching CUDA build, an
+# extra moving part; plain LoRA exercises the same detection path
+# (adaptation_method: lora) and runs with fewer dependencies. The qlora/dora/etc.
+# detection branches are covered by the unit tests.
+#
+# EXPIRATION: ttlSecondsAfterFinished deletes this Job (and its pod) 24h after it
+# finishes — success or failure — so a one-off test doesn't linger. The AIBOM
+# custom resource it produces is a separate object and is NOT deleted by this.
+#
+# Plain batch/v1 Job (fine-tuning has no client/server split): qualifies for
+# postprocessing via its GPU request and aibom.io/* annotations, triggering on
+# JobComplete.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: aibom-axolotl-finetune
+  namespace: project-gavin-test
+  annotations:
+    aibom.io/experiment-intent: sft
+    aibom.io/experiment-name: axolotl-lora-sft-benchmark
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400  # auto-delete the Job 24h after it finishes
+  template:
+    spec:
+      restartPolicy: Never
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: finetune
+          image: python:3.11
+          command:
+            - sh
+            - -c
+            - |
+              export PATH="$HOME/.local/bin:$PATH" && \
+              pip install --no-cache-dir --user axolotl && \
+              cat > /tmp/lora.yml <<'EOF'
+              base_model: ibm-granite/granite-3.3-2b-instruct
+              datasets:
+                - path: tatsu-lab/alpaca
+                  type: alpaca
+              output_dir: /tmp/output
+              # axolotl's prepared-dataset cache defaults to ./last_run_prepared
+              # (relative to CWD = "/", which the arbitrary UID can't write);
+              # point it at writable /tmp.
+              dataset_prepared_path: /tmp/last_run_prepared
+              sequence_len: 1024
+              gradient_accumulation_steps: 4
+              dataset_processes: 1
+              # LoRA needs to know which layers to adapt; auto-target all linear
+              # layers (model-agnostic) rather than hardcoding module names.
+              lora_target_linear: true
+              EOF
+              # axolotl's dataset prep exhausts the default open-file limit
+              # ("Too many open files"); raise the soft limit to the hard max
+              # (allowed without privilege).
+              ulimit -n "$(ulimit -Hn)" 2>/dev/null || true
+              axolotl train /tmp/lora.yml \
+                --base-model ibm-granite/granite-3.3-2b-instruct \
+                --adapter lora \
+                --lora-r 16 \
+                --lora-alpha 32 \
+                --micro-batch-size 4 \
+                --learning-rate 2e-4 \
+                --num-epochs 1 \
+                --max-steps 50 \
+                --seed 42
+          env:
+            # OpenShift runs the pod as an arbitrary non-root UID whose $HOME is
+            # "/" (not writable), so pip --user and HuggingFace's ~/.cache both
+            # fail. Point HOME, the HF cache, at writable /tmp.
+            - name: HOME
+              value: /tmp
+            - name: HF_HOME
+              value: /tmp/.cache/huggingface
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: HF_TOKEN
+                  optional: true
+          resources:
+            requests:
+              nvidia.com/gpu: "1"
+            limits:
+              nvidia.com/gpu: "1"

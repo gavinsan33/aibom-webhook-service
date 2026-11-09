@@ -768,6 +768,7 @@ def _flatten_container_command(container):
     script = _shell_script(command)
     if script is None:
         return command
+    script = _drop_comment_lines_and_heredocs(script)
     # Join shell line-continuations (`\` immediately followed by a
     # newline) before tokenizing -- shlex doesn't do this on its own,
     # and without it a backslash-newline survives as a spurious literal
@@ -784,6 +785,64 @@ def _flatten_container_command(container):
         return _strip_comments(list(lex))
     except ValueError:
         return command
+
+
+# Matched at an unquoted `<<`. The delimiter can't start with a digit, so an
+# arithmetic shift (`$((1<<3))`, `1 << 20`) is never taken for one.
+_HEREDOC_RE = re.compile(r"<<-?[ \t]*\\?(['\"]?)([A-Za-z_][\w.-]*)\1")
+
+
+def _drop_comment_lines_and_heredocs(script):
+    """Remove comments and heredoc bodies before tokenizing. Both are literal
+    text to the shell, but an apostrophe in them (`# it's`) leaves shlex with
+    an unbalanced quote and nothing gets tokenized.
+
+    Quotes are tracked across lines, so `#` and `<<` inside a quoted string
+    (`python -c "print(1 << 20)"`) are left alone. A heredoc is only entered
+    when its delimiter appears later on a line of its own; otherwise a
+    misread `<<` would delete the rest of the script."""
+    lines = script.split("\n")
+    out = []
+    quote = None
+    terminator = None
+    for n, line in enumerate(lines):
+        if terminator is not None:
+            if line.strip() == terminator:
+                terminator = None
+            continue
+        end = len(line)
+        i = 0
+        while i < len(line):
+            c = line[i]
+            if quote == "'":
+                if c == "'":
+                    quote = None
+            elif c == "\\":
+                i += 1  # the escaped character is literal
+            elif quote == '"':
+                if c == '"':
+                    quote = None
+            elif c in "'\"":
+                quote = c
+            elif c == "#" and (i == 0 or line[i - 1].isspace()):
+                end = i
+                break
+            elif line.startswith("<<<", i):
+                i += 3  # here-string
+                continue
+            elif line.startswith("<<", i):
+                m = _HEREDOC_RE.match(line, i)
+                if m:
+                    delim = m.group(2)
+                    if terminator is None and any(l.strip() == delim for l in lines[n + 1:]):
+                        terminator = delim
+                    i = m.end()  # past a quoted delimiter's quotes
+                    continue
+            i += 1
+        # A comment line stays as an empty line: like the shell, it ends a
+        # `\`-continued command rather than joining the lines around it.
+        out.append(line[:end])
+    return "\n".join(out)
 
 
 def _strip_comments(tokens):
@@ -1162,6 +1221,139 @@ def detect_trl_from_command(command):
 
 
 # ---------------------------------------------------------------------------
+# Axolotl (fine-tuning)
+#
+# `axolotl train <config.yml> [overrides]` (modern Click CLI, kebab-case
+# overrides), or the legacy `python -m axolotl.cli.train <config>` /
+# `accelerate launch -m axolotl.cli.train` (snake_case). The real config lives
+# in the YAML, which runs in the training container postprocess can't read, so
+# -- exactly like `trl --config` -- only values passed as CLI overrides are
+# seen; the detector still reports `training_framework` (and so an intent) when
+# none are. `_split_flag` normalizes kebab and snake to one spelling, so both
+# CLI styles map through the same (snake-keyed) table. Only `train` is a
+# training run (not preprocess/inference/merge-lora/...).
+# ---------------------------------------------------------------------------
+
+_AXOLOTL_ARG_MAP = {
+    "--base_model": ("model_name", str),
+    "--learning_rate": ("learning_rate", _finite_float),
+    "--micro_batch_size": ("batch_size", int),
+    "--num_epochs": ("epochs", _int_or_float),
+    "--lora_r": ("lora_rank", int),
+    "--lora_alpha": ("lora_alpha", int),
+    "--adapter": ("adapter", str),
+    "--load_in_4bit": ("load_in_4bit", bool),
+    "--load_in_8bit": ("load_in_8bit", bool),
+    "--peft_use_dora": ("use_dora", bool),
+    "--peft_use_rslora": ("use_rslora", bool),
+    "--seed": ("random_seed", int),
+}
+
+
+def _axolotl_args(tokens):
+    for seg in _invocation_segments(tokens):
+        for i, tok in enumerate(seg):
+            if os.path.basename(tok) == "axolotl" and seg[i + 1:i + 2] == ["train"]:
+                return seg[i + 2:]
+            if i > 0 and seg[i - 1] == "-m" and tok == "axolotl.cli.train":
+                return seg[i + 1:]
+    return None
+
+
+def detect_axolotl_from_command(command):
+    """Detect model/LoRA config from an `axolotl train`-style CLI invocation."""
+    args = _axolotl_args(command)
+    if args is None:
+        return None
+    parsed, _ = _parse_flags(args, _AXOLOTL_ARG_MAP, "_", bool_values=True)
+    result = {"training_framework": "axolotl", **parsed}
+
+    adapter = (result.pop("adapter", "") or "").lower()
+    load_in_4bit = result.pop("load_in_4bit", False)
+    load_in_8bit = result.pop("load_in_8bit", False)
+    use_dora = result.pop("use_dora", False)
+    use_rslora = result.pop("use_rslora", False)
+    if adapter in ("lora", "qlora"):
+        # axolotl's own QLoRA is `adapter: qlora`; a bare `lora` + 4/8-bit load
+        # is QLoRA in effect too. DoRA/rsLoRA win, as in the trl detector.
+        if use_dora:
+            result["adaptation_method"] = "dora"
+        elif use_rslora:
+            result["adaptation_method"] = "rslora"
+        elif adapter == "qlora" or load_in_4bit or load_in_8bit:
+            result["adaptation_method"] = "qlora"
+        else:
+            result["adaptation_method"] = "lora"
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# LLaMA-Factory (fine-tuning)
+#
+# `llamafactory-cli train <config.yaml> [key=value ...]` or
+# `llamafactory-cli train --flag ...` (`lmf` is the same entry point). It's
+# built on transformers, so its flag names mirror trl's HF-style set. The YAML
+# isn't read (same as trl/axolotl), but its `key=value` overrides are. In flag
+# mode an unset `--finetuning_type` is LLaMA-Factory's default, `lora`; in
+# config mode it's whatever the YAML says, so nothing is assumed. Only `lora`
+# carries an adaptation method (QLoRA when `--quantization_bit` is set,
+# DoRA/rsLoRA with their flags).
+# ---------------------------------------------------------------------------
+
+_LLAMAFACTORY_ARG_MAP = {
+    "--model_name_or_path": ("model_name", str),
+    "--finetuning_type": ("finetuning_type", str),
+    "--lora_rank": ("lora_rank", int),
+    "--lora_alpha": ("lora_alpha", int),
+    "--use_dora": ("use_dora", bool),
+    "--use_rslora": ("use_rslora", bool),
+    "--quantization_bit": ("quantization_bit", int),
+    "--learning_rate": ("learning_rate", _finite_float),
+    "--per_device_train_batch_size": ("batch_size", int),
+    "--num_train_epochs": ("epochs", _int_or_float),
+    "--seed": ("random_seed", int),
+}
+
+
+def _llamafactory_args(tokens):
+    for seg in _invocation_segments(tokens):
+        for i, tok in enumerate(seg):
+            if os.path.basename(tok) in ("llamafactory-cli", "lmf") and seg[i + 1:i + 2] == ["train"]:
+                return seg[i + 2:]
+    return None
+
+
+def detect_llamafactory_from_command(command):
+    """Detect model/LoRA config from a `llamafactory-cli train`-style CLI."""
+    args = _llamafactory_args(command)
+    if args is None:
+        return None
+    flag_mode = bool(args) and _is_flag_token(args[0])
+    if not flag_mode:
+        # `train cfg.yaml key=value` (OmegaConf.from_cli) -> `--key=value`.
+        args = ["--" + a for a in args[1:] if "=" in a and not a.startswith("-")]
+    parsed, _ = _parse_flags(args, _LLAMAFACTORY_ARG_MAP, "_", bool_values=True)
+    result = {"training_framework": "llama-factory", **parsed}
+
+    ft = (result.pop("finetuning_type", "lora" if flag_mode else "") or "").lower()
+    use_dora = result.pop("use_dora", False)
+    use_rslora = result.pop("use_rslora", False)
+    quantized = bool(result.pop("quantization_bit", None))
+    if ft == "lora":
+        if use_dora:
+            result["adaptation_method"] = "dora"
+        elif use_rslora:
+            result["adaptation_method"] = "rslora"
+        elif quantized:
+            result["adaptation_method"] = "qlora"
+        else:
+            result["adaptation_method"] = "lora"
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Parallelization
 # ---------------------------------------------------------------------------
 
@@ -1397,6 +1589,8 @@ def detect_model_from_containers(containers):
                 or detect_sglang_from_command(tokens)
                 or detect_lmdeploy_from_command(tokens)
                 or detect_trl_from_command(tokens)
+                or detect_axolotl_from_command(tokens)
+                or detect_llamafactory_from_command(tokens)
                 or _detect_vllm_from_entrypoint_args(container)
                 or _detect_tgi_from_entrypoint_args(container)
             )

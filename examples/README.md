@@ -114,3 +114,25 @@ Two of the five precedence tiers are exercised here: `detect_git_clone_from_cont
 # Deploy the example (namespace must be set up first)
 oc apply -f examples/granite-lora-finetune-git-clone.yaml
 ```
+
+## Example: Axolotl LoRA Fine-Tuning
+
+The `examples/axolotl-finetune.yaml` file runs the same kind of LoRA SFT, but through [Axolotl](https://github.com/axolotl-ai-cloud/axolotl)'s `axolotl train <config> [overrides]` CLI instead of `trl`. Axolotl is config-file driven, and that YAML runs inside the training container where `postprocess.py` can't read it — so, exactly like `trl --config`, only the values passed as command-line *overrides* are auto-detected (`--base-model`, `--adapter lora`, `--lora-r`, ...). It uses plain LoRA, recorded as `fine_tuning.adaptation_method: lora`. `--max-steps` keeps it short.
+
+**Why `python:3.11` + `pip install axolotl` instead of the official `axolotlai/axolotl` image:** that vendor image installs Python in a venv owned by its own build user, but OpenShift (the default `restricted-v2` SCC) runs every container as an arbitrary high UID that doesn't own those files and so can't execute the venv's Python (`exec: .../python: Permission denied`). A plain `python:3.11` image keeps Python world-accessible, so it runs under the arbitrary UID with no cluster changes; axolotl is pip-installed at startup (into `/tmp` via `HOME`/`--user`). It's a *bare* Python base (not `pytorch/pytorch`) on purpose: a PyTorch base ships its own torch + matching torchvision/torchaudio, and the install then upgrades torch alone, leaving the others mismatched (`torchvision has no attribute 'extension'`). Starting with no torch lets axolotl pull one self-consistent stack (GPU works via the node's NVIDIA driver and the wheels' bundled CUDA). `python:3.11` rather than `-slim` because torch needs `libgomp1`. To use the vendor image instead, grant its ServiceAccount a privileged SCC as cluster-admin: `oc adm policy add-scc-to-user anyuid -z default -n project-gavin-test`. Plain LoRA (not QLoRA) also avoids the bitsandbytes/CUDA dependency; the qlora detection branch is covered by the unit tests.
+
+This Job sets `ttlSecondsAfterFinished: 86400`, so Kubernetes deletes it (and its pod) 24h after it finishes — a one-off test won't linger. The AIBOM it produces is a separate object and is not removed by the TTL.
+
+```bash
+# Deploy the example (namespace must be set up first)
+oc apply -f examples/axolotl-finetune.yaml
+```
+
+## Example: LLaMA-Factory LoRA Fine-Tuning
+
+The `examples/llamafactory-finetune.yaml` file runs LoRA SFT via [LLaMA-Factory](https://github.com/hiyouga/LLaMA-Factory)'s `llamafactory-cli train` in *flag* mode. LLaMA-Factory is built on transformers, so its flags mirror the HF/`trl` names (`--model_name_or_path`, `--finetuning_type lora`, `--lora_rank`, ...), and CLI-arg detection reads them straight into the AIBOM's `model`/`fine_tuning`/`training` fields, recording `adaptation_method: lora`. A config-file run (`llamafactory-cli train config.yaml`) would instead expose nothing on the CLI; the YAML isn't read. It uses LLaMA-Factory's official image (its Python lives in a world-accessible `/opt/conda`, so unlike the axolotl vendor image it runs fine under OpenShift's arbitrary UID). Plain LoRA rather than QLoRA, since the stock image ships no bitsandbytes (QLoRA via `--quantization_bit` would fail); the qlora detection branch is covered by the unit tests.
+
+```bash
+# Deploy the example (namespace must be set up first)
+oc apply -f examples/llamafactory-finetune.yaml
+```
