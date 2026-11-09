@@ -13,11 +13,13 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gavinsan33/aibom-webhook-service/internal/aibomdata"
+	jsonpatch "gopkg.in/evanphx/json-patch.v4"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -694,6 +696,76 @@ func TestFinalizerAddedToAnnotatedJob(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Pod-level finalizer tests (bare/ReplicaSet-owned pods, e.g. KServe predictors)
 // ---------------------------------------------------------------------------
+
+// enforcePodResourceVersion makes the fake client treat pod patches the way
+// the API server does: each one bumps the pod's resourceVersion, and one that
+// names a stale resourceVersion fails with a Conflict. The fake ignores it.
+func enforcePodResourceVersion(client *fake.Clientset) {
+	gvr := corev1.SchemeGroupVersion.WithResource("pods")
+	client.PrependReactor("patch", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		pa := action.(k8stesting.PatchAction)
+		obj, err := client.Tracker().Get(gvr, pa.GetNamespace(), pa.GetName())
+		if err != nil {
+			return true, nil, err
+		}
+		current := obj.(*corev1.Pod)
+		var precondition struct {
+			Metadata struct {
+				ResourceVersion string `json:"resourceVersion"`
+			} `json:"metadata"`
+		}
+		_ = json.Unmarshal(pa.GetPatch(), &precondition)
+		if rv := precondition.Metadata.ResourceVersion; rv != "" && rv != current.ResourceVersion {
+			return true, nil, apierrors.NewConflict(gvr.GroupResource(), current.Name, fmt.Errorf("resourceVersion %s is stale", rv))
+		}
+		original, _ := json.Marshal(current)
+		merged, err := jsonpatch.MergePatch(original, pa.GetPatch())
+		if err != nil {
+			return true, nil, err
+		}
+		patched := &corev1.Pod{}
+		if err := json.Unmarshal(merged, patched); err != nil {
+			return true, nil, err
+		}
+		n, _ := strconv.Atoi(current.ResourceVersion)
+		patched.ResourceVersion = strconv.Itoa(n + 1)
+		return true, patched, client.Tracker().Update(gvr, patched, pa.GetNamespace())
+	})
+}
+
+// Postprocessing annotates the pod, which changes its resourceVersion, so the
+// finalizer has to be removed from that patched copy: from the event's copy
+// the API server rejects it as a conflict.
+func TestPostprocessOnPodDeletion_ReleasesFromAnnotatedCopy(t *testing.T) {
+	now := metav1.Now()
+	pod := instrumentedBarePod("predictor-pod", "test-ns")
+	pod.DeletionTimestamp = &now
+	pod.Finalizers = []string{podFinalizerName}
+	pod.ResourceVersion = "1"
+
+	client := fake.NewSimpleClientset(enabledNamespace("test-ns"), pod)
+	enforcePodResourceVersion(client)
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "aibom-postprocess:latest"})
+	// Only the namespace/Job informers: the pod informer would run onPodEvent
+	// concurrently and could release the pod from a fresher copy itself.
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	w.factory.Start(ctx.Done())
+	w.factory.WaitForCacheSync(ctx.Done())
+
+	w.onPodEvent(pod)
+
+	got, err := client.CoreV1().Pods("test-ns").Get(context.TODO(), "predictor-pod", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get pod: %v", err)
+	}
+	if got.Annotations[AnnotationPostprocess] == "" {
+		t.Fatal("pod should have been postprocessed")
+	}
+	if hasPodFinalizer(got) {
+		t.Error("finalizer should be removed right after postprocessing, not left for the next event")
+	}
+}
 
 func TestPodFinalizerAddedToGPUPod(t *testing.T) {
 	ns := enabledNamespace("test-ns")
@@ -1693,13 +1765,14 @@ type capturedContainer struct {
 	PodName              string `json:"pod_name"`
 	TerminatedReason     string `json:"terminated_reason"`
 	JobResult            string `json:"job_result"`
+	JobFailureReason     string `json:"job_failure_reason"`
 	RestartCount         int32  `json:"restart_count"`
 	LastTerminatedReason string `json:"last_terminated_reason"`
 	LastExitCode         *int32 `json:"last_exit_code"`
 	ServingRole          string `json:"serving_role"`
 }
 
-func capturedContainers(t *testing.T, w *Watcher, pods []corev1.Pod, jobResults map[string]string) []capturedContainer {
+func capturedContainers(t *testing.T, w *Watcher, pods []corev1.Pod, jobResults map[string]batchv1.JobCondition) []capturedContainer {
 	t.Helper()
 	_, _, containersJSON, _ := w.buildPostprocessInputs(context.Background(), "ns", "cm-name", pods, jobResults)
 	var containers []capturedContainer
@@ -1747,7 +1820,7 @@ func TestBuildPostprocessInputs_NoRestartHistoryWhenNeverRestarted(t *testing.T)
 
 	_, _, containersJSON, _ := w.buildPostprocessInputs(context.Background(), "ns", "cm-name", []corev1.Pod{*pod}, nil)
 
-	for _, key := range []string{"restart_count", "last_terminated_reason", "last_exit_code", "job_result", "serving_role"} {
+	for _, key := range []string{"restart_count", "last_terminated_reason", "last_exit_code", "job_result", "serving_role", "job_failure_reason"} {
 		if strings.Contains(containersJSON, key) {
 			t.Errorf("%s should be omitted, got: %s", key, containersJSON)
 		}
@@ -1767,12 +1840,19 @@ func TestBuildPostprocessInputs_TagsEachPodWithItsJobsResult(t *testing.T) {
 	w := &Watcher{clientset: fake.NewSimpleClientset()}
 
 	got := capturedContainers(t, w, []corev1.Pod{*failedAttempt, *sibling, *bare},
-		map[string]string{"train-job": "Complete", "sibling-job": "Failed"})
+		map[string]batchv1.JobCondition{
+			"train-job":   {Type: batchv1.JobComplete, Reason: "CompletionsReached"},
+			"sibling-job": {Type: batchv1.JobFailed, Reason: "DeadlineExceeded"},
+		})
 
 	want := map[string]string{"train-job-attempt1": "Complete", "sibling-job-pod": "Failed", "bare": ""}
+	wantReason := map[string]string{"sibling-job-pod": "DeadlineExceeded"}
 	for _, c := range got {
 		if c.JobResult != want[c.PodName] {
 			t.Errorf("pod %s: job_result = %q, want %q", c.PodName, c.JobResult, want[c.PodName])
+		}
+		if c.JobFailureReason != wantReason[c.PodName] {
+			t.Errorf("pod %s: job_failure_reason = %q, want %q", c.PodName, c.JobFailureReason, wantReason[c.PodName])
 		}
 	}
 }
@@ -1970,6 +2050,36 @@ func TestOnPodEvent_OptedOutNamespace_StripsFinalizer(t *testing.T) {
 	}
 	if hasPodFinalizer(got) {
 		t.Error("our pod finalizer should be released when the namespace opted out")
+	}
+}
+
+// A namespace being deleted is treated as opted out: its AIBOM would be
+// deleted with it, and the Role our finalizer removal needs is going too.
+func TestOnJobEvent_TerminatingNamespace_ReleasesWithoutPostprocessing(t *testing.T) {
+	ns := enabledNamespace("dying-ns")
+	now := metav1.Now()
+	ns.DeletionTimestamp = &now
+	job := completedJob("train-job", "dying-ns")
+	job.Finalizers = []string{finalizerName}
+	pod := heldPod("train-job", "dying-ns", true)
+
+	client := fake.NewSimpleClientset(ns, job, pod)
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "busybox:latest"})
+	startWatcher(t, w)
+
+	w.onJobEvent(job)
+	w.onPodEvent(pod)
+
+	got, err := client.BatchV1().Jobs("dying-ns").Get(context.TODO(), "train-job", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if hasFinalizer(got) {
+		t.Error("job finalizer should be released in a namespace being deleted")
+	}
+	assertPodReleased(t, client, "dying-ns", pod.Name)
+	if _, err := client.BatchV1().Jobs("aibom-system").Get(context.TODO(), ppName("dying-ns", "train-job"), metav1.GetOptions{}); err == nil {
+		t.Error("no postprocess job should be created for a namespace being deleted")
 	}
 }
 
@@ -2365,5 +2475,177 @@ func TestCreatePostprocessJob_WaitsForEarlierRunsPostprocessJob(t *testing.T) {
 	}
 	if n := postprocessRetryCount(got.Annotations); n != 0 {
 		t.Errorf("waiting should not count as a retry, got %d", n)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Job pods held by the webhook's pod finalizer (#164)
+// ---------------------------------------------------------------------------
+
+func heldPod(jobName, namespace string, deleting bool) *corev1.Pod {
+	pod := instrumentedPod(jobName, namespace)
+	pod.Finalizers = []string{"other.io/keep", podFinalizerName}
+	if deleting {
+		now := metav1.Now()
+		pod.DeletionTimestamp = &now
+	}
+	return pod
+}
+
+func assertPodReleased(t *testing.T, client *fake.Clientset, namespace, name string) {
+	t.Helper()
+	got, err := client.CoreV1().Pods(namespace).Get(context.TODO(), name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get pod: %v", err)
+	}
+	if hasPodFinalizer(got) {
+		t.Error("pod finalizer should have been released")
+	}
+	if len(got.Finalizers) != 1 || got.Finalizers[0] != "other.io/keep" {
+		t.Errorf("other finalizers must be preserved, got %v", got.Finalizers)
+	}
+}
+
+// A Job that hit activeDeadlineSeconds has had its pods deleted by the Job
+// controller; the finalizer keeps them readable, and is released once the
+// postprocess Job exists.
+func TestDeadlineExceededJob_PostprocessesHeldPodsThenReleasesThem(t *testing.T) {
+	job := completedJob("deadline-job", "test-ns")
+	job.Finalizers = []string{finalizerName}
+	job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, Reason: "DeadlineExceeded"}}
+	pod := heldPod("deadline-job", "test-ns", true)
+
+	client := fake.NewSimpleClientset(enabledNamespace("test-ns"), job, pod)
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "busybox:latest"})
+	startWatcher(t, w)
+
+	w.onJobEvent(job)
+
+	cm, err := client.CoreV1().ConfigMaps("aibom-system").Get(context.TODO(), inputsName("test-ns", "deadline-job"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("postprocess inputs not created: %v", err)
+	}
+	if !strings.Contains(cm.Data["containers.json"], `"job_failure_reason":"DeadlineExceeded"`) {
+		t.Errorf("containers.json should carry the deadline: %s", cm.Data["containers.json"])
+	}
+	assertPodReleased(t, client, "test-ns", pod.Name)
+}
+
+func TestNonQualifyingJob_ReleasesPodFinalizer(t *testing.T) {
+	job := completedJob("cpu-job", "test-ns")
+	pod := heldPod("cpu-job", "test-ns", false)
+	pod.Spec.Containers[0].Resources = corev1.ResourceRequirements{}
+
+	client := fake.NewSimpleClientset(enabledNamespace("test-ns"), job, pod)
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "busybox:latest"})
+	startWatcher(t, w)
+
+	w.onJobEvent(job)
+
+	assertPodReleased(t, client, "test-ns", pod.Name)
+}
+
+// A pod whose Job was deleted without it (--cascade=orphan) has nothing
+// left on the Job path to release it.
+func TestOrphanedJobPod_ReleasesPodFinalizer(t *testing.T) {
+	pod := heldPod("gone-job", "test-ns", true)
+
+	client := fake.NewSimpleClientset(enabledNamespace("test-ns"), pod)
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "busybox:latest"})
+	startWatcher(t, w)
+
+	w.onPodEvent(pod)
+
+	assertPodReleased(t, client, "test-ns", pod.Name)
+}
+
+// Cleaning up an earlier run's Job must not release a same-named rerun's
+// pods, and a pod left by the earlier run is released once the rerun
+// replaces its Job.
+func TestReleaseJobPods_MatchesJobUID(t *testing.T) {
+	oldJob := completedJob("train-job", "test-ns")
+	oldJob.UID = "first-run"
+	oldJob.Annotations = map[string]string{AnnotationPostprocess: "done"}
+	rerunPod := heldPod("train-job", "test-ns", false)
+	rerunPod.Labels[jobControllerUIDLabel] = "second-run"
+	leftover := heldPod("train-job", "test-ns", true)
+	leftover.Name = "train-job-old"
+	leftover.Labels[jobControllerUIDLabel] = "zeroth-run"
+
+	client := fake.NewSimpleClientset(enabledNamespace("test-ns"), oldJob, rerunPod, leftover)
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "busybox:latest"})
+	startWatcher(t, w)
+
+	w.onJobEvent(oldJob)
+	w.onPodEvent(leftover)
+
+	got, _ := client.CoreV1().Pods("test-ns").Get(context.TODO(), rerunPod.Name, metav1.GetOptions{})
+	if !hasPodFinalizer(got) {
+		t.Error("another run's pods must keep their finalizer")
+	}
+	assertPodReleased(t, client, "test-ns", leftover.Name)
+}
+
+func TestGivingUpOnPostprocess_ReleasesPodFinalizer(t *testing.T) {
+	job := completedJob("gpu-job", "test-ns")
+	job.Finalizers = []string{finalizerName}
+	job.Annotations = map[string]string{AnnotationPostprocessRetries: strconv.Itoa(maxPostprocessRetries - 1)}
+	pod := heldPod("gpu-job", "test-ns", true)
+
+	client := fake.NewSimpleClientset(enabledNamespace("test-ns"), job, pod)
+	client.PrependReactor("create", "jobs", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, fmt.Errorf("quota exceeded")
+	})
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "busybox:latest"})
+	startWatcher(t, w)
+
+	w.onJobEvent(job)
+
+	assertPodReleased(t, client, "test-ns", pod.Name)
+}
+
+// A Job deleted while running that never qualified has no Job finalizer and
+// is never postprocessed, but its pods still carry the webhook's.
+func TestDeletedNonQualifyingJob_ReleasesPodFinalizer(t *testing.T) {
+	now := metav1.Now()
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "cpu-job", Namespace: "test-ns", DeletionTimestamp: &now, Finalizers: []string{"other.io/keep"}}}
+	pod := heldPod("cpu-job", "test-ns", true)
+	pod.Spec.Containers[0].Resources = corev1.ResourceRequirements{}
+
+	client := fake.NewSimpleClientset(enabledNamespace("test-ns"), job, pod)
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "busybox:latest"})
+	startWatcher(t, w)
+
+	w.onJobEvent(job)
+
+	assertPodReleased(t, client, "test-ns", pod.Name)
+}
+
+func TestOptedOutNamespace_ReleasesJobPodFinalizer(t *testing.T) {
+	pod := heldPod("train-job", "disabled-ns", false)
+
+	client := fake.NewSimpleClientset(disabledNamespace("disabled-ns"), pod)
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "busybox:latest"})
+	startWatcher(t, w)
+
+	w.onPodEvent(pod)
+
+	assertPodReleased(t, client, "disabled-ns", pod.Name)
+}
+
+func TestRunningJobPod_KeepsPodFinalizer(t *testing.T) {
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "gpu-job", Namespace: "test-ns"}}
+	pod := heldPod("gpu-job", "test-ns", true)
+
+	client := fake.NewSimpleClientset(enabledNamespace("test-ns"), job, pod)
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "busybox:latest"})
+	startWatcher(t, w)
+
+	w.onJobEvent(job)
+	w.onPodEvent(pod)
+
+	got, _ := client.CoreV1().Pods("test-ns").Get(context.TODO(), pod.Name, metav1.GetOptions{})
+	if !hasPodFinalizer(got) {
+		t.Error("a deleted pod of a still-running Job must stay held until the Job finishes")
 	}
 }
