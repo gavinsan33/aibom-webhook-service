@@ -1712,7 +1712,10 @@ def _record_fsdp_policy(policy):
         name = _dtype_name(getattr(policy, attr, None))
         if name:
             value[attr] = name
-    _record_precision_once("fsdp_mixed_precision", value)
+    # FSDP1 builds an all-None MixedPrecision() when it's given none: that's
+    # no mixed precision, and must not claim the once-per-process slot.
+    if len(value) > 1:
+        _record_precision_once("fsdp_mixed_precision", value)
 
 
 def _install_fsdp_hook():

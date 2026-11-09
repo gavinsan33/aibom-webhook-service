@@ -90,6 +90,7 @@ def test_fsdp_mixed_precision_policy(fake_torch_module, monkeypatch):
     _module(monkeypatch, "torch.distributed.fsdp",
             MixedPrecision=MixedPrecision, MixedPrecisionPolicy=MixedPrecisionPolicy)
     rd.install_hooks()
+    MixedPrecision()  # FSDP1's default when given none: not mixed precision
     MixedPrecisionPolicy(param_dtype="torch.bfloat16", output_dtype="torch.float32")
 
     assert rd._runtime_info["fsdp_mixed_precision"] == {
