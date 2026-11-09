@@ -109,12 +109,14 @@ A library imported lazily (flash-attn, bitsandbytes) is listed from the first fl
 
 | Hook | Fires on | Captures |
 |---|---|---|
-| `torch.utils.data.DataLoader.__init__` | DataLoader construction | dataset class, root/path, split, transform name, dataset name, URLs, content fingerprint (hash of file names/sizes/mtimes), batch size |
+| `torch.utils.data.DataLoader.__init__` | DataLoader construction | dataset class, root/path, split, transform name, dataset name, URLs, content fingerprint (hash of file names/sizes/mtimes), batch size, and `sampling`: sampler class, `shuffle`, `drop_last`, `num_workers`, a passed `generator`'s seed, a custom `batch_sampler`'s class, and a `DistributedSampler`'s `sampler_seed`/`sampler_drop_last` |
 | `datasets.load_dataset` (HuggingFace) | call time | dataset name (for file builders like `json`/`csv`/`parquet`, the `data_files` or `data_dir`, with the builder in `builder`), config name, split(s), revision, `data_dir`/`data_files`, fingerprint, version, license, description |
 | torchvision datasets (19 known classes: MNIST family, CIFAR, ImageNet, ImageFolder, CelebA, LSUN, STL10, SVHN, VOC*, Coco*, Flickr*, Places365) | construction | dataset name (the most-derived known class: CIFAR100, not also CIFAR10), root, split, download flag, fingerprint |
 | `webdataset.WebDataset.__init__` | construction | dataset name, URL list |
 
 Dataset entries referring to the same underlying object are correlated (not double-recorded) first by **object identity**, then by **`(builder_name, config_name, split, cache directory)`** for the common case of a transformed dataset (`.map`/`.filter`/`.select`/`.shuffle`, or a `DatasetDict` split pull) wrapped in a fresh `DataLoader`. The cache directory's name hashes the `data_files` and revision, so two loads of one builder from different files stay apart. If two loads share that key, a loader over a transformed copy gets its own entry rather than a guessed one. Each merged entry tracks a `seen_via` list of every hook that touched it. Entries from different processes and pods are deduped on name, source, config, split, revision, `data_files`, `data_dir` and root/path, so two local files or a train and test split stay separate.
+
+`sampling` is read from the constructed loader, not its arguments, so Trainer runs are covered too: `dataloader_drop_last` and `dataloader_num_workers` show up as `drop_last`/`num_workers`, and `group_by_length` as a `LengthGroupedSampler`. `shuffle` is reported only for torch's `RandomSampler`, `SequentialSampler` and `DistributedSampler`; any other sampler is named without guessing. The first loader over a dataset sets it, so accelerate re-wrapping Trainer's loader doesn't replace it. Not captured: a `datasets` `.shuffle(seed=)` before the loader, and `IterableDataset` shuffle buffers.
 
 **CLI-arg detection** (`postprocess.py`, from container command/args): `--dataset_name`, `--dataset_config_name` and `--dataset_train_split` (→ `dataset.declared.config_name`/`split`). A trl `--config` YAML isn't read; the runtime hook sees the load it causes.
 
@@ -327,7 +329,6 @@ These are explicit non-goals, not gaps waiting to close:
 
 Gaps that are open issues rather than non-goals:
 
-- DataLoader shuffle, sampler type and `drop_last` (#177).
 - Training TP/PP/EP degrees, world size, ZeRO stage, FSDP sharding strategy (#178).
 - Beam search and generation parameters beyond temperature/top_p/top_k (#179).
 - KV-cache quantization (`--kv-cache-dtype`, LMDeploy `--quant-policy`) (#180).
