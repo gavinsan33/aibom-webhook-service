@@ -300,7 +300,15 @@ func (w *Watcher) onJobEvent(obj interface{}) {
 		// regardless of whether the job ends up qualifying for postprocessing
 		// here — see mutator.go's ensurePodWorkloadIdentity). Since this job
 		// will never reach collectAIBOM (the only other place that deletes
-		// it), clean it up here instead of leaking it forever.
+		// it), clean it up here instead of leaking it forever. An earlier
+		// same-named run's pods may still be using it (a JobSet's replacement
+		// of a deleted child Job owns none of the original's pods), as in
+		// collectAIBOM's triggerReplaced check; keep the finalizer and retry
+		// on the next resync, once onPodEvent has released them.
+		if w.earlierRunPodsRemain(job) {
+			log.Printf("pods of an earlier %s/%s remain; deferring cleanup of its workload identity", job.Namespace, job.Name)
+			return
+		}
 		w.deleteWorkloadIdentity(context.TODO(), job.Namespace, job.Name)
 		w.finishJob(context.TODO(), job)
 		return
@@ -643,14 +651,49 @@ func podsRequestGPU(pods []corev1.Pod) bool {
 	return false
 }
 
+// getInstrumentedPods lists the Job's own instrumented pods. The name alone
+// also matches pods of an earlier, deleted Job of the same name that are
+// still terminating: a JobSet recreates a child Job deleted while it's active
+// (the serving examples' client deletes the server), and that replacement
+// must not compile a second AIBOM from the original's pods. So pods are
+// matched by the Job's UID too, as in releaseJobPods.
 func (w *Watcher) getInstrumentedPods(job *batchv1.Job) ([]corev1.Pod, error) {
+	selector := labels.Set{"batch.kubernetes.io/job-name": job.Name, LabelInstrumented: "true"}
+	if job.UID != "" {
+		selector[jobControllerUIDLabel] = string(job.UID)
+	}
 	pods, err := w.clientset.CoreV1().Pods(job.Namespace).List(context.TODO(), metav1.ListOptions{
-		LabelSelector: fmt.Sprintf("batch.kubernetes.io/job-name=%s,%s=true", job.Name, LabelInstrumented),
+		LabelSelector: labels.SelectorFromSet(selector).String(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("list pods for job %s/%s: %w", job.Namespace, job.Name, err)
 	}
 	return pods.Items, nil
+}
+
+// earlierRunPodsRemain reports whether pods of an earlier same-named Job (a
+// different UID) are still in the informer cache. They share the workload
+// identity, which is named after the workload, so it can't be deleted yet.
+// Before the pod cache has synced (Job events start arriving first) that
+// can't be told, so it reports true and the caller retries on a resync.
+func (w *Watcher) earlierRunPodsRemain(job *batchv1.Job) bool {
+	if job.UID == "" {
+		return false
+	}
+	informer := w.podFactory.Core().V1().Pods().Informer()
+	if !informer.HasSynced() {
+		return true
+	}
+	pods, err := w.podFactory.Core().V1().Pods().Lister().Pods(job.Namespace).List(labels.SelectorFromSet(labels.Set{"batch.kubernetes.io/job-name": job.Name}))
+	if err != nil {
+		return false
+	}
+	for _, pod := range pods {
+		if pod.Labels[jobControllerUIDLabel] != string(job.UID) {
+			return true
+		}
+	}
+	return false
 }
 
 // completionIndex is an Indexed Job pod's index, or MaxInt for any other pod.
@@ -1380,7 +1423,34 @@ func (w *Watcher) createPostprocessJob(ctx context.Context, job *batchv1.Job) er
 		log.Printf("warning: could not list pods for %s/%s: %v", job.Namespace, job.Name, err)
 	}
 
-	if jobsetName := job.Labels["jobset.sigs.k8s.io/jobset-name"]; jobsetName != "" {
+	// Collect AIBOM annotations from the job and sibling jobs in the JobSet,
+	// and each Job's terminal condition (#112): a pod of a Job that completed
+	// is not a failure even if an earlier attempt of it was.
+	jobsetName := job.Labels["jobset.sigs.k8s.io/jobset-name"]
+	annotations := collectAIBOMAnnotations(job.Annotations)
+	jobResults := map[string]batchv1.JobCondition{job.Name: terminalCondition(job)}
+	jobUIDs := map[string]types.UID{job.Name: job.UID}
+	if jobsetName != "" {
+		siblingJobs, err := w.clientset.BatchV1().Jobs(job.Namespace).List(ctx, metav1.ListOptions{
+			LabelSelector: fmt.Sprintf("jobset.sigs.k8s.io/jobset-name=%s", jobsetName),
+		})
+		if err == nil {
+			for i := range siblingJobs.Items {
+				sibling := &siblingJobs.Items[i]
+				if _, ok := jobResults[sibling.Name]; !ok {
+					jobResults[sibling.Name] = terminalCondition(sibling)
+					jobUIDs[sibling.Name] = sibling.UID
+				}
+				if len(annotations) == 0 {
+					if sa := collectAIBOMAnnotations(sibling.Annotations); len(sa) > 0 {
+						annotations = sa
+					}
+				}
+			}
+		}
+	}
+
+	if jobsetName != "" {
 		siblingPods, err := w.clientset.CoreV1().Pods(job.Namespace).List(ctx, metav1.ListOptions{
 			LabelSelector: fmt.Sprintf("jobset.sigs.k8s.io/jobset-name=%s,%s=true", jobsetName, LabelInstrumented),
 		})
@@ -1390,32 +1460,14 @@ func (w *Watcher) createPostprocessJob(ctx context.Context, job *batchv1.Job) er
 				seen[p.Name] = true
 			}
 			for _, p := range siblingPods.Items {
+				// A pod left by a replaced child Job would otherwise be given
+				// its same-named replacement's jobResults entry. Pods whose Job
+				// is gone altogether have no entry and are kept.
+				if uid, ok := jobUIDs[p.Labels["batch.kubernetes.io/job-name"]]; ok && uid != "" && p.Labels[jobControllerUIDLabel] != string(uid) {
+					continue
+				}
 				if !seen[p.Name] {
 					pods = append(pods, p)
-				}
-			}
-		}
-	}
-
-	// Collect AIBOM annotations from the job and sibling jobs in the JobSet,
-	// and each Job's terminal condition (#112): a pod of a Job that completed
-	// is not a failure even if an earlier attempt of it was.
-	annotations := collectAIBOMAnnotations(job.Annotations)
-	jobResults := map[string]batchv1.JobCondition{job.Name: terminalCondition(job)}
-	if jobsetName := job.Labels["jobset.sigs.k8s.io/jobset-name"]; jobsetName != "" {
-		siblingJobs, err := w.clientset.BatchV1().Jobs(job.Namespace).List(ctx, metav1.ListOptions{
-			LabelSelector: fmt.Sprintf("jobset.sigs.k8s.io/jobset-name=%s", jobsetName),
-		})
-		if err == nil {
-			for i := range siblingJobs.Items {
-				sibling := &siblingJobs.Items[i]
-				if _, ok := jobResults[sibling.Name]; !ok {
-					jobResults[sibling.Name] = terminalCondition(sibling)
-				}
-				if len(annotations) == 0 {
-					if sa := collectAIBOMAnnotations(sibling.Annotations); len(sa) > 0 {
-						annotations = sa
-					}
 				}
 			}
 		}
