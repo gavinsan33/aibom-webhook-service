@@ -3416,6 +3416,29 @@ def test_heredoc_body_is_not_a_command():
     assert result["random_seed"] == 3
 
 
+def test_shift_operators_are_not_heredocs():
+    """`<<` in a quoted string or an arithmetic shift started a heredoc whose
+    delimiter never appeared, deleting the rest of the script."""
+    for line in (
+        'python -c "print(1 << 20)"',
+        "N=$((1<<3))",
+        "echo $((a << b))",
+        "python -c 'x = 1 <<EOF'",
+    ):
+        result = pp.detect_model_from_containers([_sh(line + "\ntrl sft --seed 3\n")])
+        assert result.get("random_seed") == 3, line
+
+
+def test_apostrophe_in_trailing_comment_doesnt_break_tokenizing():
+    result = pp.detect_model_from_containers([_sh("pip install trl  # it's pinned\ntrl sft --seed 3\n")])
+    assert result["random_seed"] == 3
+
+
+def test_hash_inside_multiline_quote_is_not_a_comment():
+    script = 'python -c "\n# it is\nprint(1)\n" && trl sft --seed 3\n'
+    assert pp.detect_model_from_containers([_sh(script)])["random_seed"] == 3
+
+
 def test_trailing_comment_does_not_merge_the_next_line():
     """shlex's own comment handling ate the newline, so `pip install` and the
     server ended up in one (package-install) command."""

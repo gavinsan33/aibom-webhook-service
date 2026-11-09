@@ -787,26 +787,61 @@ def _flatten_container_command(container):
         return command
 
 
-_HEREDOC_RE = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)(\w+)\1")
+# Matched at an unquoted `<<`. The delimiter can't start with a digit, so an
+# arithmetic shift (`$((1<<3))`, `1 << 20`) is never taken for one.
+_HEREDOC_RE = re.compile(r"<<-?[ \t]*\\?(['\"]?)([A-Za-z_][\w.-]*)\1")
 
 
 def _drop_comment_lines_and_heredocs(script):
-    """Remove whole-line comments and heredoc bodies before tokenizing. Both
-    are literal text to the shell, but an apostrophe in them (`# it's`)
-    leaves shlex with an unbalanced quote and nothing gets tokenized."""
+    """Remove comments and heredoc bodies before tokenizing. Both are literal
+    text to the shell, but an apostrophe in them (`# it's`) leaves shlex with
+    an unbalanced quote and nothing gets tokenized.
+
+    Quotes are tracked across lines, so `#` and `<<` inside a quoted string
+    (`python -c "print(1 << 20)"`) are left alone. A heredoc is only entered
+    when its delimiter appears later on a line of its own; otherwise a
+    misread `<<` would delete the rest of the script."""
+    lines = script.split("\n")
     out = []
+    quote = None
     terminator = None
-    for line in script.split("\n"):
+    for n, line in enumerate(lines):
         if terminator is not None:
             if line.strip() == terminator:
                 terminator = None
             continue
-        if line.lstrip().startswith("#"):
-            continue
-        out.append(line)
-        m = _HEREDOC_RE.search(line)
-        if m:
-            terminator = m.group(2)
+        end = len(line)
+        i = 0
+        while i < len(line):
+            c = line[i]
+            if quote == "'":
+                if c == "'":
+                    quote = None
+            elif c == "\\":
+                i += 1  # the escaped character is literal
+            elif quote == '"':
+                if c == '"':
+                    quote = None
+            elif c in "'\"":
+                quote = c
+            elif c == "#" and (i == 0 or line[i - 1].isspace()):
+                end = i
+                break
+            elif line.startswith("<<<", i):
+                i += 3  # here-string
+                continue
+            elif line.startswith("<<", i):
+                m = _HEREDOC_RE.match(line, i)
+                if m:
+                    delim = m.group(2)
+                    if terminator is None and any(l.strip() == delim for l in lines[n + 1:]):
+                        terminator = delim
+                    i = m.end()  # past a quoted delimiter's quotes
+                    continue
+            i += 1
+        # A comment line stays as an empty line: like the shell, it ends a
+        # `\`-continued command rather than joining the lines around it.
+        out.append(line[:end])
     return "\n".join(out)
 
 
