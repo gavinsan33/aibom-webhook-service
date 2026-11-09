@@ -1291,12 +1291,14 @@ def detect_axolotl_from_command(command):
 # ---------------------------------------------------------------------------
 # LLaMA-Factory (fine-tuning)
 #
-# `llamafactory-cli train <config.yaml>` or `llamafactory-cli train --flag ...`.
-# It's built on transformers, so its flag names mirror trl's HF-style set. A
-# config-file run exposes nothing on the CLI (not read, same as trl/axolotl); a
-# flag-style run is parsed here. `--finetuning_type` selects lora/full/freeze;
-# only `lora` carries an adaptation method (QLoRA when `--quantization_bit` is
-# set, DoRA/rsLoRA with their flags).
+# `llamafactory-cli train <config.yaml> [key=value ...]` or
+# `llamafactory-cli train --flag ...` (`lmf` is the same entry point). It's
+# built on transformers, so its flag names mirror trl's HF-style set. The YAML
+# isn't read (same as trl/axolotl), but its `key=value` overrides are. In flag
+# mode an unset `--finetuning_type` is LLaMA-Factory's default, `lora`; in
+# config mode it's whatever the YAML says, so nothing is assumed. Only `lora`
+# carries an adaptation method (QLoRA when `--quantization_bit` is set,
+# DoRA/rsLoRA with their flags).
 # ---------------------------------------------------------------------------
 
 _LLAMAFACTORY_ARG_MAP = {
@@ -1317,7 +1319,7 @@ _LLAMAFACTORY_ARG_MAP = {
 def _llamafactory_args(tokens):
     for seg in _invocation_segments(tokens):
         for i, tok in enumerate(seg):
-            if os.path.basename(tok) == "llamafactory-cli" and seg[i + 1:i + 2] == ["train"]:
+            if os.path.basename(tok) in ("llamafactory-cli", "lmf") and seg[i + 1:i + 2] == ["train"]:
                 return seg[i + 2:]
     return None
 
@@ -1327,10 +1329,14 @@ def detect_llamafactory_from_command(command):
     args = _llamafactory_args(command)
     if args is None:
         return None
+    flag_mode = bool(args) and _is_flag_token(args[0])
+    if not flag_mode:
+        # `train cfg.yaml key=value` (OmegaConf.from_cli) -> `--key=value`.
+        args = ["--" + a for a in args[1:] if "=" in a and not a.startswith("-")]
     parsed, _ = _parse_flags(args, _LLAMAFACTORY_ARG_MAP, "_", bool_values=True)
     result = {"training_framework": "llama-factory", **parsed}
 
-    ft = (result.pop("finetuning_type", "") or "").lower()
+    ft = (result.pop("finetuning_type", "lora" if flag_mode else "") or "").lower()
     use_dora = result.pop("use_dora", False)
     use_rslora = result.pop("use_rslora", False)
     quantized = bool(result.pop("quantization_bit", None))

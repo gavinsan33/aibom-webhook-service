@@ -497,6 +497,25 @@ def test_detect_llamafactory_full_finetune_has_no_adapter():
     assert "adaptation_method" not in result
 
 
+def test_detect_llamafactory_flag_mode_defaults_to_lora():
+    # LLaMA-Factory's own default finetuning_type is lora.
+    result = pp.detect_llamafactory_from_command(
+        ["lmf", "train", "--model_name_or_path", "org/m", "--lora_rank", "8"]
+    )
+    assert result["adaptation_method"] == "lora"
+
+
+def test_detect_llamafactory_config_overrides():
+    # `cfg.yaml key=value` overrides are read; finetuning_type is in the YAML,
+    # so no default is assumed.
+    result = pp.detect_llamafactory_from_command(
+        ["llamafactory-cli", "train", "sft.yaml", "learning_rate=1e-5", "lora_rank=8"]
+    )
+    assert result == {"training_framework": "llama-factory", "learning_rate": 1e-5, "lora_rank": 8}
+    result = pp.detect_llamafactory_from_command(["llamafactory-cli", "train", "$CONFIG"])
+    assert result == {"training_framework": "llama-factory"}
+
+
 def test_detect_llamafactory_config_only():
     result = pp.detect_llamafactory_from_command(["llamafactory-cli", "train", "sft.yaml"])
     assert result == {"training_framework": "llama-factory"}
