@@ -4032,3 +4032,11 @@ def test_precision_block_is_null_when_nothing_seen():
 ])
 def test_cli_mixed_precision(command, expected):
     assert pp.detect_model_from_containers([{"command": command}]).get("mixed_precision") == expected
+
+
+def test_unhashable_fsdp_param_dtype_doesnt_crash():
+    """runtime_info is workload-written; a list here raised TypeError out of
+    compile_aibom, so no AIBOM was made."""
+    runtime_info = {"fsdp_mixed_precision": {"param_dtype": []}}
+    assert pp.training_mixed_precision(runtime_info, {}) == (None, None)
+    assert pp.training_precision(runtime_info) is None

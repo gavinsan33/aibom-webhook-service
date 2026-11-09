@@ -3223,7 +3223,7 @@ def training_mixed_precision(runtime_info, dm):
     candidates = (
         (isinstance(accelerator, dict) and valid(accelerator.get("mixed_precision")), "accelerator"),
         (valid(runtime_info.get("deepspeed_precision")), "deepspeed"),
-        (isinstance(fsdp, dict) and _HALF_DTYPES.get(fsdp.get("param_dtype")), "fsdp"),
+        (isinstance(fsdp, dict) and _HALF_DTYPES.get(_short_or_none(fsdp.get("param_dtype"))), "fsdp"),
         (valid(runtime_info.get("mixed_precision")), "training_arguments"),
         (isinstance(runtime_info.get("fp8"), dict) and "fp8", "fp8_hook"),
         # A custom loop's torch.autocast, when it used one half dtype.
