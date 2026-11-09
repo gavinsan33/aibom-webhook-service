@@ -300,7 +300,15 @@ func (w *Watcher) onJobEvent(obj interface{}) {
 		// regardless of whether the job ends up qualifying for postprocessing
 		// here — see mutator.go's ensurePodWorkloadIdentity). Since this job
 		// will never reach collectAIBOM (the only other place that deletes
-		// it), clean it up here instead of leaking it forever.
+		// it), clean it up here instead of leaking it forever. An earlier
+		// same-named run's pods may still be using it (a JobSet's replacement
+		// of a deleted child Job owns none of the original's pods), as in
+		// collectAIBOM's triggerReplaced check; keep the finalizer and retry
+		// on the next resync, once onPodEvent has released them.
+		if w.earlierRunPodsRemain(job) {
+			log.Printf("pods of an earlier %s/%s remain; deferring cleanup of its workload identity", job.Namespace, job.Name)
+			return
+		}
 		w.deleteWorkloadIdentity(context.TODO(), job.Namespace, job.Name)
 		w.finishJob(context.TODO(), job)
 		return
@@ -661,6 +669,31 @@ func (w *Watcher) getInstrumentedPods(job *batchv1.Job) ([]corev1.Pod, error) {
 		return nil, fmt.Errorf("list pods for job %s/%s: %w", job.Namespace, job.Name, err)
 	}
 	return pods.Items, nil
+}
+
+// earlierRunPodsRemain reports whether pods of an earlier same-named Job (a
+// different UID) are still in the informer cache. They share the workload
+// identity, which is named after the workload, so it can't be deleted yet.
+// Before the pod cache has synced (Job events start arriving first) that
+// can't be told, so it reports true and the caller retries on a resync.
+func (w *Watcher) earlierRunPodsRemain(job *batchv1.Job) bool {
+	if job.UID == "" {
+		return false
+	}
+	informer := w.podFactory.Core().V1().Pods().Informer()
+	if !informer.HasSynced() {
+		return true
+	}
+	pods, err := w.podFactory.Core().V1().Pods().Lister().Pods(job.Namespace).List(labels.SelectorFromSet(labels.Set{"batch.kubernetes.io/job-name": job.Name}))
+	if err != nil {
+		return false
+	}
+	for _, pod := range pods {
+		if pod.Labels[jobControllerUIDLabel] != string(job.UID) {
+			return true
+		}
+	}
+	return false
 }
 
 // completionIndex is an Indexed Job pod's index, or MaxInt for any other pod.

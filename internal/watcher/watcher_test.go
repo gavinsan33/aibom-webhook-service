@@ -463,8 +463,9 @@ func TestOnJobEvent_ReplacementJobIgnoresOriginalsPods(t *testing.T) {
 		job.UID = "replacement"
 		pod := instrumentedPod("server-0", "test-ns")
 		pod.Labels[jobControllerUIDLabel] = tc.podJobUID
+		identity := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: aibomdata.WorkloadIdentityName("server-0"), Namespace: "test-ns"}}
 
-		client := fake.NewSimpleClientset(ns, job, pod)
+		client := fake.NewSimpleClientset(ns, job, pod, identity)
 		w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "busybox:latest"})
 		startWatcher(t, w)
 
@@ -473,6 +474,11 @@ func TestOnJobEvent_ReplacementJobIgnoresOriginalsPods(t *testing.T) {
 		_, err := client.BatchV1().Jobs("aibom-system").Get(context.TODO(), ppName("test-ns", "server-0"), metav1.GetOptions{})
 		if got := err == nil; got != tc.want {
 			t.Errorf("pod of %s: postprocessed = %v, want %v", tc.podJobUID, got, tc.want)
+		}
+		// The identity is named after the workload, so the original's pods
+		// still use it.
+		if _, err := client.CoreV1().ServiceAccounts("test-ns").Get(context.TODO(), identity.Name, metav1.GetOptions{}); err != nil && !tc.want {
+			t.Errorf("the original run's workload identity was deleted while its pods remain: %v", err)
 		}
 	}
 }
