@@ -201,3 +201,29 @@ func TestMutate_PyTorchJobPod_UsesPodNamedTrigger(t *testing.T) {
 		}
 	}
 }
+
+// A pod owned by a "Job" from another API group (a Volcano Job, say) has no
+// batch.kubernetes.io/job-name label, so the watcher names it by pod. The
+// webhook must agree rather than name it after the owner (#105).
+func TestMutate_NonBatchJobOwner_UsesPodNamedTrigger(t *testing.T) {
+	m, clientset := newTestMutatorWithClientset()
+	pod := podWithGPU()
+	pod.OwnerReferences = []metav1.OwnerReference{{APIVersion: "batch.volcano.sh/v1alpha1", Kind: "Job", Name: "vc-job"}}
+	patches, err := m.Mutate(pod, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, err := clientset.CoreV1().ServiceAccounts(pod.Namespace).Get(t.Context(), aibomdata.WorkloadIdentityName("vc-job"), metav1.GetOptions{}); err == nil {
+		t.Error("no identity should be provisioned under the owner's name")
+	}
+	for _, p := range patches {
+		if p.Path != "/spec/initContainers" {
+			continue
+		}
+		for _, env := range p.Value.([]corev1.Container)[0].Env {
+			if env.Name == "AIBOM_DATA_CONFIGMAP" {
+				t.Errorf("AIBOM_DATA_CONFIGMAP = %q, want it unset so the pod name is used", env.Value)
+			}
+		}
+	}
+}

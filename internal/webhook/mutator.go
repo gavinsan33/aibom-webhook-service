@@ -266,21 +266,25 @@ func (m *Mutator) isPostprocessPod(pod *corev1.Pod, requesterUsername string) bo
 	return requesterUsername == m.TrustedJobControllerIdentity
 }
 
-// hasJobOwner reports whether pod has a plain batch/v1 Job in its
-// ownerReferences — narrower than hasMatchingOwner, which also matches
-// PyTorchJob; postprocess Jobs are always plain Jobs.
+// hasJobOwner reports whether pod has a Job in its ownerReferences —
+// narrower than hasMatchingOwner, which also matches PyTorchJob; postprocess
+// Jobs are always plain Jobs.
 func hasJobOwner(pod *corev1.Pod) bool {
-	return jobOwnerName(pod) != ""
-}
-
-// jobOwnerName is the name of pod's batch/v1 Job owner, "" if it has none.
-func jobOwnerName(pod *corev1.Pod) string {
 	for _, ref := range pod.OwnerReferences {
 		if ref.Kind == "Job" {
-			return ref.Name
+			return true
 		}
 	}
-	return ""
+	return false
+}
+
+// jobOwnerName is the name of pod's batch/v1 Job, "" if it has none. It's
+// read from the label the Job controller sets on every pod it creates, before
+// admission, because that's what the watcher routes pods by: an owner of kind
+// "Job" from another API group (a Volcano Job, say) leaves it unset, so its
+// pods go down the watcher's pod path and are named by pod (#105).
+func jobOwnerName(pod *corev1.Pod) string {
+	return pod.Labels["batch.kubernetes.io/job-name"]
 }
 
 // stripSpoofedInstrumentationClaims returns JSON patches removing any
@@ -328,7 +332,7 @@ func (m *Mutator) ensurePodWorkloadIdentity(pod *corev1.Pod) string {
 	if m.Clientset == nil {
 		return ""
 	}
-	if !hasJobOwner(pod) {
+	if jobOwnerName(pod) == "" {
 		return ""
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), workloadIdentityProvisionTimeout)
@@ -360,7 +364,7 @@ func triggerName(pod *corev1.Pod) string {
 
 // dataConfigMapEnvVar returns the static AIBOM_DATA_CONFIGMAP env var, but
 // only when triggerName(pod) is reliably known at admission time — i.e. the
-// pod has a Job owner (its name comes from ownerReferences, already set
+// pod has a Job owner (its name comes from the job-name label, already set
 // before admission). For any other pod (e.g. a KServe predictor),
 // triggerName falls back to pod.Name, which is
 // EMPTY at this point for any pod created via generateName — the API server
@@ -371,7 +375,7 @@ func triggerName(pod *corev1.Pod) string {
 // derives the same name at runtime from POD_NAME (a downward API value,
 // resolved by the kubelet after the real name exists).
 func dataConfigMapEnvVar(pod *corev1.Pod) (corev1.EnvVar, bool) {
-	if !hasJobOwner(pod) {
+	if jobOwnerName(pod) == "" {
 		return corev1.EnvVar{}, false
 	}
 	return corev1.EnvVar{Name: "AIBOM_DATA_CONFIGMAP", Value: aibomdata.ConfigMapName(triggerName(pod))}, true
