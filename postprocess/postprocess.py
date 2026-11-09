@@ -1622,7 +1622,7 @@ def detect_model_from_storage(storage, containers=None):
 
 def detect_model_from_containers(containers):
     model_result = None
-    parallel_result = None
+    parallel_result = {}
     for container in containers:
         tokens = _flatten_container_command(container)
         if model_result is None:
@@ -1637,14 +1637,16 @@ def detect_model_from_containers(containers):
                 or _detect_vllm_from_entrypoint_args(container)
                 or _detect_tgi_from_entrypoint_args(container)
             )
-        if parallel_result is None:
-            parallel_result = detect_parallelization_from_command(tokens)
-        if model_result and parallel_result:
-            break
+        # Per key, first container wins: one with only a --mixed_precision
+        # mustn't end the search for another's launcher.
+        for key, value in (detect_parallelization_from_command(tokens) or {}).items():
+            parallel_result.setdefault(key, value)
 
+    # The training CLI's own --bf16/--fp16 wins over a launcher's
+    # --mixed_precision: TrainingArguments sets ACCELERATE_MIXED_PRECISION.
     result = dict(model_result or {})
-    if parallel_result:
-        result.update(parallel_result)
+    for key, value in parallel_result.items():
+        result.setdefault(key, value)
     return result
 
 

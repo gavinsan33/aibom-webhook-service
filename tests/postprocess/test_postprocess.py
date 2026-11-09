@@ -4034,6 +4034,22 @@ def test_cli_mixed_precision(command, expected):
     assert pp.detect_model_from_containers([{"command": command}]).get("mixed_precision") == expected
 
 
+def test_cli_mixed_precision_merge():
+    # The trainer's own flag wins over the launcher's (TrainingArguments
+    # sets ACCELERATE_MIXED_PRECISION).
+    result = pp.detect_model_from_containers(
+        [{"command": ["accelerate", "launch", "--mixed_precision", "fp16", "-m", "trl", "sft", "--bf16"]}])
+    assert result["mixed_precision"] == "bf16"
+    # A container with only --mixed_precision doesn't end the search for
+    # another container's launcher.
+    result = pp.detect_model_from_containers([
+        {"command": ["accelerate", "launch", "--mixed_precision", "bf16", "train.py"]},
+        {"command": ["torchrun", "--nproc_per_node=2", "train.py"]},
+    ])
+    assert result["mixed_precision"] == "bf16"
+    assert result["parallelization_strategy"] == "data_parallel"
+
+
 def test_unhashable_fsdp_param_dtype_doesnt_crash():
     """runtime_info is workload-written; a list here raised TypeError out of
     compile_aibom, so no AIBOM was made."""
