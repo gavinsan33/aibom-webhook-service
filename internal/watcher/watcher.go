@@ -1423,7 +1423,34 @@ func (w *Watcher) createPostprocessJob(ctx context.Context, job *batchv1.Job) er
 		log.Printf("warning: could not list pods for %s/%s: %v", job.Namespace, job.Name, err)
 	}
 
-	if jobsetName := job.Labels["jobset.sigs.k8s.io/jobset-name"]; jobsetName != "" {
+	// Collect AIBOM annotations from the job and sibling jobs in the JobSet,
+	// and each Job's terminal condition (#112): a pod of a Job that completed
+	// is not a failure even if an earlier attempt of it was.
+	jobsetName := job.Labels["jobset.sigs.k8s.io/jobset-name"]
+	annotations := collectAIBOMAnnotations(job.Annotations)
+	jobResults := map[string]batchv1.JobCondition{job.Name: terminalCondition(job)}
+	jobUIDs := map[string]types.UID{job.Name: job.UID}
+	if jobsetName != "" {
+		siblingJobs, err := w.clientset.BatchV1().Jobs(job.Namespace).List(ctx, metav1.ListOptions{
+			LabelSelector: fmt.Sprintf("jobset.sigs.k8s.io/jobset-name=%s", jobsetName),
+		})
+		if err == nil {
+			for i := range siblingJobs.Items {
+				sibling := &siblingJobs.Items[i]
+				if _, ok := jobResults[sibling.Name]; !ok {
+					jobResults[sibling.Name] = terminalCondition(sibling)
+					jobUIDs[sibling.Name] = sibling.UID
+				}
+				if len(annotations) == 0 {
+					if sa := collectAIBOMAnnotations(sibling.Annotations); len(sa) > 0 {
+						annotations = sa
+					}
+				}
+			}
+		}
+	}
+
+	if jobsetName != "" {
 		siblingPods, err := w.clientset.CoreV1().Pods(job.Namespace).List(ctx, metav1.ListOptions{
 			LabelSelector: fmt.Sprintf("jobset.sigs.k8s.io/jobset-name=%s,%s=true", jobsetName, LabelInstrumented),
 		})
@@ -1433,32 +1460,14 @@ func (w *Watcher) createPostprocessJob(ctx context.Context, job *batchv1.Job) er
 				seen[p.Name] = true
 			}
 			for _, p := range siblingPods.Items {
+				// A pod left by a replaced child Job would otherwise be given
+				// its same-named replacement's jobResults entry. Pods whose Job
+				// is gone altogether have no entry and are kept.
+				if uid, ok := jobUIDs[p.Labels["batch.kubernetes.io/job-name"]]; ok && uid != "" && p.Labels[jobControllerUIDLabel] != string(uid) {
+					continue
+				}
 				if !seen[p.Name] {
 					pods = append(pods, p)
-				}
-			}
-		}
-	}
-
-	// Collect AIBOM annotations from the job and sibling jobs in the JobSet,
-	// and each Job's terminal condition (#112): a pod of a Job that completed
-	// is not a failure even if an earlier attempt of it was.
-	annotations := collectAIBOMAnnotations(job.Annotations)
-	jobResults := map[string]batchv1.JobCondition{job.Name: terminalCondition(job)}
-	if jobsetName := job.Labels["jobset.sigs.k8s.io/jobset-name"]; jobsetName != "" {
-		siblingJobs, err := w.clientset.BatchV1().Jobs(job.Namespace).List(ctx, metav1.ListOptions{
-			LabelSelector: fmt.Sprintf("jobset.sigs.k8s.io/jobset-name=%s", jobsetName),
-		})
-		if err == nil {
-			for i := range siblingJobs.Items {
-				sibling := &siblingJobs.Items[i]
-				if _, ok := jobResults[sibling.Name]; !ok {
-					jobResults[sibling.Name] = terminalCondition(sibling)
-				}
-				if len(annotations) == 0 {
-					if sa := collectAIBOMAnnotations(sibling.Annotations); len(sa) > 0 {
-						annotations = sa
-					}
 				}
 			}
 		}

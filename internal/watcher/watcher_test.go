@@ -483,6 +483,38 @@ func TestOnJobEvent_ReplacementJobIgnoresOriginalsPods(t *testing.T) {
 	}
 }
 
+// A replacement child Job's postprocess lists JobSet siblings by the JobSet
+// label, which also matches the original's still-terminating pods. They must
+// not be stamped with the replacement's job_result.
+func TestCreatePostprocessJob_SkipsReplacedSiblingsPods(t *testing.T) {
+	ns := enabledNamespace("test-ns")
+	job := completedJob("server-0", "test-ns")
+	job.UID = "replacement"
+	job.Labels = map[string]string{"jobset.sigs.k8s.io/jobset-name": "js"}
+	own := instrumentedPod("server-0", "test-ns")
+	own.Labels[jobControllerUIDLabel] = "replacement"
+	own.Labels["jobset.sigs.k8s.io/jobset-name"] = "js"
+	stale := own.DeepCopy()
+	stale.Name = "server-0-stale"
+	stale.Labels[jobControllerUIDLabel] = "original"
+	client := fake.NewSimpleClientset(ns, job, own, stale)
+	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "busybox:latest"})
+
+	if err := w.createPostprocessJob(context.TODO(), job); err != nil {
+		t.Fatalf("createPostprocessJob: %v", err)
+	}
+	cm, err := client.CoreV1().ConfigMaps("aibom-system").Get(context.TODO(), aibomdata.PostprocessInputsConfigMapName(ppName("test-ns", "server-0")), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get inputs configmap: %v", err)
+	}
+	if strings.Contains(cm.Data["containers.json"], stale.Name) {
+		t.Errorf("the replaced Job's pod is in containers.json: %s", cm.Data["containers.json"])
+	}
+	if !strings.Contains(cm.Data["containers.json"], own.Name) {
+		t.Errorf("the replacement's own pod is missing from containers.json: %s", cm.Data["containers.json"])
+	}
+}
+
 func TestOnJobEvent_IncompleteJob_Skips(t *testing.T) {
 	ns := enabledNamespace("test-ns")
 	job := &batchv1.Job{
