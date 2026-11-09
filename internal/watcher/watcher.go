@@ -643,26 +643,24 @@ func podsRequestGPU(pods []corev1.Pod) bool {
 	return false
 }
 
+// getInstrumentedPods lists the Job's own instrumented pods. The name alone
+// also matches pods of an earlier, deleted Job of the same name that are
+// still terminating: a JobSet recreates a child Job deleted while it's active
+// (the serving examples' client deletes the server), and that replacement
+// must not compile a second AIBOM from the original's pods. So pods are
+// matched by the Job's UID too, as in releaseJobPods.
 func (w *Watcher) getInstrumentedPods(job *batchv1.Job) ([]corev1.Pod, error) {
+	selector := labels.Set{"batch.kubernetes.io/job-name": job.Name, LabelInstrumented: "true"}
+	if job.UID != "" {
+		selector[jobControllerUIDLabel] = string(job.UID)
+	}
 	pods, err := w.clientset.CoreV1().Pods(job.Namespace).List(context.TODO(), metav1.ListOptions{
-		LabelSelector: fmt.Sprintf("batch.kubernetes.io/job-name=%s,%s=true", job.Name, LabelInstrumented),
+		LabelSelector: labels.SelectorFromSet(selector).String(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("list pods for job %s/%s: %w", job.Namespace, job.Name, err)
 	}
-	// The name selector also matches pods of an earlier, deleted Job of the
-	// same name that are still terminating. A JobSet recreates a child Job
-	// deleted while it's active (the serving examples' client deletes the
-	// server), and that replacement must not compile a second AIBOM from the
-	// original's pods.
-	owned := pods.Items[:0]
-	for _, pod := range pods.Items {
-		if ref := metav1.GetControllerOf(&pod); ref != nil && ref.Kind == "Job" && ref.UID != job.UID {
-			continue
-		}
-		owned = append(owned, pod)
-	}
-	return owned, nil
+	return pods.Items, nil
 }
 
 // completionIndex is an Indexed Job pod's index, or MaxInt for any other pod.

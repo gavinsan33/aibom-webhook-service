@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 )
@@ -46,11 +47,16 @@ func disabledNamespace(name string) *corev1.Namespace {
 	}
 }
 
+// testJobUID is the UID completedJob gives a Job, and the controller-uid
+// label instrumentedPod gives its pods, as the Job controller would.
+func testJobUID(jobName string) types.UID { return types.UID(jobName + "-uid") }
+
 func completedJob(name, namespace string) *batchv1.Job {
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
+			UID:       testJobUID(name),
 		},
 		Spec: batchv1.JobSpec{
 			Template: corev1.PodTemplateSpec{
@@ -75,6 +81,7 @@ func instrumentedPod(jobName, namespace string) *corev1.Pod {
 			Namespace: namespace,
 			Labels: map[string]string{
 				"batch.kubernetes.io/job-name": jobName,
+				jobControllerUIDLabel:          string(testJobUID(jobName)),
 				LabelInstrumented:              "true",
 			},
 		},
@@ -441,25 +448,32 @@ func TestOnJobEvent_NonEnabledNamespace_Skips(t *testing.T) {
 	}
 }
 
+// A JobSet recreates a child Job deleted while it's active. The replacement
+// shares the original's name, and so its name selector, but not its UID.
 func TestOnJobEvent_ReplacementJobIgnoresOriginalsPods(t *testing.T) {
-	ns := enabledNamespace("test-ns")
-	job := completedJob("server-0", "test-ns")
-	job.UID = "replacement"
-	pod := instrumentedPod("server-0", "test-ns")
-	isController := true
-	pod.OwnerReferences = []metav1.OwnerReference{{
-		APIVersion: "batch/v1", Kind: "Job", Name: "server-0", UID: "original", Controller: &isController,
-	}}
+	for _, tc := range []struct {
+		podJobUID string
+		want      bool
+	}{
+		{"original", false},   // only the original's terminating pod
+		{"replacement", true}, // the replacement ran a pod of its own
+	} {
+		ns := enabledNamespace("test-ns")
+		job := completedJob("server-0", "test-ns")
+		job.UID = "replacement"
+		pod := instrumentedPod("server-0", "test-ns")
+		pod.Labels[jobControllerUIDLabel] = tc.podJobUID
 
-	client := fake.NewSimpleClientset(ns, job, pod)
-	w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "busybox:latest"})
-	startWatcher(t, w)
+		client := fake.NewSimpleClientset(ns, job, pod)
+		w := New(client, Config{Namespace: "aibom-system", PostprocessImage: "busybox:latest"})
+		startWatcher(t, w)
 
-	w.onJobEvent(job)
+		w.onJobEvent(job)
 
-	_, err := client.BatchV1().Jobs("aibom-system").Get(context.TODO(), ppName("test-ns", "server-0"), metav1.GetOptions{})
-	if err == nil {
-		t.Error("a replacement Job owning no pods should not be postprocessed")
+		_, err := client.BatchV1().Jobs("aibom-system").Get(context.TODO(), ppName("test-ns", "server-0"), metav1.GetOptions{})
+		if got := err == nil; got != tc.want {
+			t.Errorf("pod of %s: postprocessed = %v, want %v", tc.podJobUID, got, tc.want)
+		}
 	}
 }
 
@@ -2466,6 +2480,7 @@ func TestCreatePostprocessJob_WaitsForEarlierRunsPostprocessJob(t *testing.T) {
 	job.UID = "second-run"
 	job.Finalizers = []string{finalizerName}
 	pod := instrumentedPod("train-job", "test-ns")
+	pod.Labels[jobControllerUIDLabel] = "second-run"
 	running, _, runningInputs := newAIBOMPostprocessFixtures("train-job", "test-ns")
 	running.Status.Conditions = nil
 	running.Annotations = map[string]string{AnnotationPostprocessTriggerKind: "Job", AnnotationPostprocessTriggerUID: "first-run"}
@@ -2656,7 +2671,7 @@ func TestOptedOutNamespace_ReleasesJobPodFinalizer(t *testing.T) {
 }
 
 func TestRunningJobPod_KeepsPodFinalizer(t *testing.T) {
-	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "gpu-job", Namespace: "test-ns"}}
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "gpu-job", Namespace: "test-ns", UID: testJobUID("gpu-job")}}
 	pod := heldPod("gpu-job", "test-ns", true)
 
 	client := fake.NewSimpleClientset(enabledNamespace("test-ns"), job, pod)
