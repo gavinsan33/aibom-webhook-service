@@ -18,7 +18,8 @@ Also hooks transformers.TrainingArguments, transformers.PreTrainedModel.from_pre
 and peft.LoraConfig -- catching model/training config for scripts that build these
 objects directly in Python, with no corresponding CLI flags for postprocess.py's
 command-line detectors to see -- and the global seeding functions (random.seed,
-numpy.random.seed, torch.manual_seed) plus torch's determinism flags.
+numpy.random.seed, torch.manual_seed) plus torch's determinism flags, and
+records the versions of the ML libraries the process imported.
 
 Writes detected metadata to $AIBOM_DATASET_OUTPUT (default: /results/dataset_detected.json)
 only -- this process never talks to the Kubernetes API. The aibom-dataset-sidecar
@@ -629,7 +630,8 @@ def _merge_output(existing, data, info):
     last-writer-wins per key, except the git_* keys, which are one
     observation of one checkout: a process that captured any replaces the
     whole group, so a commit from one working tree is never labelled with the
-    branch (or dirty flag) of another (#107)."""
+    branch (or dirty flag) of another (#107), and software_versions, whose
+    package lists are unioned."""
     existing_ds = existing.get("datasets", [])
     by_key = {_dataset_identity(e): e for e in existing_ds}
     for entry in data:
@@ -649,6 +651,13 @@ def _merge_output(existing, data, info):
     merged_info = existing.get("runtime_info", {})
     if any(k.startswith("git_") for k in info):
         merged_info = {k: v for k, v in merged_info.items() if not k.startswith("git_")}
+    # Each process lists only the libraries it imported, so the package lists
+    # are unioned: a launcher that imported only torch, and exits after its
+    # ranks, mustn't replace a rank's fuller list.
+    old_sv, new_sv = merged_info.get("software_versions"), info.get("software_versions")
+    if isinstance(old_sv, dict) and isinstance(new_sv, dict):
+        packages = {**(old_sv.get("packages") or {}), **(new_sv.get("packages") or {})}
+        info = {**info, "software_versions": {**old_sv, **new_sv, "packages": packages}}
     merged_info.update(info)
     if merged_info:
         output["runtime_info"] = merged_info
@@ -685,6 +694,10 @@ def _flush(final=True, in_signal=False):
     if final or not _git_captured:
         _capture_git_provenance(check_dirty=not in_signal)
         _git_captured = True
+    # Not from a signal handler: the first lookup reads package metadata off
+    # disk, and the periodic flush has normally done it long before.
+    if not in_signal:
+        _capture_software_versions()
 
     got_lock = _lock.acquire(timeout=0.5 if in_signal else -1)
     try:
@@ -1439,6 +1452,129 @@ def _capture_determinism_flags():
         _runtime_info["determinism_flags"] = flags
 
 
+# ── Software versions ────────────────────────────────────────────────────────
+#
+# Only libraries the process actually imported are listed, so an image that
+# ships vllm alongside a training stack doesn't report it for a training run.
+# A library imported lazily (flash_attn, bitsandbytes) appears from the first
+# flush after its import. Versions come from the installed distribution's
+# metadata, else the module's __version__ (a source checkout on PYTHONPATH).
+
+# (distribution name, module whose presence in sys.modules means it was used)
+_TRACKED_PACKAGES = (
+    ("torch", "torch"),
+    ("torchvision", "torchvision"),
+    ("torchao", "torchao"),
+    ("numpy", "numpy"),
+    ("transformers", "transformers"),
+    ("tokenizers", "tokenizers"),
+    ("safetensors", "safetensors"),
+    ("datasets", "datasets"),
+    ("webdataset", "webdataset"),
+    ("accelerate", "accelerate"),
+    ("peft", "peft"),
+    ("trl", "trl"),
+    ("deepspeed", "deepspeed"),
+    ("megatron-core", "megatron.core"),
+    ("bitsandbytes", "bitsandbytes"),
+    ("flash-attn", "flash_attn"),
+    ("xformers", "xformers"),
+    ("triton", "triton"),
+    ("liger-kernel", "liger_kernel"),
+    ("axolotl", "axolotl"),
+    ("llamafactory", "llamafactory"),
+    ("vllm", "vllm"),
+    ("sglang", "sglang"),
+    ("lmdeploy", "lmdeploy"),
+    ("text-generation-server", "text_generation_server"),
+)
+_package_versions = {}  # distribution -> version, or None once looked up and not found
+_torch_build = None
+
+
+def _short_str(value, limit=64):
+    return value[:limit] if isinstance(value, str) and value else None
+
+
+def _package_version(dist, module_name):
+    try:
+        import importlib.metadata
+        return _short_str(importlib.metadata.version(dist))
+    except Exception:
+        pass
+    return _short_str(getattr(sys.modules.get(module_name), "__version__", None))
+
+
+def _format_cudnn_version(value):
+    # cuDNN 9 encodes major*10000 + minor*100 + patch; cuDNN 8 and earlier
+    # major*1000 + minor*100 + patch.
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        return None
+    major, rest = divmod(value, 10000) if value >= 90000 else divmod(value, 1000)
+    return f"{major}.{rest // 100}.{rest % 100}"
+
+
+def _format_nccl_version(value):
+    if isinstance(value, (tuple, list)) and len(value) >= 3:
+        return ".".join(str(v) for v in value[:3])
+    # Older torch returned NCCL_VERSION_CODE: major*10000 + minor*100 + patch
+    # from 2.9 on, major*1000 + minor*100 + patch before.
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        major, rest = divmod(value, 10000) if value >= 20900 else divmod(value, 1000)
+        return f"{major}.{rest // 100}.{rest % 100}"
+    return None
+
+
+def _capture_torch_build(torch):
+    """The CUDA/HIP toolkit torch was built against and the cuDNN/NCCL it
+    loaded -- not the driver's CUDA version, which is what nvidia-smi
+    reports in environment.cuda_version."""
+    build = {}
+    version = getattr(torch, "version", None)
+    for attr, key in (("cuda", "torch_cuda"), ("hip", "torch_hip")):
+        value = _short_str(getattr(version, attr, None), 32)
+        if value:
+            build[key] = value
+    # The binding, not torch.backends.cudnn.version(): that one's first call
+    # checks every device's compute capability, which initializes CUDA in the
+    # workload's process (a forked DataLoader worker can't use CUDA after
+    # that) and raises on an incompatible device. On ROCm the binding is
+    # MIOpen's.
+    try:
+        get_version = torch.backends.cudnn._cudnn.getVersionInt
+        cudnn = None if "torch_hip" in build else _format_cudnn_version(get_version())
+        if cudnn:
+            build["cudnn"] = cudnn
+    except Exception:
+        pass
+    try:
+        nccl = _format_nccl_version(torch.cuda.nccl.version())
+        if nccl:
+            build["nccl"] = nccl
+    except Exception:
+        pass  # CPU-only build
+    return build
+
+
+def _capture_software_versions():
+    global _torch_build
+    try:
+        for dist, module_name in _TRACKED_PACKAGES:
+            if dist not in _package_versions and module_name in sys.modules:
+                _package_versions[dist] = _package_version(dist, module_name)
+        torch = sys.modules.get("torch")
+        if _torch_build is None and torch is not None:
+            _torch_build = _capture_torch_build(torch)
+        versions = {"python": "%d.%d.%d" % sys.version_info[:3]}
+        packages = {d: v for d, v in _package_versions.items() if v}
+        if packages:
+            versions["packages"] = packages
+        versions.update(_torch_build or {})
+        _runtime_info["software_versions"] = versions
+    except Exception:
+        _dbg_exc("_capture_software_versions")
+
+
 # ── Public API ───────────────────────────────────────────────────────────────
 
 def install_hooks():
@@ -1613,11 +1749,13 @@ def flush():
 
 def reset():
     """Clear detected datasets and stop any scheduled flush (for testing)."""
-    global _durable_flush_enabled, _git_captured, _training_activity
+    global _durable_flush_enabled, _git_captured, _training_activity, _torch_build
     _cancel_pending_flush()
     _durable_flush_enabled = False
     _git_captured = False
     _training_activity = False
+    _torch_build = None
+    _package_versions.clear()
     with _lock:
         _detected_datasets.clear()
         _hf_dataset_key_registry.clear()
