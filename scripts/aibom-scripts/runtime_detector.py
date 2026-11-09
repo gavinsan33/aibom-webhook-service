@@ -18,8 +18,9 @@ Also hooks transformers.TrainingArguments, transformers.PreTrainedModel.from_pre
 and peft.LoraConfig -- catching model/training config for scripts that build these
 objects directly in Python, with no corresponding CLI flags for postprocess.py's
 command-line detectors to see -- and the global seeding functions (random.seed,
-numpy.random.seed, torch.manual_seed) plus torch's determinism flags, and
-records the versions of the ML libraries the process imported.
+numpy.random.seed, torch.manual_seed) plus torch's determinism flags, the
+first torch.optim.Optimizer constructed, and the versions of the ML libraries
+the process imported.
 
 Writes detected metadata to $AIBOM_DATASET_OUTPUT (default: /results/dataset_detected.json)
 only -- this process never talks to the Kubernetes API. The aibom-dataset-sidecar
@@ -44,6 +45,7 @@ import functools
 import hashlib
 import importlib.util
 import json
+import math
 import operator
 import os
 import signal
@@ -1142,6 +1144,14 @@ def _install_transformers_hook():
                 # default str() is "OptimizerNames.ADAMW_TORCH_FUSED" rather than
                 # the plain value.
                 info["optimizer"] = getattr(self.optim, "value", None) or str(self.optim)
+            for attr in ("adam_beta1", "adam_beta2", "adam_epsilon", "weight_decay",
+                         "warmup_ratio", "warmup_steps", "optim_args"):
+                if getattr(self, attr, None) is not None:
+                    info[attr] = getattr(self, attr)
+            if getattr(self, "lr_scheduler_type", None) is not None:
+                # A SchedulerType enum after normalization, like optim.
+                scheduler = self.lr_scheduler_type
+                info["lr_scheduler_type"] = getattr(scheduler, "value", None) or str(scheduler)
             if getattr(self, "seed", None) is not None:
                 info["random_seed"] = self.seed
             # Seeds the Trainer's data sampler separately from `seed`.
@@ -1420,6 +1430,96 @@ def _install_torch_seed_hook():
     _dbg("seed hook: patched torch.manual_seed")
 
 
+# ── torch.optim.Optimizer hook ──────────────────────────────────────────────
+#
+# Trainer's optimizer, DeepSpeed's, bitsandbytes' and one a script builds
+# itself all subclass torch.optim.Optimizer, whose __init__ they call, so this
+# records the hyperparameters that were actually used. They're read from
+# param_groups, not `defaults`: Trainer passes weight_decay per group (0 for
+# biases and norm weights) rather than as a constructor argument, so
+# `defaults` holds torch's own weight_decay. Settings every group shares go in
+# `params`; when any differ, `param_groups` lists each group's differing
+# settings and its tensor count (the shape oc-aibom and the console plugin
+# read).
+# ponytail: the first optimizer a process builds wins; a second one (a GAN's
+# discriminator, a multi-optimizer script) isn't recorded.
+
+_OPTIMIZER_MAX_PARAMS = 16
+# ponytail: groups past this (per-layer LR decay) are dropped, not summarized.
+_OPTIMIZER_MAX_GROUPS = 32
+_optimizer_recorded = False
+
+
+def _is_json_number(value):
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return abs(value) <= _JSON_SAFE_INT
+    return isinstance(value, float) and math.isfinite(value)
+
+
+def _optimizer_value(value):
+    if hasattr(value, "item") and getattr(value, "ndim", None) == 0:
+        value = value.item()  # a tensor lr (capturable/fused optimizers)
+    if isinstance(value, bool) or _is_json_number(value):
+        return value
+    if isinstance(value, (tuple, list)) and 0 < len(value) <= 4 and all(map(_is_json_number, value)):
+        return list(value)  # betas
+    return None
+
+
+def _record_optimizer(optimizer):
+    global _optimizer_recorded, _training_activity
+    if _optimizer_recorded or _in_dataloader_worker():
+        return
+    _optimizer_recorded = True
+    _training_activity = True
+    groups = []
+    for group in (getattr(optimizer, "param_groups", None) or [])[:_OPTIMIZER_MAX_GROUPS]:
+        settings = {}
+        for key, value in group.items():
+            value = _optimizer_value(value) if key != "params" and isinstance(key, str) else None
+            if value is not None:
+                settings[key[:64]] = value
+        tensors = group.get("params")
+        groups.append((settings, len(tensors) if isinstance(tensors, list) else None))
+    keys = sorted({k for settings, _ in groups for k in settings})[:_OPTIMIZER_MAX_PARAMS]
+    first = groups[0][0] if groups else {}
+    shared = {k: first[k] for k in keys if all(k in g and g[k] == first.get(k) for g, _ in groups)}
+    cls = type(optimizer)
+    observation = {"class": f"{cls.__module__}.{cls.__qualname__}"[:128], "params": shared}
+    if len(shared) < len(keys):
+        observation["param_groups"] = [
+            {
+                **{k: settings[k] for k in keys if k not in shared and k in settings},
+                **({"param_tensors": tensors} if tensors is not None else {}),
+            }
+            for settings, tensors in groups
+        ]
+    with _lock:
+        _runtime_info["optimizer_constructed"] = observation
+    _dbg(f"optimizer hook: captured {observation}")
+
+
+def _install_torch_optimizer_hook():
+    base = getattr(getattr(sys.modules.get("torch"), "optim", None), "Optimizer", None)
+    if base is None or "torch_optimizer" in _hooks_installed:
+        return
+    orig = base.__init__
+    _hooks_installed["torch_optimizer"] = True
+
+    @functools.wraps(orig)
+    def __init__(self, *args, **kwargs):
+        orig(self, *args, **kwargs)
+        try:
+            _record_optimizer(self)
+        except Exception:
+            _dbg_exc("optimizer hook")
+
+    base.__init__ = __init__
+    _dbg("optimizer hook: patched torch.optim.Optimizer.__init__")
+
+
 def _capture_determinism_flags():
     """Read torch's determinism switches and the env vars that matter to
     them. Read at flush time rather than hooked, since transformers'
@@ -1592,6 +1692,7 @@ def install_hooks():
     _install_random_seed_hook()
     _install_numpy_seed_hook()
     _install_torch_seed_hook()
+    _install_torch_optimizer_hook()
     _register_durable_flush()
     _dbg(f"install_hooks: done, output will go to {_OUTPUT_PATH}")
 
@@ -1599,6 +1700,7 @@ def install_hooks():
 def _install_torch_hooks():
     _install_dataloader_hook()
     _install_torch_seed_hook()
+    _install_torch_optimizer_hook()
 
 
 # Top-level module -> the hook to install once it has finished importing.
@@ -1749,11 +1851,12 @@ def flush():
 
 def reset():
     """Clear detected datasets and stop any scheduled flush (for testing)."""
-    global _durable_flush_enabled, _git_captured, _training_activity, _torch_build
+    global _durable_flush_enabled, _git_captured, _training_activity, _torch_build, _optimizer_recorded
     _cancel_pending_flush()
     _durable_flush_enabled = False
     _git_captured = False
     _training_activity = False
+    _optimizer_recorded = False
     _torch_build = None
     _package_versions.clear()
     with _lock:

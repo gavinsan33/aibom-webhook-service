@@ -3877,3 +3877,95 @@ def test_llm_d_role_omitted_when_pods_disagree_or_have_none():
     plain = _role_aibom({"vllm-0": None})
     assert "serving_role" not in plain["inference"]
     assert "serving_role" not in plain["execution_metadata"]["pods"][0]
+
+
+# ---------------------------------------------------------------------------
+# Optimizer and LR scheduler (#176)
+# ---------------------------------------------------------------------------
+
+
+_TA_OPTIMIZER_INFO = {
+    "optimizer": "adamw_torch", "adam_beta1": 0.9, "adam_beta2": 0.95, "adam_epsilon": 1e-8,
+    "weight_decay": 0.1, "lr_scheduler_type": "cosine", "warmup_ratio": 0.03, "warmup_steps": 0,
+}
+
+
+def test_constructed_optimizer_wins_over_training_arguments():
+    runtime_info = {
+        **_TA_OPTIMIZER_INFO,
+        "optimizer_constructed": {
+            "class": "torch.optim.adamw.AdamW",
+            "params": {"lr": 2e-4, "betas": [0.9, 0.95], "eps": 1e-8, "amsgrad": False},
+            "param_groups": [{"weight_decay": 0.1, "param_tensors": 6},
+                             {"weight_decay": 0.0, "param_tensors": 10}],
+        },
+    }
+    training = _training_aibom(runtime_info)["training"]
+    assert training["optimizer"] == "adamw_torch"
+    assert training["optimizer_config"] == {
+        "class": "torch.optim.adamw.AdamW",
+        "params": {"lr": 2e-4, "betas": [0.9, 0.95], "eps": 1e-8, "amsgrad": False},
+        "param_groups": [{"weight_decay": 0.1, "param_tensors": 6},
+                         {"weight_decay": 0.0, "param_tensors": 10}],
+        "declared_via": "runtime_optimizer",
+    }
+    assert training["lr_scheduler"] == {
+        "type": "cosine", "warmup_ratio": 0.03, "warmup_steps": 0, "declared_via": "training_arguments",
+    }
+
+
+def test_raw_torch_optimizer_fills_name_and_learning_rate():
+    runtime_info = {"optimizer_constructed": {"class": "torch.optim.sgd.SGD",
+                                              "params": {"lr": 0.1, "momentum": 0.9}}}
+    training = _training_aibom(runtime_info)["training"]
+    assert training["optimizer"] == "torch.optim.sgd.SGD"
+    assert training["learning_rate"] == 0.1
+    assert training["lr_scheduler"] is None
+
+
+def test_training_arguments_optimizer_config_without_constructed_optimizer():
+    training = _training_aibom({**_TA_OPTIMIZER_INFO, "optim_args": "foo=1"})["training"]
+    assert training["optimizer_config"] == {
+        "params": {"betas": [0.9, 0.95], "eps": 1e-8, "weight_decay": 0.1},
+        "optim_args": "foo=1",
+        "declared_via": "training_arguments",
+    }
+
+
+def test_optimizer_config_drops_untrusted_values():
+    runtime_info = {"optimizer_constructed": {
+        "class": "x" * 500,
+        "params": {"lr": float("nan"), "big": 2 ** 60, "name": "evil", "betas": [0.9, "x"], "ok": 1},
+        "param_groups": [{"weight_decay": 0.1, "param_tensors": True}, "junk", {"param_tensors": -1}],
+    }}
+    assert _training_aibom(runtime_info)["training"]["optimizer_config"] == {
+        "class": "x" * 128,
+        "params": {"ok": 1},
+        "param_groups": [{"weight_decay": 0.1}, {}],
+        "declared_via": "runtime_optimizer",
+    }
+
+
+@pytest.mark.parametrize("command", [
+    ["trl", "sft", "--optim", "adamw_8bit", "--adam-beta2", "0.95", "--weight_decay=0.1",
+     "--lr_scheduler_type", "cosine", "--warmup_ratio", "0.05"],
+    ["llamafactory-cli", "train", "--optim", "adamw_8bit", "--adam_beta2", "0.95",
+     "--weight_decay", "0.1", "--lr_scheduler_type", "cosine", "--warmup_ratio", "0.05"],
+])
+def test_hf_style_cli_optimizer_flags(command):
+    dm = pp.detect_model_from_containers([{"command": command}])
+    assert (dm["optimizer"], dm["adam_beta2"], dm["weight_decay"]) == ("adamw_8bit", 0.95, 0.1)
+    # The beta the CLI didn't set is TrainingArguments' default.
+    assert pp.training_optimizer_config({}, dm) == {
+        "params": {"betas": [0.9, 0.95], "weight_decay": 0.1}, "declared_via": "cli_arg"}
+    assert pp.training_lr_scheduler({}, dm) == {
+        "type": "cosine", "warmup_ratio": 0.05, "declared_via": "cli_arg"}
+
+
+def test_axolotl_optimizer_flags():
+    dm = pp.detect_axolotl_from_command(
+        ["axolotl", "train", "cfg.yml", "--optimizer", "adamw_bnb_8bit", "--lr-scheduler", "cosine",
+         "--warmup-steps", "10", "--weight-decay", "0.0"])
+    assert dm["optimizer"] == "adamw_bnb_8bit"
+    assert pp.training_lr_scheduler({}, dm) == {"type": "cosine", "warmup_steps": 10, "declared_via": "cli_arg"}
+    assert pp.training_optimizer_config({}, dm) == {"params": {"weight_decay": 0.0}, "declared_via": "cli_arg"}

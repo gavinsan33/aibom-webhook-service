@@ -1154,6 +1154,23 @@ def _detect_tgi_from_entrypoint_args(container):
 # trl
 # ---------------------------------------------------------------------------
 
+# The optimizer/scheduler arguments shared by the HF-style training CLIs
+# (TrainingArguments' own names).
+_OPTIMIZER_ARG_MAP = {
+    "--adam_beta1": ("adam_beta1", _finite_float),
+    "--adam_beta2": ("adam_beta2", _finite_float),
+    "--adam_epsilon": ("adam_epsilon", _finite_float),
+    "--weight_decay": ("weight_decay", _finite_float),
+    "--warmup_ratio": ("warmup_ratio", _finite_float),
+    "--warmup_steps": ("warmup_steps", _int_or_float),
+}
+_HF_OPTIMIZER_ARG_MAP = {
+    **_OPTIMIZER_ARG_MAP,
+    "--optim": ("optimizer", str),
+    "--optim_args": ("optim_args", str),
+    "--lr_scheduler_type": ("lr_scheduler_type", str),
+}
+
 # Hyphenated spellings are normalized to these underscore forms first.
 _TRL_ARG_MAP = {
     "--model_name_or_path": ("model_name", str),
@@ -1168,6 +1185,7 @@ _TRL_ARG_MAP = {
     "--per_device_train_batch_size": ("batch_size", int),
     "--num_train_epochs": ("epochs", _int_or_float),
     "--seed": ("random_seed", int),
+    **_HF_OPTIMIZER_ARG_MAP,
 }
 
 _TRL_SUBCOMMAND_RE = re.compile(r"^[a-z][a-z_]*$")
@@ -1247,6 +1265,9 @@ _AXOLOTL_ARG_MAP = {
     "--peft_use_dora": ("use_dora", bool),
     "--peft_use_rslora": ("use_rslora", bool),
     "--seed": ("random_seed", int),
+    **_OPTIMIZER_ARG_MAP,
+    "--optimizer": ("optimizer", str),
+    "--lr_scheduler": ("lr_scheduler_type", str),
 }
 
 
@@ -1313,6 +1334,7 @@ _LLAMAFACTORY_ARG_MAP = {
     "--per_device_train_batch_size": ("batch_size", int),
     "--num_train_epochs": ("epochs", _int_or_float),
     "--seed": ("random_seed", int),
+    **_HF_OPTIMIZER_ARG_MAP,
 }
 
 
@@ -3064,6 +3086,116 @@ def training_determinism(runtime_info):
     return block or None
 
 
+def _json_number(value):
+    """value if it's a number JCS can canonicalize, else None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if isinstance(value, int):
+        return value if abs(value) <= 2 ** 53 - 1 else None
+    return value if math.isfinite(value) else None
+
+
+def _short_or_none(value, limit=128):
+    return value[:limit] if isinstance(value, str) and value else None
+
+
+def _optimizer_setting(value):
+    """An optimizer setting as runtime_detector.py records it (a number, a
+    bool, or a short list of numbers such as betas), else None."""
+    if isinstance(value, bool) or _json_number(value) is not None:
+        return value
+    if isinstance(value, list) and 0 < len(value) <= 4 and all(_json_number(v) is not None for v in value):
+        return value
+    return None
+
+
+def _optimizer_settings(raw):
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    for key, value in list(raw.items())[:16]:
+        if isinstance(key, str) and key and _optimizer_setting(value) is not None:
+            out[key[:64]] = value
+    return out
+
+
+# TrainingArguments' Adam defaults, for a CLI that sets only one beta: trl,
+# LLaMA-Factory and Axolotl all hand these to TrainingArguments.
+_HF_ADAM_BETAS = (0.9, 0.999)
+
+
+def training_optimizer_config(runtime_info, dm):
+    """training.optimizer_config: the optimizer the run constructed, if the
+    runtime hook saw one (`runtime_optimizer`), else TrainingArguments'
+    optimizer fields, else the CLI's. Sources aren't mixed. Settings use
+    torch's names (lr, betas, eps, weight_decay, ...); `params` holds what
+    every param group shares, `param_groups` each group's differing settings
+    and tensor count. runtime_info is written inside the workload's
+    container, so only numbers, bools and short number lists are kept."""
+    constructed = runtime_info.get("optimizer_constructed")
+    if isinstance(constructed, dict):
+        out = {}
+        cls = _short_or_none(constructed.get("class"))
+        if cls:
+            out["class"] = cls
+        params = _optimizer_settings(constructed.get("params"))
+        if params:
+            out["params"] = params
+        groups = constructed.get("param_groups")
+        if isinstance(groups, list):
+            cleaned = []
+            for group in groups[:32]:
+                if not isinstance(group, dict):
+                    continue
+                entry = _optimizer_settings({k: v for k, v in group.items() if k != "param_tensors"})
+                tensors = group.get("param_tensors")
+                if isinstance(tensors, int) and not isinstance(tensors, bool) and 0 <= tensors <= 2 ** 53 - 1:
+                    entry["param_tensors"] = tensors
+                cleaned.append(entry)
+            if any(cleaned):
+                out["param_groups"] = cleaned
+        if out:
+            out["declared_via"] = "runtime_optimizer"
+            return out
+
+    for source, via in ((runtime_info, "training_arguments"), (dm, "cli_arg")):
+        params = {}
+        beta1, beta2 = (_json_number(source.get(k)) for k in ("adam_beta1", "adam_beta2"))
+        if beta1 is not None or beta2 is not None:
+            params["betas"] = [
+                beta1 if beta1 is not None else _HF_ADAM_BETAS[0],
+                beta2 if beta2 is not None else _HF_ADAM_BETAS[1],
+            ]
+        for key, name in (("adam_epsilon", "eps"), ("weight_decay", "weight_decay")):
+            if _json_number(source.get(key)) is not None:
+                params[name] = source[key]
+        out = {"params": params} if params else {}
+        optim_args = _short_or_none(source.get("optim_args"), 256)
+        if optim_args:
+            out["optim_args"] = optim_args
+        if out:
+            out["declared_via"] = via
+            return out
+    return None
+
+
+def training_lr_scheduler(runtime_info, dm):
+    """training.lr_scheduler from TrainingArguments, else the CLI. Not seen
+    for a script that builds a torch.optim.lr_scheduler itself."""
+    for source, via in ((runtime_info, "training_arguments"), (dm, "cli_arg")):
+        out = {}
+        scheduler = _short_or_none(source.get("lr_scheduler_type"), 64)
+        if scheduler:
+            out["type"] = scheduler
+        for key in ("warmup_ratio", "warmup_steps"):
+            if _json_number(source.get(key)) is not None:
+                out[key] = source[key]
+        if out:
+            out["declared_via"] = via
+            return out
+    return None
+
+
 def _agreed_seed(determinism):
     """The one value every seeded generator was last seeded with, for a
     script that seeds directly instead of through TrainingArguments."""
@@ -3353,12 +3485,24 @@ def compile_aibom(
     # Training config
     if intent in ("training", "sft"):
         determinism = training_determinism(runtime_info)
+        optimizer_config = training_optimizer_config(runtime_info, dm)
+        optimizer_settings = (optimizer_config or {}).get("params") or {}
         aibom["training"] = {
-            "optimizer": annotations.get("optimizer") or runtime_info.get("optimizer"),
+            "optimizer": (
+                annotations.get("optimizer")
+                or runtime_info.get("optimizer")
+                or dm.get("optimizer")
+                or (optimizer_config or {}).get("class")
+            ),
+            "optimizer_config": optimizer_config,
+            "lr_scheduler": training_lr_scheduler(runtime_info, dm),
             "learning_rate": _first_not_none(
                 _try_float(annotations.get("learning-rate")),
                 runtime_info.get("learning_rate"),
                 dm.get("learning_rate"),
+                # A script that builds its optimizer itself, with no
+                # TrainingArguments or CLI flag.
+                optimizer_settings.get("lr"),
             ),
             "batch_size": _first_not_none(
                 _try_int(annotations.get("batch-size")),
