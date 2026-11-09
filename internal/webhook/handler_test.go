@@ -28,8 +28,10 @@ func newTestMutatorNoDataset() *Mutator {
 	return NewMutator("pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime", false, "")
 }
 
+// podWithOwner returns a pod owned by a kind-type "test-job". A Job's pod
+// also gets the job-name label, as the Job controller sets it.
 func podWithOwner(kind string) *corev1.Pod {
-	return &corev1.Pod{
+	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-pod",
 			Namespace: "default",
@@ -43,6 +45,10 @@ func podWithOwner(kind string) *corev1.Pod {
 			},
 		},
 	}
+	if kind == "Job" {
+		pod.Labels = map[string]string{"batch.kubernetes.io/job-name": "test-job"}
+	}
+	return pod
 }
 
 func podWithGPU() *corev1.Pod {
@@ -482,7 +488,7 @@ func TestMutate_JobOwnedPod_HasStaticDataConfigMapEnv(t *testing.T) {
 				return
 			}
 		}
-		t.Fatal("expected AIBOM_DATA_CONFIGMAP for a Job-owned pod — its trigger name comes from ownerReferences, known at admission time")
+		t.Fatal("expected AIBOM_DATA_CONFIGMAP for a Job-owned pod — its trigger name comes from the job-name label, known at admission time")
 	}
 	t.Fatal("init container patch not found")
 }
@@ -596,7 +602,8 @@ func TestMutate_InjectsScriptsVolume(t *testing.T) {
 
 func TestMutate_AddsLabel(t *testing.T) {
 	m := newTestMutator()
-	patches, err := m.Mutate(podWithOwner("Job"), "")
+	// A pod with no labels yet; a Job's pod already has the job-name label.
+	patches, err := m.Mutate(podWithOwner("PyTorchJob"), "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
