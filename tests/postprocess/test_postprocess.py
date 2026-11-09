@@ -4160,3 +4160,14 @@ def test_distributed_single_process_writes_no_world():
     # The env's single process isn't overridden by a lower source.
     assert pp.training_distributed({"distributed_env": {"world_size": 1, "local_world_size": 1, "nodes": 1},
                                     "accelerate_config_distributed": {"world_size": 4}}, {}) is None
+
+
+def test_compile_aibom_megatron_tp_plus_dp_is_model_parallel():
+    runtime_info = {"distributed_env": {"world_size": 8},
+                    "megatron_parallel": {"tensor": 2, "pipeline": 1, "context": 1, "expert": 1}}
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info=runtime_info,
+        annotations={"experiment-intent": "training"}, telemetry=None,
+    )
+    assert aibom["training"]["distributed"]["strategies"] == ["data_parallel", "tensor_parallel"]
+    assert aibom["training"]["parallelization_strategy"] == "model_parallel"

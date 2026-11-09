@@ -3834,7 +3834,9 @@ def compile_aibom(
         distributed = training_distributed(runtime_info, dm, parallelization_strategy)
         if not parallelization_strategy and distributed:
             # A raw script's FSDP/DeepSpeed/Megatron setup, with no CLI signal.
-            first = (distributed.get("strategies") or [None])[0]
+            # Plain replication alongside TP/PP is named for the model parallelism.
+            seen = distributed.get("strategies") or [None]
+            first = next((s for s in seen if s != "data_parallel"), seen[0])
             parallelization_strategy = (
                 first if first in ("data_parallel", "fsdp", "deepspeed") else "model_parallel" if first else None
             )

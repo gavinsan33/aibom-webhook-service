@@ -245,7 +245,7 @@ Identification only — nothing verifies the weights. A renamed/generic path is 
 - `trl ... --num_processes N>1` (accelerate-launch args passed straight to a CLI that spawns `accelerate launch` internally) → `data_parallel`
 - `trl ... --accelerate_config <path>` → read from the file's own `distributed_type` (`FSDP`→`fsdp`, `DEEPSPEED`→`deepspeed`, `MULTI_GPU`/`MULTI_CPU`→`data_parallel`); falls back to guessing from the filename against known presets (`fsdp1`/`fsdp2`/`zero1`/`zero2`/`zero3`/`multi_gpu`/`single_gpu`) if PyYAML is unavailable or `distributed_type` isn't recognized
 - Lowest-priority fallback: `device_map` captured by the `from_pretrained` runtime hook → `model_parallel` when the model's resolved placement (`model.hf_device_map`) spans more than one accelerator, only if nothing above already produced a strategy. Single-device maps (`{"": 0}`, `0`, `cuda:1`, `auto` on one GPU) and cpu/disk offload don't count
-- Below that: the first entry of `training.distributed.strategies` (tensor/pipeline/context/expert parallel map to `model_parallel`), so a raw script's FSDP, DeepSpeed or Megatron setup is named with no CLI signal
+- Below that: the first entry of `training.distributed.strategies` other than `data_parallel`, else `data_parallel` (tensor/pipeline/context/expert parallel map to `model_parallel`), so a raw script's FSDP, DeepSpeed or Megatron setup is named with no CLI signal
 
 **Distributed topology** (`training.distributed`, #178). Each group carries its own `*_declared_via`, from the first source that has it:
 
