@@ -75,6 +75,8 @@ def fake_torch_module(monkeypatch):
         def __init__(self, dataset=None, *args, **kwargs):
             self.dataset = dataset
             self.batch_size = kwargs.get("batch_size")
+            for attr in ("sampler", "batch_sampler", "drop_last", "num_workers", "generator"):
+                setattr(self, attr, kwargs.get(attr))
 
     data_module = types.ModuleType("torch.utils.data")
     data_module.DataLoader = FakeDataLoader
