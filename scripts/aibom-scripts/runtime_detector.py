@@ -786,6 +786,7 @@ def _install_dataloader_hook():
         try:
             _training_activity = True
             batch_size = getattr(self, "batch_size", None)
+            sampling = _dataloader_sampling(self)
             with _lock:
                 existing = _dataset_registry.get(dataset) if dataset is not None else None
                 if existing is None and dataset is not None:
@@ -801,6 +802,10 @@ def _install_dataloader_hook():
                 is_train = str(getattr(dataset, "split", "")).startswith("train") or getattr(dataset, "train", None) is True
                 if batch_size is not None and ("batch_size" not in existing or is_train):
                     existing["batch_size"] = batch_size
+                # First loader wins: accelerate's prepare() rebuilds Trainer's
+                # loader around a sharded batch sampler, hiding the real one.
+                if sampling and "sampling" not in existing:
+                    existing["sampling"] = sampling
                 seen_via = existing.setdefault("seen_via", [])
                 if "torch.utils.data.DataLoader" not in seen_via:
                     seen_via.append("torch.utils.data.DataLoader")
@@ -810,11 +815,74 @@ def _install_dataloader_hook():
             entry = _inspect_torch_dataset(dataset)
             if batch_size is not None:
                 entry["batch_size"] = batch_size
+            if sampling:
+                entry["sampling"] = sampling
             _record(entry)
         except Exception:
             _dbg_exc("DataLoader._patched_init")
 
     tud.DataLoader.__init__ = _patched_init
+
+
+_DEFAULT_BATCH_SAMPLER = "torch.utils.data.sampler.BatchSampler"
+
+
+def _class_name(obj):
+    cls = type(obj)
+    return f"{cls.__module__}.{cls.__qualname__}"
+
+
+def _dataloader_sampling(loader):
+    """How a constructed DataLoader orders and batches its data (#177).
+
+    Read from the loader's resolved sampler rather than its kwargs: shuffle=True
+    is only ever visible as the RandomSampler it builds, and Trainer passes a
+    sampler (LengthGroupedSampler for group_by_length) instead of shuffle.
+    """
+    out = {}
+    batch_sampler = getattr(loader, "batch_sampler", None)
+    if batch_sampler is not None and _class_name(batch_sampler) != _DEFAULT_BATCH_SAMPLER:
+        out["batch_sampler"] = _class_name(batch_sampler)
+    # Read through the batch sampler: given one, loader.sampler is a placeholder
+    # SequentialSampler, and the loader's own BatchSampler wraps loader.sampler.
+    sampler = getattr(batch_sampler, "sampler", None) or getattr(loader, "sampler", None)
+    if sampler is not None:
+        name = _class_name(sampler)
+        out["sampler"] = name
+        short = type(sampler).__name__
+        if short == "RandomSampler":
+            out["shuffle"] = True
+            if getattr(sampler, "replacement", False) is True:
+                out["replacement"] = True
+        elif short == "SequentialSampler":
+            out["shuffle"] = False
+        elif short == "DistributedSampler":
+            if isinstance(getattr(sampler, "shuffle", None), bool):
+                out["shuffle"] = sampler.shuffle
+            seed = _seed_value(getattr(sampler, "seed", None))
+            if seed is not None:
+                out["sampler_seed"] = seed
+            if isinstance(getattr(sampler, "drop_last", None), bool):
+                out["sampler_drop_last"] = sampler.drop_last
+        # Anything else (LengthGroupedSampler, custom) is only named: whether
+        # it shuffles isn't knowable from its class.
+    drop_last = getattr(batch_sampler, "drop_last", None)
+    if not isinstance(drop_last, bool):
+        drop_last = getattr(loader, "drop_last", None)
+    if isinstance(drop_last, bool):
+        out["drop_last"] = drop_last
+    num_workers = getattr(loader, "num_workers", None)
+    if isinstance(num_workers, int) and not isinstance(num_workers, bool):
+        out["num_workers"] = num_workers
+    generator = getattr(loader, "generator", None)
+    if generator is not None:
+        try:
+            seed = _seed_value(generator.initial_seed())
+        except Exception:
+            seed = None
+        if seed is not None:
+            out["generator_seed"] = seed
+    return out
 
 
 def _inspect_torch_dataset(dataset):

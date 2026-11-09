@@ -243,6 +243,105 @@ def test_dataloader_attaches_to_its_own_split(fake_datasets_module, fake_torch_m
     assert [(e["split"], e["batch_size"]) for e in rd.get_detected_datasets()] == [("train", 8), ("test", 32)]
 
 
+class RandomSampler:
+    replacement = False
+
+
+class SequentialSampler:
+    pass
+
+
+class DistributedSampler:
+    def __init__(self, shuffle=True, seed=0, drop_last=False):
+        self.shuffle, self.seed, self.drop_last = shuffle, seed, drop_last
+
+
+class BatchSamplerShard:
+    def __init__(self, sampler, drop_last):
+        self.sampler, self.drop_last = sampler, drop_last
+
+
+class FakeGenerator:
+    def __init__(self, seed):
+        self._seed = seed
+
+    def initial_seed(self):
+        return self._seed
+
+
+def _sampling_of_only_entry(fake_torch_module, **kwargs):
+    rd.install_hooks()
+    import torch.utils.data as tud
+
+    class PlainDataset:
+        name = "plain"
+
+    tud.DataLoader(PlainDataset(), batch_size=2, **kwargs)
+    (entry,) = rd.get_detected_datasets()
+    return entry.get("sampling")
+
+
+def test_dataloader_records_shuffle_drop_last_workers_and_generator_seed(fake_torch_module):
+    sampling = _sampling_of_only_entry(fake_torch_module, sampler=RandomSampler(), drop_last=True,
+                                       num_workers=4, generator=FakeGenerator(1234))
+    assert sampling == {"sampler": f"{__name__}.RandomSampler", "shuffle": True, "drop_last": True,
+                        "num_workers": 4, "generator_seed": 1234}
+
+
+def test_dataloader_records_distributed_sampler_settings(fake_torch_module):
+    sampling = _sampling_of_only_entry(fake_torch_module, sampler=DistributedSampler(shuffle=False, seed=7, drop_last=True),
+                                       drop_last=False, num_workers=0)
+    assert sampling["shuffle"] is False
+    assert (sampling["sampler_seed"], sampling["sampler_drop_last"], sampling["drop_last"]) == (7, True, False)
+
+
+def test_custom_batch_sampler_reports_what_it_wraps(fake_torch_module):
+    sampling = _sampling_of_only_entry(fake_torch_module, batch_sampler=BatchSamplerShard(SequentialSampler(), drop_last=True),
+                                       drop_last=False)
+    assert sampling["batch_sampler"] == f"{__name__}.BatchSamplerShard"
+    assert sampling["sampler"] == f"{__name__}.SequentialSampler"
+    assert sampling["shuffle"] is False
+    assert sampling["drop_last"] is True  # the batch sampler's, not the loader's default
+
+
+def test_batch_sampler_wins_over_placeholder_loader_sampler(fake_torch_module):
+    """Given a batch_sampler, torch sets loader.sampler to a placeholder
+    SequentialSampler; the shuffle is in the batch sampler's sampler."""
+    sampling = _sampling_of_only_entry(fake_torch_module, sampler=SequentialSampler(),
+                                       batch_sampler=BatchSamplerShard(RandomSampler(), drop_last=True))
+    assert sampling["shuffle"] is True
+
+
+def test_unknown_sampler_is_named_without_guessing_shuffle(fake_torch_module):
+    class LengthGroupedSampler:
+        pass
+
+    sampling = _sampling_of_only_entry(fake_torch_module, sampler=LengthGroupedSampler())
+    assert sampling["sampler"].endswith("LengthGroupedSampler")
+    assert "shuffle" not in sampling
+
+
+def test_unsafe_generator_seed_is_recorded_as_string(fake_torch_module):
+    big = 2 ** 63 - 25
+    assert _sampling_of_only_entry(fake_torch_module, generator=FakeGenerator(big))["generator_seed"] == str(big)
+
+
+def test_first_dataloader_sampling_wins_over_accelerate_rewrap(fake_datasets_module, fake_torch_module):
+    """accelerate's prepare() rebuilds Trainer's loader over the same dataset with
+    a sharded batch sampler; the original RandomSampler must survive."""
+    rd.install_hooks()
+    import datasets
+    import torch.utils.data as tud
+
+    ds = datasets.load_dataset("tatsu-lab/alpaca")
+    tud.DataLoader(ds, batch_size=4, sampler=RandomSampler())
+    tud.DataLoader(ds, batch_sampler=BatchSamplerShard(SequentialSampler(), drop_last=False))
+
+    (entry,) = rd.get_detected_datasets()
+    assert entry["sampling"]["shuffle"] is True
+    assert entry["sampling"]["sampler"].endswith(".RandomSampler")
+
+
 def test_same_builder_different_files_each_keep_their_loader(fake_datasets_module, fake_torch_module):
     """Same builder/config/split but different source files: the source
     files are part of the key, so each transformed dataset finds its own
