@@ -1244,6 +1244,8 @@ _AXOLOTL_ARG_MAP = {
     "--adapter": ("adapter", str),
     "--load_in_4bit": ("load_in_4bit", bool),
     "--load_in_8bit": ("load_in_8bit", bool),
+    "--peft_use_dora": ("use_dora", bool),
+    "--peft_use_rslora": ("use_rslora", bool),
     "--seed": ("random_seed", int),
 }
 
@@ -1267,11 +1269,21 @@ def detect_axolotl_from_command(command):
     result = {"training_framework": "axolotl", **parsed}
 
     adapter = (result.pop("adapter", "") or "").lower()
-    quantized = result.pop("load_in_4bit", False) or result.pop("load_in_8bit", False)
-    if adapter in ("lora", "qlora", "relora"):
+    load_in_4bit = result.pop("load_in_4bit", False)
+    load_in_8bit = result.pop("load_in_8bit", False)
+    use_dora = result.pop("use_dora", False)
+    use_rslora = result.pop("use_rslora", False)
+    if adapter in ("lora", "qlora"):
         # axolotl's own QLoRA is `adapter: qlora`; a bare `lora` + 4/8-bit load
-        # is QLoRA in effect too.
-        result["adaptation_method"] = "qlora" if (adapter == "lora" and quantized) else adapter
+        # is QLoRA in effect too. DoRA/rsLoRA win, as in the trl detector.
+        if use_dora:
+            result["adaptation_method"] = "dora"
+        elif use_rslora:
+            result["adaptation_method"] = "rslora"
+        elif adapter == "qlora" or load_in_4bit or load_in_8bit:
+            result["adaptation_method"] = "qlora"
+        else:
+            result["adaptation_method"] = "lora"
 
     return result
 

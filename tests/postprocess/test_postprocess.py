@@ -457,6 +457,17 @@ def test_detect_axolotl_lora_plus_4bit_is_qlora():
     assert result["adaptation_method"] == "qlora"
 
 
+def test_detect_axolotl_quant_flags_dont_leak_and_dora_wins():
+    result = pp.detect_axolotl_from_command(
+        ["axolotl", "train", "c.yml", "--adapter", "lora", "--load-in-4bit", "--load-in-8bit"]
+    )
+    assert result == {"training_framework": "axolotl", "adaptation_method": "qlora"}
+    result = pp.detect_axolotl_from_command(
+        ["axolotl", "train", "c.yml", "--adapter", "qlora", "--peft-use-dora"]
+    )
+    assert result["adaptation_method"] == "dora"
+
+
 def test_detect_axolotl_legacy_module_form_config_only():
     # Legacy form, config-only: framework detected, nothing from the YAML.
     result = pp.detect_axolotl_from_command(
