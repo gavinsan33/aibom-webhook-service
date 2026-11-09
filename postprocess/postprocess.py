@@ -3344,6 +3344,7 @@ def training_precision(runtime_info):
     return block or None
 
 
+_DECLARED_STRATEGIES = ("data_parallel", "fsdp", "deepspeed", "model_parallel")
 _FSDP_STRATEGY_NAMES = ("FULL_SHARD", "SHARD_GRAD_OP", "NO_SHARD", "HYBRID_SHARD", "HYBRID_SHARD_ZERO2")
 _OFFLOAD_DEVICES = ("none", "cpu", "nvme")
 _PARALLEL_SIZE_FIELDS = (
@@ -3493,15 +3494,19 @@ def training_distributed(runtime_info, dm, strategy=None):
     if deepspeed:
         out["deepspeed"] = deepspeed
 
-    strategies = [name for name, present in (("fsdp", fsdp), ("deepspeed", deepspeed)) if present]
+    # The declared parallelization_strategy, if it's one of ours (an annotation is free-form).
+    declared = strategy if strategy in _DECLARED_STRATEGIES else None
+    # A declared fsdp/deepspeed counts even when no settings for it were seen.
+    strategies = [name for name, present in (("fsdp", fsdp), ("deepspeed", deepspeed))
+                  if present or declared == name]
     strategies += [name for key, _, name in _PARALLEL_SIZE_FIELDS if (sizes.get(key) or 0) > 1]
     data = sizes.get("data")
     # FSDP and ZeRO are themselves data parallel; only plain replication is named.
-    if not fsdp and not deepspeed and ((data or 0) > 1 or (data is None and (out.get("world_size") or 0) > 1
-                                                           and len(strategies) == 0)):
+    if not ({"fsdp", "deepspeed"} & set(strategies)) and (
+            (data or 0) > 1 or (data is None and (out.get("world_size") or 0) > 1 and len(strategies) == 0)):
         strategies.insert(0, "data_parallel")
-    if not strategies and strategy:
-        strategies = [strategy]
+    if not strategies and declared:
+        strategies = [declared]
     if strategies:
         out["strategies"] = strategies
     return out or None

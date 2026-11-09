@@ -4141,3 +4141,14 @@ def test_distributed_nothing_seen_falls_back_to_strategy():
     assert pp.training_distributed({}, {}) is None
     assert pp.training_distributed({}, {}, "model_parallel") == {"strategies": ["model_parallel"]}
     assert pp.training_distributed({"distributed_env": {"world_size": 4}}, {})["strategies"] == ["data_parallel"]
+
+
+def test_distributed_declared_fsdp_without_settings_is_not_data_parallel():
+    # FSDP from the CLI, killed before the Accelerator: no fsdp settings, only the env.
+    out = pp.training_distributed({"distributed_env": {"world_size": 4}}, {}, "fsdp")
+    assert out["strategies"] == ["fsdp"]
+
+
+def test_distributed_unknown_declared_strategy_dropped():
+    assert pp.training_distributed({}, {}, "my-custom-thing") is None
+    assert pp.training_distributed({}, {}, "deepspeed") == {"strategies": ["deepspeed"]}
