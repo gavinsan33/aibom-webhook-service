@@ -3437,6 +3437,9 @@ def training_distributed(runtime_info, dm, strategy=None):
                                for k in ("world_size", "nodes", "local_world_size"))
         if not (world or nodes or local):
             continue
+        # A single process says nothing about distribution, as for the CLI.
+        if max(world or 0, nodes or 0, local or 0) <= 1:
+            break
         if not local and world and nodes and world % nodes == 0:
             local = world // nodes
         for key, value in (("world_size", world), ("nodes", nodes), ("processes_per_node", local)):

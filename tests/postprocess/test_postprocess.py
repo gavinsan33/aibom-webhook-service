@@ -4152,3 +4152,11 @@ def test_distributed_declared_fsdp_without_settings_is_not_data_parallel():
 def test_distributed_unknown_declared_strategy_dropped():
     assert pp.training_distributed({}, {}, "my-custom-thing") is None
     assert pp.training_distributed({}, {}, "deepspeed") == {"strategies": ["deepspeed"]}
+
+
+def test_distributed_single_process_writes_no_world():
+    # Every single-GPU Trainer run builds an Accelerator with num_processes=1.
+    assert pp.training_distributed({"accelerator_distributed": {"world_size": 1}}, {}) is None
+    # The env's single process isn't overridden by a lower source.
+    assert pp.training_distributed({"distributed_env": {"world_size": 1, "local_world_size": 1, "nodes": 1},
+                                    "accelerate_config_distributed": {"world_size": 4}}, {}) is None
