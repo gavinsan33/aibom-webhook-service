@@ -1648,9 +1648,12 @@ def _wrap_function(module, name, record):
 
 
 def _record_autocast(ac):
-    if not getattr(ac, "_enabled", False) or _in_dataloader_worker():
+    if not getattr(ac, "_enabled", False):
         return
     entry = f"{getattr(ac, 'device', None)}:{_dtype_name(getattr(ac, 'fast_dtype', None))}"[:48]
+    # Runs every step: the already-seen case skips the stack walk and lock.
+    if entry in _autocast_seen or len(_autocast_seen) >= _AUTOCAST_MAX or _in_dataloader_worker():
+        return
     with _lock:
         if entry in _autocast_seen or len(_autocast_seen) >= _AUTOCAST_MAX:
             return
