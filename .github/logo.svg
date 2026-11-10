@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="64" height="64" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="linear-gradient-1" x1="7.8" y1="4" x2="63.21" y2="51.89" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#536dfe"/>
+      <stop offset="1" stop-color="#00bfa5"/>
+    </linearGradient>
+  </defs>
+  <title>Project AIBOM</title>
+  <g id="Layer_1" data-name="Layer 1">
+    <polygon points="32,4 56.2,18 56.2,46 32,60 7.8,46 7.8,18" fill="url(#linear-gradient-1)" stroke="url(#linear-gradient-1)" stroke-width="6" stroke-linejoin="round"/>
+    <path d="M25.837 11.648 L46.381 11.648 C47.516 11.648 48.436 12.592 48.436 13.756 L48.436 50.651 L44.327 47.488 L40.218 50.651 L36.109 47.488 L32 50.651 L27.891 47.488 L23.782 50.651 L19.673 47.488 L15.564 50.651 L15.564 13.756 C15.564 12.592 16.484 11.648 17.619 11.648 Z" fill="#ffffff"/>
+    <g>
+      <path d="M24.673 19.063 L32.053 24.536 M24.673 19.063 L32.053 33.291 M24.673 27.819 L32.053 24.536 M24.673 27.819 L32.053 33.291 M24.673 36.575 L32.053 24.536 M24.673 36.575 L32.053 33.291 M32.053 24.536 L39.433 28.913 M32.053 33.291 L39.433 28.913" fill="#000000" stroke="#3f51b5" stroke-width="1.4" opacity="0.55"/>
+      <g>
+        <ellipse cx="24.673" cy="19.063" rx="2.741" ry="2.846" fill="#3f51b5"/>
+        <ellipse cx="24.673" cy="27.819" rx="2.741" ry="2.846" fill="#3f51b5"/>
+        <ellipse cx="24.673" cy="36.575" rx="2.741" ry="2.846" fill="#3f51b5"/>
+        <ellipse cx="32.053" cy="24.536" rx="2.741" ry="2.846" fill="#3f51b5"/>
+        <ellipse cx="32.053" cy="33.291" rx="2.741" ry="2.846" fill="#3f51b5"/>
+      </g>
+      <ellipse cx="39.064" cy="29.297" rx="3.005" ry="3.119" fill="#00bfa5"/>
+    </g>
+    <path d="M24.128 41.781 L39.872 41.781 C40.24 41.781 40.594 41.954 40.854 42.263 C41.115 42.571 41.261 42.99 41.261 43.427 L41.261 43.427 C41.261 43.863 41.115 44.282 40.854 44.591 C40.594 44.899 40.24 45.073 39.872 45.073 L24.128 45.073 C23.76 45.073 23.406 44.899 23.146 44.591 C22.885 44.282 22.739 43.863 22.739 43.427 L22.739 43.427 C22.739 42.99 22.885 42.571 23.146 42.263 C23.406 41.954 23.76 41.781 24.128 41.781 Z" fill="#3f51b5" opacity="0.35"/>
+  </g>
+</svg>
