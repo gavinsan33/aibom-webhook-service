@@ -1,3 +1,4 @@
+import shlex
 import base64
 import json
 import re
@@ -3319,7 +3320,8 @@ def test_accelerate_config_file_flag_resolves_preset_name():
 def test_hyphenated_num_processes():
     tokens = ["trl", "sft", "--num-processes", "4"]
     assert pp.detect_parallelization_from_command(tokens) == {
-        "parallelization_strategy": "data_parallel"
+        "parallelization_strategy": "data_parallel",
+        "distributed": {"world_size": 4},
     }
 
 
@@ -3377,9 +3379,7 @@ def test_torchrun_multi_process_or_node_is_data_parallel():
         ["torchrun", "--nproc_per_node=1", "--nnodes=2", "t.py"],
         ["torchrun", "t.py"],
     ):
-        assert pp.detect_parallelization_from_command(tokens) == {
-            "parallelization_strategy": "data_parallel"
-        }
+        assert pp.detect_parallelization_from_command(tokens)["parallelization_strategy"] == "data_parallel"
 
 
 def test_pip_install_deepspeed_is_not_a_deepspeed_launch():
@@ -3393,7 +3393,8 @@ def test_launcher_must_be_the_command_word():
 def test_python_dash_m_torch_distributed_run_is_a_launcher():
     tokens = ["python", "-m", "torch.distributed.run", "--nproc_per_node=4", "t.py"]
     assert pp.detect_parallelization_from_command(tokens) == {
-        "parallelization_strategy": "data_parallel"
+        "parallelization_strategy": "data_parallel",
+        "distributed": {"world_size": 4, "nodes": 1, "local_world_size": 4},
     }
 
 
@@ -4056,3 +4057,117 @@ def test_unhashable_fsdp_param_dtype_doesnt_crash():
     runtime_info = {"fsdp_mixed_precision": {"param_dtype": []}}
     assert pp.training_mixed_precision(runtime_info, {}) == (None, None)
     assert pp.training_precision(runtime_info) is None
+
+
+# ---------------------------------------------------------------------------
+# training.distributed (#178)
+# ---------------------------------------------------------------------------
+
+
+def test_distributed_cli_launchers():
+    def cli(script):
+        return pp.detect_parallelization_from_command(shlex.split(script)).get("distributed")
+
+    assert cli("torchrun --nnodes=2 --nproc-per-node=4 pretrain_gpt.py --tensor-model-parallel-size 2 "
+               "--pipeline-model-parallel-size 2") == {
+        "world_size": 8, "nodes": 2, "local_world_size": 4, "tensor": 2, "pipeline": 2}
+    assert cli("deepspeed --num_nodes 2 --num_gpus 8 train.py --deepspeed ds.json") == {
+        "world_size": 16, "nodes": 2, "local_world_size": 8}
+    assert cli("accelerate launch --num_machines 2 --num_processes 8 --use_deepspeed --zero_stage 3 t.py") == {
+        "world_size": 8, "nodes": 2, "local_world_size": 4, "deepspeed": {"zero_stage": 3}}
+    assert cli("accelerate launch --use_fsdp --fsdp_version 2 --fsdp_sharding_strategy 1 --num_processes 2 t.py") == {
+        "world_size": 2, "fsdp": {"version": 2, "sharding_strategy": "FULL_SHARD"}}
+    # torchrun's elastic --nnodes=1:4 doesn't say how many nodes ran.
+    assert cli("torchrun --nnodes=1:4 --nproc_per_node=8 t.py") == {"local_world_size": 8}
+
+
+def test_distributed_runtime_sources_outrank_config_and_cli():
+    runtime_info = {
+        "distributed_env": {"world_size": 8, "local_world_size": 4, "nodes": 2},
+        "accelerator_distributed": {"world_size": 8, "fsdp": {"version": 1, "sharding_strategy": "FULL_SHARD",
+                                                               "cpu_offload": True}},
+        "fsdp_module": {"version": 1, "sharding_strategy": "HYBRID_SHARD"},
+        "accelerate_config_distributed": {"world_size": 2, "fsdp": {"sharding_strategy": "NO_SHARD"}},
+    }
+    dm = {"distributed": {"world_size": 2}}
+
+    assert pp.training_distributed(runtime_info, dm) == {
+        "world_size": 8, "nodes": 2, "processes_per_node": 4, "world_declared_via": "environment",
+        # The module FSDP built wins; the plugin fills what it lacks.
+        "fsdp": {"version": 1, "sharding_strategy": "HYBRID_SHARD", "cpu_offload": True,
+                 "declared_via": "fsdp_module"},
+        "strategies": ["fsdp"],
+    }
+
+
+def test_distributed_megatron_sizes_and_data_parallel():
+    runtime_info = {"distributed_env": {"world_size": 16},
+                    "megatron_parallel": {"tensor": 2, "pipeline": 2, "context": 1, "expert": 1}}
+
+    out = pp.training_distributed(runtime_info, {})
+
+    assert out["tensor_parallel_size"] == 2 and out["pipeline_parallel_size"] == 2
+    assert out["data_parallel_size"] == 4
+    assert out["parallel_sizes_declared_via"] == "megatron"
+    assert out["strategies"] == ["data_parallel", "tensor_parallel", "pipeline_parallel"]
+
+
+def test_distributed_device_mesh_fsdp_plus_tp():
+    runtime_info = {"device_mesh": {"dp_shard": 4, "tp": 2}, "fsdp_module": {"version": 2}}
+
+    out = pp.training_distributed(runtime_info, {})
+
+    assert out["device_mesh"] == {"dp_shard": 4, "tp": 2}
+    assert out["tensor_parallel_size"] == 2 and out["data_parallel_size"] == 4
+    assert out["strategies"] == ["fsdp", "tensor_parallel"]
+
+
+def test_distributed_deepspeed_and_garbage_dropped():
+    runtime_info = {"deepspeed_engine": {"zero_stage": 3, "offload_optimizer": "cpu"},
+                    "deepspeed_pipeline_stages": 2,
+                    "distributed_env": {"world_size": True},
+                    "accelerator_distributed": {"deepspeed": {"zero_stage": 9, "offload_param": "gpu"}}}
+
+    out = pp.training_distributed(runtime_info, {})
+
+    assert out == {
+        "pipeline_parallel_size": 2, "parallel_sizes_declared_via": "deepspeed_engine",
+        "deepspeed": {"zero_stage": 3, "offload_optimizer": "cpu", "declared_via": "deepspeed_engine"},
+        "strategies": ["deepspeed", "pipeline_parallel"],
+    }
+
+
+def test_distributed_nothing_seen_falls_back_to_strategy():
+    assert pp.training_distributed({}, {}) is None
+    assert pp.training_distributed({}, {}, "model_parallel") == {"strategies": ["model_parallel"]}
+    assert pp.training_distributed({"distributed_env": {"world_size": 4}}, {})["strategies"] == ["data_parallel"]
+
+
+def test_distributed_declared_fsdp_without_settings_is_not_data_parallel():
+    # FSDP from the CLI, killed before the Accelerator: no fsdp settings, only the env.
+    out = pp.training_distributed({"distributed_env": {"world_size": 4}}, {}, "fsdp")
+    assert out["strategies"] == ["fsdp"]
+
+
+def test_distributed_unknown_declared_strategy_dropped():
+    assert pp.training_distributed({}, {}, "my-custom-thing") is None
+    assert pp.training_distributed({}, {}, "deepspeed") == {"strategies": ["deepspeed"]}
+
+
+def test_distributed_single_process_writes_no_world():
+    # Every single-GPU Trainer run builds an Accelerator with num_processes=1.
+    assert pp.training_distributed({"accelerator_distributed": {"world_size": 1}}, {}) is None
+    # The env's single process isn't overridden by a lower source.
+    assert pp.training_distributed({"distributed_env": {"world_size": 1, "local_world_size": 1, "nodes": 1},
+                                    "accelerate_config_distributed": {"world_size": 4}}, {}) is None
+
+
+def test_compile_aibom_megatron_tp_plus_dp_is_model_parallel():
+    runtime_info = {"distributed_env": {"world_size": 8},
+                    "megatron_parallel": {"tensor": 2, "pipeline": 1, "context": 1, "expert": 1}}
+    aibom = pp.compile_aibom(
+        discoveries=[], detected_datasets=[], runtime_info=runtime_info,
+        annotations={"experiment-intent": "training"}, telemetry=None,
+    )
+    assert aibom["training"]["distributed"]["strategies"] == ["data_parallel", "tensor_parallel"]
+    assert aibom["training"]["parallelization_strategy"] == "model_parallel"

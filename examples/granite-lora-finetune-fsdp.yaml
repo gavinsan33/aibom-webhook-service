@@ -41,10 +41,13 @@ spec:
               fsdp_config:
                 fsdp_sharding_strategy: FULL_SHARD
                 fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP
+                fsdp_cpu_ram_efficient_loading: true
+                fsdp_sync_module_states: true
               num_processes: 2
               EOF
               trl sft \
                 --model_name_or_path ibm-granite/granite-3.3-2b-instruct \
+                --dtype bfloat16 \
                 --dataset_name tatsu-lab/alpaca \
                 --dataset_text_field text \
                 --output_dir /tmp/output \
@@ -75,6 +78,8 @@ spec:
                   optional: true
           resources:
             requests:
+              memory: 8Gi
               nvidia.com/gpu: "2"
             limits:
+              memory: 20Gi
               nvidia.com/gpu: "2"
