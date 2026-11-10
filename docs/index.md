@@ -14,6 +14,34 @@ To filter, inspect, and compare the resulting `AIBOM` custom resources, see the 
 6. The pod is created with the injections. The user's original YAML is untouched.
 7. When the Job completes (or is deleted, for long-running pods such as KServe predictors), the **watcher** creates a postprocess Job that compiles the AIBOM.
 
+```mermaid
+flowchart LR
+    subgraph whns["Webhook namespace"]
+        webhook["Admission<br/>webhook"]
+        watcher["Watcher"]
+        post["Postprocess<br/>Job"]
+    end
+
+    subgraph wlns["Workload namespace"]
+        pod["<b>Instrumented pod</b><br/>discovery init container<br/>runtime detector<br/>dataset sidecar"]
+        cm[("Data<br/>ConfigMap")]
+        aibom[("AIBOM +<br/>AIBOMTelemetry")]
+    end
+
+    prom[("Prometheus<br/>+ DCGM")]
+    cli["oc aibomrun"]
+    console["Console plugin"]
+
+    webhook -- "injects" --> pod
+    pod -- "signed" --> cm
+    cm --> watcher
+    watcher --> post
+    prom --> post
+    post -- "signed" --> aibom
+    aibom --> cli
+    aibom --> console
+```
+
 Pods are matched if they are owned directly by a Job or PyTorchJob, **or** if any container requests `nvidia.com/gpu` resources. JobSet pods match through their child Jobs. Ray pods are matched through a GPU request.
 
 The webhook always fails open (`failurePolicy: Ignore`): if the service is down, pods are created normally.
