@@ -7,6 +7,7 @@ version: 0.0.0
 appVersion: "latest"
 kubeVersion: ">=1.29.0-0"
 home: https://gavinsan33.github.io/project-aibom/
+icon: https://gavinsan33.github.io/project-aibom/assets/logo.svg
 sources:
   - https://github.com/gavinsan33/aibom-webhook-service
 annotations:
