@@ -1,3 +1,8 @@
+---
+hide:
+  - toc
+---
+
 # AIBOM Webhook Service
 
 A Kubernetes mutating admission webhook that automatically instruments AI workloads with AIBOM (AI Bill of Materials) metadata collection. When a pod is created in an opted-in namespace, the webhook injects hardware discovery, dataset detection, and tracking labels. No changes to the user's manifests are required.
@@ -13,6 +18,30 @@ To filter, inspect, and compare the resulting `AIBOM` custom resources, see the 
 5. The webhook injects an `aibom-discovery` init container (hardware snapshot), dataset detection hooks, and an `aibom.io/instrumented: "true"` label.
 6. The pod is created with the injections. The user's original YAML is untouched.
 7. When the Job completes (or is deleted, for long-running pods such as KServe predictors), the **watcher** creates a postprocess Job that compiles the AIBOM.
+
+```mermaid
+flowchart LR
+    subgraph whns["Webhook namespace"]
+        webhook["Admission<br/>webhook"]
+        watcher["Watcher"]
+        post["Postprocess<br/>Job"]
+    end
+
+    subgraph wlns["Workload namespace"]
+        pod["<b>Instrumented pod</b><br/>discovery init container<br/>runtime detector<br/>dataset sidecar"]
+        cm[("Data<br/>ConfigMap")]
+        aibom[("AIBOM +<br/>AIBOMTelemetry")]
+    end
+
+    prom[("Prometheus<br/>+ DCGM")]
+
+    webhook -- "injects" --> pod
+    pod -- "signed" --> cm
+    cm --> watcher
+    watcher --> post
+    prom --> post
+    post -- "signed" --> aibom
+```
 
 Pods are matched if they are owned directly by a Job or PyTorchJob, **or** if any container requests `nvidia.com/gpu` resources. JobSet pods match through their child Jobs. Ray pods are matched through a GPU request.
 
