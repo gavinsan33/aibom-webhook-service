@@ -1,6 +1,4 @@
-<img src=".github/logo.svg" alt="Project AIBOM logo" width="80">
-
-# AIBOM Webhook Service
+# <img src=".github/logo.svg" alt="" width="36"> AIBOM Webhook Service
 
 A Kubernetes mutating admission webhook that automatically instruments AI workloads with AIBOM (AI Bill of Materials) metadata collection. When a pod is created in an opted-in namespace, the webhook injects hardware discovery, dataset detection, and tracking labels. No changes to the user's manifests are required.
 
