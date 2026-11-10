@@ -11,6 +11,7 @@
   <a href="https://github.com/gavinsan33/aibom-webhook-service/actions/workflows/test.yml"><img src="https://img.shields.io/github/actions/workflow/status/gavinsan33/aibom-webhook-service/test.yml?branch=main&label=tests" alt="Tests"></a>
   <a href="https://github.com/gavinsan33/aibom-webhook-service/tags"><img src="https://img.shields.io/github/v/tag/gavinsan33/aibom-webhook-service?sort=semver&label=version" alt="Version"></a>
   <a href="https://gavinsan33.github.io/project-aibom/aibom-webhook-service/"><img src="https://img.shields.io/badge/Kubernetes-1.29%2B-3f51b5?logo=kubernetes&logoColor=white" alt="Kubernetes 1.29+"></a>
+  <a href="https://github.com/gavinsan33/aibom-webhook-service/blob/main/LICENSE"><img src="https://img.shields.io/github/license/gavinsan33/aibom-webhook-service" alt="License"></a>
 </p>
 
 A Kubernetes mutating admission webhook that automatically instruments AI workloads with AIBOM (AI Bill of Materials) metadata collection. When a pod is created in an opted-in namespace, the webhook injects hardware discovery, dataset detection, and tracking labels. No changes to the user's manifests are required.
