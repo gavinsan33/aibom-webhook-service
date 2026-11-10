@@ -1175,13 +1175,8 @@ def test_shadowed_sitecustomize_errors_do_not_break_startup(hooks_dir, tmp_path)
     assert _run_probe(sys.executable, hooks_dir, tmp_path, extra_path=[other]) == "ACTIVE"
 
 
-def test_transformers_hooks_never_force_a_lazy_import(tmp_path):
-    # peft's __init__ imports transformers, so transformers finishes
-    # importing while peft is half-initialized. Reading the lazy
-    # transformers.TrainingArguments then would import training_args, whose
-    # `from peft import PeftMixedModel` raises. The hooks wait for
-    # training_args/modeling_utils to be imported by the app instead.
-    pkgs = tmp_path / "pkgs"
+def _write_lazy_transformers(pkgs):
+    """A transformers whose classes load lazily, from modules that import peft."""
     (pkgs / "peft").mkdir(parents=True)
     (pkgs / "peft" / "__init__.py").write_text(
         "import transformers\n"
@@ -1213,6 +1208,16 @@ def test_transformers_hooks_never_force_a_lazy_import(tmp_path):
         "    @classmethod\n"
         "    def from_pretrained(cls, name, *args, **kwargs): return cls()\n"
     )
+
+
+def test_transformers_hooks_never_force_a_lazy_import(tmp_path):
+    # peft's __init__ imports transformers, so transformers finishes
+    # importing while peft is half-initialized. Reading the lazy
+    # transformers.TrainingArguments then would import training_args, whose
+    # `from peft import PeftMixedModel` raises. The hooks wait for
+    # training_args/modeling_utils to be imported by the app instead.
+    pkgs = tmp_path / "pkgs"
+    _write_lazy_transformers(pkgs)
     hooks = tmp_path / "aibom-hooks"
     hooks.mkdir()
     (hooks / "sitecustomize.py").write_text(open(rd.__file__).read())
@@ -1234,4 +1239,24 @@ def test_transformers_hooks_never_force_a_lazy_import(tmp_path):
 
     assert "EXCEPTION" not in proc.stderr
     info = json.loads(out.read_text())["runtime_info"]
+    assert (info["learning_rate"], info["model_name"]) == (1e-3, "org/model")
+
+
+def test_install_hooks_imports_lazy_transformers_classes(tmp_path, monkeypatch):
+    # Immediate mode has no finder to wait for training_args/modeling_utils,
+    # so with only the top-level package imported it must import them itself.
+    _write_lazy_transformers(tmp_path)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    for name in [m for m in sys.modules if m.split(".")[0] in ("transformers", "peft")]:
+        monkeypatch.delitem(sys.modules, name)  # restored after the test
+    try:
+        import transformers
+        rd.install_hooks()
+        transformers.TrainingArguments(learning_rate=1e-3)
+        transformers.PreTrainedModel.from_pretrained("org/model")
+    finally:
+        for name in [m for m in sys.modules if m.split(".")[0] in ("transformers", "peft")]:
+            del sys.modules[name]
+
+    info = rd._runtime_info
     assert (info["learning_rate"], info["model_name"]) == (1e-3, "org/model")

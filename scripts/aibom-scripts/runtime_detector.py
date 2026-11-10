@@ -1112,9 +1112,17 @@ def _gpu_device_count(device_map):
 # `from peft import PeftMixedModel` raised. So each class is patched when its
 # own module finishes importing (the transformers.training_args and
 # transformers.modeling_utils triggers), and the hooks only read sys.modules.
+# Immediate mode (install_hooks(), called mid-script) has no finder to wait
+# on, so it imports them here, as its other installers import their packages.
 def _install_transformers_hook():
-    _install_training_args_hook()
-    _install_from_pretrained_hook()
+    for name, install in (("transformers.training_args", _install_training_args_hook),
+                          ("transformers.modeling_utils", _install_from_pretrained_hook)):
+        try:
+            importlib.import_module(name)
+        except Exception as e:
+            _dbg(f"transformers hook: can't import {name} ({e!r}), skipping")
+            continue
+        install()
 
 
 def _install_training_args_hook():
