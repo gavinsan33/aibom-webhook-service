@@ -1105,19 +1105,34 @@ def _gpu_device_count(device_map):
     return len(devices)
 
 
+# transformers loads its classes lazily: `transformers.TrainingArguments`
+# imports transformers.training_args on first access. Reading it from a hook
+# forced that import at whatever moment the hook ran -- e.g. while peft (whose
+# __init__ imports transformers) was half-initialized, so training_args'
+# `from peft import PeftMixedModel` raised. So each class is patched when its
+# own module finishes importing (the transformers.training_args and
+# transformers.modeling_utils triggers), and the hooks only read sys.modules.
+# Immediate mode (install_hooks(), called mid-script) has no finder to wait
+# on, so it imports them here, as its other installers import their packages.
 def _install_transformers_hook():
-    try:
-        import transformers
-    except ImportError:
-        _dbg("transformers hook: transformers not available, skipping")
-        return
+    for name, install in (("transformers.training_args", _install_training_args_hook),
+                          ("transformers.modeling_utils", _install_from_pretrained_hook)):
+        try:
+            importlib.import_module(name)
+        except Exception as e:
+            _dbg(f"transformers hook: can't import {name} ({e!r}), skipping")
+            continue
+        install()
 
-    if "transformers" in _hooks_installed:
+
+def _install_training_args_hook():
+    training_args = sys.modules.get("transformers.training_args")
+    cls = getattr(training_args, "TrainingArguments", None)
+    if cls is None or "transformers_training_args" in _hooks_installed:
         return
-    _orig_ta_post_init = transformers.TrainingArguments.__post_init__
-    _orig_from_pretrained = transformers.PreTrainedModel.from_pretrained.__func__
-    _hooks_installed["transformers"] = True
-    _dbg("transformers hook: installed, patching TrainingArguments and PreTrainedModel.from_pretrained")
+    _orig_ta_post_init = cls.__post_init__
+    _hooks_installed["transformers_training_args"] = True
+    _dbg("transformers hook: installed, patching TrainingArguments")
 
     # TrainingArguments is a dataclass, and so are its subclasses (trl's
     # SFTConfig/DPOConfig/GRPOConfig, Seq2SeqTrainingArguments, ...). Each
@@ -1171,7 +1186,17 @@ def _install_transformers_hook():
         except Exception:
             _dbg_exc("transformers._patched_ta_post_init")
 
-    transformers.TrainingArguments.__post_init__ = _patched_ta_post_init
+    cls.__post_init__ = _patched_ta_post_init
+
+
+def _install_from_pretrained_hook():
+    modeling_utils = sys.modules.get("transformers.modeling_utils")
+    cls = getattr(modeling_utils, "PreTrainedModel", None)
+    if cls is None or "transformers_from_pretrained" in _hooks_installed:
+        return
+    _orig_from_pretrained = cls.from_pretrained.__func__
+    _hooks_installed["transformers_from_pretrained"] = True
+    _dbg("transformers hook: installed, patching PreTrainedModel.from_pretrained")
 
     # Only the process's first model load is recorded: a DPO reference model,
     # reward model or distillation teacher loaded afterwards would otherwise
@@ -1247,7 +1272,7 @@ def _install_transformers_hook():
             _dbg_exc("transformers._patched_from_pretrained")
         return model
 
-    transformers.PreTrainedModel.from_pretrained = classmethod(_patched_from_pretrained)
+    cls.from_pretrained = classmethod(_patched_from_pretrained)
 
 
 # ── peft LoraConfig hook ──────────────────────────────────────────────────────
@@ -1709,7 +1734,8 @@ _LAZY_TRIGGERS = {
     "datasets": _install_hf_datasets_hook,
     "torchvision": _install_torchvision_hook,
     "webdataset": _install_webdataset_hook,
-    "transformers": _install_transformers_hook,
+    "transformers.training_args": _install_training_args_hook,
+    "transformers.modeling_utils": _install_from_pretrained_hook,
     "peft": _install_peft_hook,
     "random": _install_random_seed_hook,
     # numpy 2 can import numpy.random lazily, on first attribute access.
@@ -1742,9 +1768,9 @@ class _PostImportHookFinder:
         self._resolving = threading.local()
 
     def _claim(self, name):
-        # Hooks run outside this lock: one may import another trigger (the
-        # transformers hook pulls in torch), and holding a lock across an
-        # import risks deadlocking against another thread's module lock.
+        # Hooks run outside this lock: one may run an import statement (the
+        # torch hook's `import torch.utils.data`), and holding a lock across
+        # an import risks deadlocking against another thread's module lock.
         with self._claim_lock:
             hook = self._pending.pop(name, None)
             if not self._pending:

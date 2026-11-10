@@ -1173,3 +1173,90 @@ def test_shadowed_sitecustomize_errors_do_not_break_startup(hooks_dir, tmp_path)
     (other / "sitecustomize.py").write_text("raise RuntimeError('broken image sitecustomize')\n")
 
     assert _run_probe(sys.executable, hooks_dir, tmp_path, extra_path=[other]) == "ACTIVE"
+
+
+def _write_lazy_transformers(pkgs):
+    """A transformers whose classes load lazily, from modules that import peft."""
+    (pkgs / "peft").mkdir(parents=True)
+    (pkgs / "peft" / "__init__.py").write_text(
+        "import transformers\n"
+        "class PeftMixedModel: pass\n"
+        "class LoraConfig:\n"
+        "    def __init__(self, r=8, lora_alpha=16, **kwargs):\n"
+        "        self.r, self.lora_alpha, self.use_dora, self.use_rslora = r, lora_alpha, False, False\n"
+    )
+    (pkgs / "transformers").mkdir()
+    (pkgs / "transformers" / "__init__.py").write_text(
+        "import importlib\n"
+        "_LAZY = {'TrainingArguments': '.training_args', 'PreTrainedModel': '.modeling_utils'}\n"
+        "def __getattr__(name):\n"
+        "    if name in _LAZY:\n"
+        "        return getattr(importlib.import_module(_LAZY[name], __name__), name)\n"
+        "    raise AttributeError(name)\n"
+    )
+    (pkgs / "transformers" / "training_args.py").write_text(
+        "import dataclasses\n"
+        "from peft import PeftMixedModel\n"
+        "@dataclasses.dataclass\n"
+        "class TrainingArguments:\n"
+        "    learning_rate: float = 5e-5\n"
+        "    def __post_init__(self): pass\n"
+    )
+    (pkgs / "transformers" / "modeling_utils.py").write_text(
+        "from peft import PeftMixedModel\n"
+        "class PreTrainedModel:\n"
+        "    @classmethod\n"
+        "    def from_pretrained(cls, name, *args, **kwargs): return cls()\n"
+    )
+
+
+def test_transformers_hooks_never_force_a_lazy_import(tmp_path):
+    # peft's __init__ imports transformers, so transformers finishes
+    # importing while peft is half-initialized. Reading the lazy
+    # transformers.TrainingArguments then would import training_args, whose
+    # `from peft import PeftMixedModel` raises. The hooks wait for
+    # training_args/modeling_utils to be imported by the app instead.
+    pkgs = tmp_path / "pkgs"
+    _write_lazy_transformers(pkgs)
+    hooks = tmp_path / "aibom-hooks"
+    hooks.mkdir()
+    (hooks / "sitecustomize.py").write_text(open(rd.__file__).read())
+    out = tmp_path / "out.json"
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "PYTHONPATH": f"{hooks}:{pkgs}",
+        "AIBOM_DATASET_DETECT": "1",
+        "AIBOM_DATASET_OUTPUT": str(out),
+        "AIBOM_DEBUG": "1",
+    }
+    script = (
+        "import peft, transformers\n"
+        "transformers.TrainingArguments(learning_rate=1e-3)\n"
+        "transformers.PreTrainedModel.from_pretrained('org/model')\n"
+    )
+    proc = subprocess.run([sys.executable, "-c", script], env=env, cwd=tmp_path, check=True,
+                          timeout=60, capture_output=True, text=True)
+
+    assert "EXCEPTION" not in proc.stderr
+    info = json.loads(out.read_text())["runtime_info"]
+    assert (info["learning_rate"], info["model_name"]) == (1e-3, "org/model")
+
+
+def test_install_hooks_imports_lazy_transformers_classes(tmp_path, monkeypatch):
+    # Immediate mode has no finder to wait for training_args/modeling_utils,
+    # so with only the top-level package imported it must import them itself.
+    _write_lazy_transformers(tmp_path)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    for name in [m for m in sys.modules if m.split(".")[0] in ("transformers", "peft")]:
+        monkeypatch.delitem(sys.modules, name)  # restored after the test
+    try:
+        import transformers
+        rd.install_hooks()
+        transformers.TrainingArguments(learning_rate=1e-3)
+        transformers.PreTrainedModel.from_pretrained("org/model")
+    finally:
+        for name in [m for m in sys.modules if m.split(".")[0] in ("transformers", "peft")]:
+            del sys.modules[name]
+
+    info = rd._runtime_info
+    assert (info["learning_rate"], info["model_name"]) == (1e-3, "org/model")

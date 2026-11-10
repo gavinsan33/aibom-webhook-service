@@ -131,7 +131,6 @@ def test_training_arguments_optimizer_and_scheduler_fields(fake_transformers_mod
             super().__post_init__()
             self.lr_scheduler_type = SchedulerType(self.lr_scheduler_type)
 
-    fake_transformers_module.TrainingArguments = TrainingArguments
     rd.install_hooks()
     TrainingArguments(adam_beta2=0.95, weight_decay=0.1, lr_scheduler_type="cosine", warmup_ratio=0.03)
 
