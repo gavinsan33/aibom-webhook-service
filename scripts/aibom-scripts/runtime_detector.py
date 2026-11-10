@@ -1768,9 +1768,9 @@ class _PostImportHookFinder:
         self._resolving = threading.local()
 
     def _claim(self, name):
-        # Hooks run outside this lock: one may import another trigger (the
-        # transformers hook pulls in torch), and holding a lock across an
-        # import risks deadlocking against another thread's module lock.
+        # Hooks run outside this lock: one may run an import statement (the
+        # torch hook's `import torch.utils.data`), and holding a lock across
+        # an import risks deadlocking against another thread's module lock.
         with self._claim_lock:
             hook = self._pending.pop(name, None)
             if not self._pending:
