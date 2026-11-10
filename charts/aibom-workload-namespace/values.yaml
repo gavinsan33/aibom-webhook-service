@@ -10,7 +10,7 @@ platform: auto
 # Adds a PodMonitor that scrapes vLLM's own /metrics endpoint (TTFT, ITL,
 # queue depth, KV-cache usage) on port 8000 for every aibom.io/instrumented
 # pod in this namespace, so postprocess.py's inference.performance queries
-# (see CLAUDE.md) have data to read. On by default, but it requires the
+# have data to read. On by default, but it requires the
 # Prometheus Operator CRDs (monitoring.coreos.com/v1 PodMonitor) to actually
 # exist on the cluster, or the whole chart install fails outright (an
 # unrecognized CRD, not a soft permission gap like monitoringAccess' missing

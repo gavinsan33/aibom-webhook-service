@@ -7,8 +7,8 @@
 # argument is the fixed `--model=/mnt/models` — nothing on the command line
 # says which model this is. The webhook recovers the identity by mounting the
 # same claim read-only into the aibom-discovery init container and reading the
-# model's own README/config.json/HF download metadata (see CLAUDE.md, "Model
-# Auto-Detection"), so the AIBOM reports e.g. Qwen/Qwen2.5-32B-Instruct rather
+# model's own README/config.json/HF download metadata (see docs/CAPABILITIES.md,
+# "Model / Training Config Detection"), so the AIBOM reports e.g. Qwen/Qwen2.5-32B-Instruct rather
 # than the folder name.
 #
 # Prerequisite: a PVC named llm-serving-storage in this namespace holding a
