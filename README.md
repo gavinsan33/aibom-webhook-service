@@ -21,7 +21,7 @@ When the workload finishes, a postprocess Job compiles everything (hardware, dat
 - [`oc-aibom`](https://github.com/gavinsan33/oc-aibom): a `kubectl`/`oc` plugin (`oc aibomrun list|describe|diff|compare`). It also verifies the AIBOM's signature.
 - [`aibom-console-plugin`](https://github.com/gavinsan33/aibom-console-plugin): an OpenShift web console plugin with list, detail, and compare views and telemetry charts.
 
-**Full documentation lives in [`docs/`](docs/index.md)** (built with MkDocs). This README only covers what the project does and how to install it.
+**Full documentation lives on the [docs site](https://gavinsan33.github.io/project-aibom/aibom-webhook-service/).** This README only covers what the project does and how to install it.
 
 ## How It Works
 
@@ -31,11 +31,11 @@ When the workload finishes, a postprocess Job compiles everything (hardware, dat
 4. The API server calls the webhook, which injects an `aibom-discovery` init container (hardware snapshot), dataset detection hooks, a dataset-signing sidecar, and an `aibom.io/instrumented: "true"` label. The user's YAML is untouched
 5. When the Job completes (or the pod is deleted, for long-running pods like KServe predictors), the watcher creates a postprocess Job that compiles and creates the `AIBOM`
 
-The webhook always fails open (`failurePolicy: Ignore`): if the service is down or unreachable, pods are created normally, without an AIBOM. See [Troubleshooting](docs/user-guide/troubleshooting.md).
+The webhook always fails open (`failurePolicy: Ignore`): if the service is down or unreachable, pods are created normally, without an AIBOM. See [Troubleshooting](https://gavinsan33.github.io/project-aibom/aibom-webhook-service/user-guide/troubleshooting/).
 
 ## Prerequisites
 
-- OpenShift 4.16+, or Kubernetes 1.29+ with [cert-manager](https://cert-manager.io/) installed. Off OpenShift, see [Kubernetes without OpenShift](docs/user-guide/getting-started.md#kubernetes-without-openshift).
+- OpenShift 4.16+, or Kubernetes 1.29+ with [cert-manager](https://cert-manager.io/) installed. Off OpenShift, see [Kubernetes without OpenShift](https://gavinsan33.github.io/project-aibom/aibom-webhook-service/user-guide/getting-started/#kubernetes-without-openshift).
 - `helm` 3.x
 - Cluster-admin (the charts install cluster-scoped RBAC)
 - To build from source: Go 1.22+ and [`just`](https://github.com/casey/just) (`make install-just`)
@@ -78,14 +78,14 @@ oc get aibomrun -n <namespace>
 oc get aibomrun <name> -n <namespace> -o yaml
 ```
 
-Without a published chart, `just deploy`, `just deploy-buildconfig`, and `just setup-namespace` do the same from a checkout; see [Development](docs/reference/development.md).
+Without a published chart, `just deploy`, `just deploy-buildconfig`, and `just setup-namespace` do the same from a checkout; see [Development](https://gavinsan33.github.io/project-aibom/aibom-webhook-service/reference/development/).
 
 ## Documentation
 
-- [Getting Started](docs/user-guide/getting-started.md): install, enable a namespace, verify, uninstall
-- [Annotations](docs/user-guide/annotations.md): optional `aibom.io/*` experiment metadata
-- [Troubleshooting](docs/user-guide/troubleshooting.md)
-- [Detected Fields](docs/CAPABILITIES.md): every field the pipeline can populate, and how
-- [AIBOM Schema](docs/reference/schema.md): how AIBOMs are stored
-- [Configuration](docs/reference/configuration.md): webhook flags and chart values
-- [Development](docs/reference/development.md): building, `just` recipes, publishing, repo layout
+- [Getting Started](https://gavinsan33.github.io/project-aibom/aibom-webhook-service/user-guide/getting-started/): install, enable a namespace, verify, uninstall
+- [Annotations](https://gavinsan33.github.io/project-aibom/aibom-webhook-service/user-guide/annotations/): optional `aibom.io/*` experiment metadata
+- [Troubleshooting](https://gavinsan33.github.io/project-aibom/aibom-webhook-service/user-guide/troubleshooting/)
+- [Detected Fields](https://gavinsan33.github.io/project-aibom/aibom-webhook-service/CAPABILITIES/): every field the pipeline can populate, and how
+- [AIBOM Schema](https://gavinsan33.github.io/project-aibom/aibom-webhook-service/reference/schema/): how AIBOMs are stored
+- [Configuration](https://gavinsan33.github.io/project-aibom/aibom-webhook-service/reference/configuration/): webhook flags and chart values
+- [Development](https://gavinsan33.github.io/project-aibom/aibom-webhook-service/reference/development/): building, `just` recipes, publishing, repo layout
