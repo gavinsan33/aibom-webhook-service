@@ -11,6 +11,8 @@
 #                                                      epochs, optimizer, seed, dtype
 #   - peft.LoraConfig                               -> LoRA rank/alpha and
 #                                                      adaptation method (lora)
+#   - Accelerator / torch.autocast / TF32 switches -> training.mixed_precision
+#                                                      and training.precision
 #
 # No aibom.io/model-name or aibom.io/dataset-* annotations are set on purpose,
 # so every model/training/fine_tuning field in the resulting AIBOM is sourced
@@ -104,6 +106,8 @@ spec:
                   max_steps=50,
                   logging_steps=5,
                   bf16=True,
+                  # Needs an Ampere or newer GPU; raises on older ones.
+                  tf32=True,
                   seed=42,
                   report_to="none",
               )
