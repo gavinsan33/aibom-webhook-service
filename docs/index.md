@@ -29,8 +29,6 @@ flowchart LR
     end
 
     prom[("Prometheus<br/>+ DCGM")]
-    cli["oc aibomrun"]
-    console["Console plugin"]
 
     webhook -- "injects" --> pod
     pod -- "signed" --> cm
@@ -38,8 +36,6 @@ flowchart LR
     watcher --> post
     prom --> post
     post -- "signed" --> aibom
-    aibom --> cli
-    aibom --> console
 ```
 
 Pods are matched if they are owned directly by a Job or PyTorchJob, **or** if any container requests `nvidia.com/gpu` resources. JobSet pods match through their child Jobs. Ray pods are matched through a GPU request.
