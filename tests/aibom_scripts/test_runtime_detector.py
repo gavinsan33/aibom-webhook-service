@@ -256,9 +256,17 @@ class DistributedSampler:
         self.shuffle, self.seed, self.drop_last = shuffle, seed, drop_last
 
 
-class BatchSamplerShard:
+class BatchSampler:
     def __init__(self, sampler, drop_last):
         self.sampler, self.drop_last = sampler, drop_last
+
+
+class BatchSamplerShard:
+    """Like accelerate's: the batch sampler it wraps is in .batch_sampler, and
+    it has no .sampler."""
+    def __init__(self, batch_sampler):
+        self.batch_sampler = batch_sampler
+        self.drop_last = getattr(batch_sampler, "drop_last", False)
 
 
 class FakeGenerator:
@@ -296,7 +304,7 @@ def test_dataloader_records_distributed_sampler_settings(fake_torch_module):
 
 
 def test_custom_batch_sampler_reports_what_it_wraps(fake_torch_module):
-    sampling = _sampling_of_only_entry(fake_torch_module, batch_sampler=BatchSamplerShard(SequentialSampler(), drop_last=True),
+    sampling = _sampling_of_only_entry(fake_torch_module, batch_sampler=BatchSamplerShard(BatchSampler(SequentialSampler(), drop_last=True)),
                                        drop_last=False)
     assert sampling["batch_sampler"] == f"{__name__}.BatchSamplerShard"
     assert sampling["sampler"] == f"{__name__}.SequentialSampler"
@@ -308,8 +316,32 @@ def test_batch_sampler_wins_over_placeholder_loader_sampler(fake_torch_module):
     """Given a batch_sampler, torch sets loader.sampler to a placeholder
     SequentialSampler; the shuffle is in the batch sampler's sampler."""
     sampling = _sampling_of_only_entry(fake_torch_module, sampler=SequentialSampler(),
-                                       batch_sampler=BatchSamplerShard(RandomSampler(), drop_last=True))
+                                       batch_sampler=BatchSamplerShard(BatchSampler(RandomSampler(), drop_last=True)))
     assert sampling["shuffle"] is True
+
+
+def test_opaque_batch_sampler_reports_no_sampler_or_drop_last(fake_torch_module):
+    """A batch sampler with no reachable sampler: the loader's placeholder
+    SequentialSampler and drop_last=False must not be reported in its place."""
+    class OpaqueBatchSampler:
+        pass
+
+    sampling = _sampling_of_only_entry(fake_torch_module, sampler=SequentialSampler(), drop_last=False,
+                                       batch_sampler=OpaqueBatchSampler())
+    assert sampling["batch_sampler"].endswith("OpaqueBatchSampler")
+    assert not {"sampler", "shuffle", "drop_last"} & sampling.keys()
+
+
+def test_empty_sampler_is_still_read(fake_torch_module):
+    """A DistributedSampler over an empty shard has len() 0, so it's falsy."""
+    class EmptyShard(DistributedSampler):
+        def __len__(self):
+            return 0
+    EmptyShard.__name__ = "DistributedSampler"
+
+    sampling = _sampling_of_only_entry(fake_torch_module, sampler=SequentialSampler(),
+                                       batch_sampler=BatchSampler(EmptyShard(shuffle=True, seed=3), drop_last=True))
+    assert (sampling["shuffle"], sampling["sampler_seed"]) == (True, 3)
 
 
 def test_unknown_sampler_is_named_without_guessing_shuffle(fake_torch_module):
@@ -335,7 +367,7 @@ def test_first_dataloader_sampling_wins_over_accelerate_rewrap(fake_datasets_mod
 
     ds = datasets.load_dataset("tatsu-lab/alpaca")
     tud.DataLoader(ds, batch_size=4, sampler=RandomSampler())
-    tud.DataLoader(ds, batch_sampler=BatchSamplerShard(SequentialSampler(), drop_last=False))
+    tud.DataLoader(ds, batch_sampler=BatchSamplerShard(BatchSampler(SequentialSampler(), drop_last=False)))
 
     (entry,) = rd.get_detected_datasets()
     assert entry["sampling"]["shuffle"] is True

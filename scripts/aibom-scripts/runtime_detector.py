@@ -841,11 +841,27 @@ def _dataloader_sampling(loader):
     """
     out = {}
     batch_sampler = getattr(loader, "batch_sampler", None)
-    if batch_sampler is not None and _class_name(batch_sampler) != _DEFAULT_BATCH_SAMPLER:
-        out["batch_sampler"] = _class_name(batch_sampler)
-    # Read through the batch sampler: given one, loader.sampler is a placeholder
-    # SequentialSampler, and the loader's own BatchSampler wraps loader.sampler.
-    sampler = getattr(batch_sampler, "sampler", None) or getattr(loader, "sampler", None)
+    if batch_sampler is None:
+        # No automatic batching: loader.sampler yields the indices itself.
+        sampler, drop_last = getattr(loader, "sampler", None), getattr(loader, "drop_last", None)
+    else:
+        if _class_name(batch_sampler) != _DEFAULT_BATCH_SAMPLER:
+            out["batch_sampler"] = _class_name(batch_sampler)
+        # Read through the batch sampler only: given one, loader.sampler is a
+        # placeholder SequentialSampler and loader.drop_last a placeholder
+        # False (the loader's own BatchSampler wraps the real ones).
+        # accelerate's BatchSamplerShard keeps the batch sampler it wraps in
+        # .batch_sampler and has no .sampler. A sampler not found this way is
+        # left out rather than guessed.
+        sampler = drop_last = None
+        bs = batch_sampler
+        for _ in range(4):
+            if drop_last is None and isinstance(getattr(bs, "drop_last", None), bool):
+                drop_last = bs.drop_last
+            sampler = getattr(bs, "sampler", None)
+            bs = getattr(bs, "batch_sampler", None)
+            if sampler is not None or bs is None:
+                break
     if sampler is not None:
         name = _class_name(sampler)
         out["sampler"] = name
@@ -866,9 +882,6 @@ def _dataloader_sampling(loader):
                 out["sampler_drop_last"] = sampler.drop_last
         # Anything else (LengthGroupedSampler, custom) is only named: whether
         # it shuffles isn't knowable from its class.
-    drop_last = getattr(batch_sampler, "drop_last", None)
-    if not isinstance(drop_last, bool):
-        drop_last = getattr(loader, "drop_last", None)
     if isinstance(drop_last, bool):
         out["drop_last"] = drop_last
     num_workers = getattr(loader, "num_workers", None)
