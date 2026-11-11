@@ -16,7 +16,7 @@ Set chart values with `--set key=value` or `-f values.yaml` on `helm upgrade --i
 |-------|---------|-------------|
 | `image.webhook.repository` / `.tag` | `quay.io/project-aibom/aibom-webhook-service` / `""` | The webhook and watcher image. An empty tag means the chart's `appVersion`: the release version in a published chart, `latest` from a checkout. |
 | `image.postprocess.repository` / `.tag` | `quay.io/project-aibom/aibom-postprocess` / `""` | The image the postprocess Job runs. The tag defaults the same way. |
-| `image.discovery.repository` / `.tag` | `quay.io/project-aibom/aibom-discovery` / `""` | The `aibom-discovery` init container's image, a small UBI image built from `discovery/Dockerfile` (about 230 MB). An empty tag means the chart's `appVersion`. Any image with `python3`, `bash`, `lscpu` and `lsblk` works. `nvidia-smi` is injected at runtime by the NVIDIA Container Toolkit on GPU pods. |
+| `image.discovery.repository` / `.tag` | `quay.io/project-aibom/aibom-discovery` / `""` | The `aibom-discovery` init container's image, a small UBI image built from `discovery/Dockerfile` (about 230 MB). An empty tag means the chart's `appVersion`. Any image with `python3`, `bash`, `lscpu` and `lsblk` works. `nvidia-smi` is injected at runtime by the NVIDIA Container Toolkit on GPU pods; AMD GPUs are read from sysfs, so no ROCm tools are needed. |
 | `image.pullPolicy` | `""` | Pull policy for the webhook image. Empty leaves it to Kubernetes: `IfNotPresent` for a release tag, `Always` for `latest`. |
 
 ### Webhook and admission
