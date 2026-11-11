@@ -1,0 +1,976 @@
+{
+  "$schema": "http://cyclonedx.org/schema/bom-1.6.schema.json",
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "serialNumber": "urn:uuid:0f0869f2-d50b-5d4a-ae10-ef3eef5b28e4",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-11-02T14:52:10Z",
+    "lifecycles": [
+      {
+        "phase": "operations"
+      }
+    ],
+    "tools": {
+      "components": [
+        {
+          "type": "application",
+          "name": "aibom-webhook",
+          "version": "0.1.0"
+        }
+      ]
+    },
+    "component": {
+      "bom-ref": "run:project-example/aibom-vllm-benchmark-server-0",
+      "type": "application",
+      "group": "project-example",
+      "name": "vllm-granite-benchmark",
+      "properties": [
+        {
+          "name": "aibomrun:experiment:intent",
+          "value": "inference"
+        },
+        {
+          "name": "aibomrun:experiment:intent:declaredVia",
+          "value": "annotation"
+        },
+        {
+          "name": "aibomrun:job:name",
+          "value": "aibom-vllm-benchmark-server-0"
+        },
+        {
+          "name": "aibomrun:job:status",
+          "value": "DeadlineExceeded"
+        },
+        {
+          "name": "aibomrun:job:durationSeconds",
+          "value": "620"
+        },
+        {
+          "name": "aibomrun:pod:0:name",
+          "value": "aibom-vllm-benchmark-server-0-0-25bpm"
+        },
+        {
+          "name": "aibomrun:pod:0:uid",
+          "value": "00000000-0000-0000-0000-000000000001"
+        },
+        {
+          "name": "aibomrun:pod:0:namespace",
+          "value": "project-example"
+        },
+        {
+          "name": "aibomrun:pod:0:node",
+          "value": "node-1"
+        },
+        {
+          "name": "aibomrun:pod:0:startTime",
+          "value": "2026-11-02T14:41:43.885058Z"
+        },
+        {
+          "name": "aibomrun:pod:0:status",
+          "value": "Completed"
+        },
+        {
+          "name": "aibomrun:pod:0:exitCode",
+          "value": "0"
+        },
+        {
+          "name": "aibomrun:signature:algorithm",
+          "value": "Ed25519"
+        },
+        {
+          "name": "aibomrun:signature:value",
+          "value": "896/+1ogKbq0...redacted..."
+        },
+        {
+          "name": "aibomrun:signature:publicKey",
+          "value": "7gDMOGOVyQkE...redacted..."
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "quality-metrics",
+          "url": "urn:aibomrun:project-example/AIBOMTelemetry/aibom-vllm-benchmark-server-0-telemetry-6383e2ef",
+          "hashes": [
+            {
+              "alg": "SHA-256",
+              "content": "08f6bc2387520e3e545ecdcf30397b68027566ba2fb9f249d1b776eea6fbf608"
+            }
+          ],
+          "comment": "10716 bytes, schema 1, window 1793630503..1793631124 step 30s"
+        },
+        {
+          "type": "attestation",
+          "url": "urn:aibomrun:project-example/AIBOM/aibom-vllm-benchmark-server-0-j4vpg",
+          "hashes": [
+            {
+              "alg": "SHA-256",
+              "content": "dd37ca8a7a991dd92c414045390738607c62847e8858e567585c64fbd666b4a4"
+            }
+          ],
+          "comment": "the signed AIBOM record this document was derived from; Ed25519 over its RFC 8785 canonical form"
+        },
+        {
+          "type": "bom",
+          "url": "urn:cdx:5c3a9f1e-2d4b-4c6e-8a7f-0b1c2d3e4f5a/1",
+          "comment": "runtime inventory for the same workload"
+        }
+      ]
+    }
+  },
+  "components": [
+    {
+      "bom-ref": "model:drawais/Granite-3.3-8B-Instruct-AWQ-INT4",
+      "type": "machine-learning-model",
+      "name": "drawais/Granite-3.3-8B-Instruct-AWQ-INT4",
+      "purl": "pkg:generic/drawais/Granite-3.3-8B-Instruct-AWQ-INT4?download_url=https://huggingface.co/drawais/Granite-3.3-8B-Instruct-AWQ-INT4",
+      "properties": [
+        {
+          "name": "aibomrun:model:framework",
+          "value": "vllm"
+        },
+        {
+          "name": "aibomrun:model:quantization",
+          "value": "awq"
+        },
+        {
+          "name": "aibomrun:model:quantization:bits",
+          "value": "4"
+        },
+        {
+          "name": "aibomrun:model:speculativeDecoding",
+          "value": "{\"method\":\"ngram\",\"num_speculative_tokens\":5,\"prompt_lookup_max\":4}"
+        }
+      ],
+      "modelCard": {
+        "quantitativeAnalysis": {
+          "performanceMetrics": [
+            {
+              "type": "inference:generation_throughput:min",
+              "value": "11.61",
+              "slice": "tokens_per_sec"
+            },
+            {
+              "type": "inference:generation_throughput:max",
+              "value": "305.33",
+              "slice": "tokens_per_sec"
+            },
+            {
+              "type": "inference:generation_throughput:avg",
+              "value": "172.06",
+              "slice": "tokens_per_sec"
+            },
+            {
+              "type": "inference:generation_throughput:p95",
+              "value": "305.33",
+              "slice": "tokens_per_sec"
+            },
+            {
+              "type": "inference:generation_throughput:avg:first_third",
+              "value": "13.96",
+              "slice": "tokens_per_sec"
+            },
+            {
+              "type": "inference:generation_throughput:avg:last_third",
+              "value": "285.28",
+              "slice": "tokens_per_sec"
+            },
+            {
+              "type": "inference:generation_throughput:avg:middle_third",
+              "value": "160.35",
+              "slice": "tokens_per_sec"
+            },
+            {
+              "type": "inference:inter_token_latency_seconds:min",
+              "value": "0.00967",
+              "slice": "seconds"
+            },
+            {
+              "type": "inference:inter_token_latency_seconds:max",
+              "value": "0.068",
+              "slice": "seconds"
+            },
+            {
+              "type": "inference:inter_token_latency_seconds:avg",
+              "value": "0.0463",
+              "slice": "seconds"
+            },
+            {
+              "type": "inference:inter_token_latency_seconds:p95",
+              "value": "0.068",
+              "slice": "seconds"
+            },
+            {
+              "type": "inference:inter_token_latency_seconds:avg:first_third",
+              "value": "0.00967",
+              "slice": "seconds"
+            },
+            {
+              "type": "inference:inter_token_latency_seconds:avg:last_third",
+              "value": "0.0563",
+              "slice": "seconds"
+            },
+            {
+              "type": "inference:inter_token_latency_seconds:avg:middle_third",
+              "value": "0.068",
+              "slice": "seconds"
+            },
+            {
+              "type": "inference:kv_cache_usage:min",
+              "value": "0",
+              "slice": "percent"
+            },
+            {
+              "type": "inference:kv_cache_usage:max",
+              "value": "64.9",
+              "slice": "percent"
+            },
+            {
+              "type": "inference:kv_cache_usage:avg",
+              "value": "16.29",
+              "slice": "percent"
+            },
+            {
+              "type": "inference:kv_cache_usage:p95",
+              "value": "64.9",
+              "slice": "percent"
+            },
+            {
+              "type": "inference:kv_cache_usage:avg:first_third",
+              "value": "0",
+              "slice": "percent"
+            },
+            {
+              "type": "inference:kv_cache_usage:avg:last_third",
+              "value": "32.52",
+              "slice": "percent"
+            },
+            {
+              "type": "inference:kv_cache_usage:avg:middle_third",
+              "value": "0.118",
+              "slice": "percent"
+            },
+            {
+              "type": "inference:num_requests_running:min",
+              "value": "0",
+              "slice": "requests"
+            },
+            {
+              "type": "inference:num_requests_running:max",
+              "value": "512",
+              "slice": "requests"
+            },
+            {
+              "type": "inference:num_requests_running:avg",
+              "value": "128.5",
+              "slice": "requests"
+            },
+            {
+              "type": "inference:num_requests_running:p95",
+              "value": "512",
+              "slice": "requests"
+            },
+            {
+              "type": "inference:num_requests_running:avg:first_third",
+              "value": "0",
+              "slice": "requests"
+            },
+            {
+              "type": "inference:num_requests_running:avg:last_third",
+              "value": "256.5",
+              "slice": "requests"
+            },
+            {
+              "type": "inference:num_requests_running:avg:middle_third",
+              "value": "1",
+              "slice": "requests"
+            },
+            {
+              "type": "inference:num_requests_waiting:min",
+              "value": "0",
+              "slice": "requests"
+            },
+            {
+              "type": "inference:num_requests_waiting:max",
+              "value": "0",
+              "slice": "requests"
+            },
+            {
+              "type": "inference:num_requests_waiting:avg",
+              "value": "0",
+              "slice": "requests"
+            },
+            {
+              "type": "inference:num_requests_waiting:p95",
+              "value": "0",
+              "slice": "requests"
+            },
+            {
+              "type": "inference:num_requests_waiting:avg:first_third",
+              "value": "0",
+              "slice": "requests"
+            },
+            {
+              "type": "inference:num_requests_waiting:avg:last_third",
+              "value": "0",
+              "slice": "requests"
+            },
+            {
+              "type": "inference:num_requests_waiting:avg:middle_third",
+              "value": "0",
+              "slice": "requests"
+            },
+            {
+              "type": "inference:prompt_throughput:min",
+              "value": "29.85",
+              "slice": "tokens_per_sec"
+            },
+            {
+              "type": "inference:prompt_throughput:max",
+              "value": "768.53",
+              "slice": "tokens_per_sec"
+            },
+            {
+              "type": "inference:prompt_throughput:avg",
+              "value": "514.52",
+              "slice": "tokens_per_sec"
+            },
+            {
+              "type": "inference:prompt_throughput:p95",
+              "value": "768.53",
+              "slice": "tokens_per_sec"
+            },
+            {
+              "type": "inference:prompt_throughput:avg:first_third",
+              "value": "35.89",
+              "slice": "tokens_per_sec"
+            },
+            {
+              "type": "inference:prompt_throughput:avg:last_third",
+              "value": "711.08",
+              "slice": "tokens_per_sec"
+            },
+            {
+              "type": "inference:prompt_throughput:avg:middle_third",
+              "value": "698.31",
+              "slice": "tokens_per_sec"
+            },
+            {
+              "type": "inference:time_to_first_token_seconds:min",
+              "value": "0.116",
+              "slice": "seconds"
+            },
+            {
+              "type": "inference:time_to_first_token_seconds:max",
+              "value": "19.4",
+              "slice": "seconds"
+            },
+            {
+              "type": "inference:time_to_first_token_seconds:avg",
+              "value": "13.22",
+              "slice": "seconds"
+            },
+            {
+              "type": "inference:time_to_first_token_seconds:p95",
+              "value": "19.4",
+              "slice": "seconds"
+            },
+            {
+              "type": "inference:time_to_first_token_seconds:avg:first_third",
+              "value": "0.116",
+              "slice": "seconds"
+            },
+            {
+              "type": "inference:time_to_first_token_seconds:avg:last_third",
+              "value": "17.84",
+              "slice": "seconds"
+            },
+            {
+              "type": "inference:time_to_first_token_seconds:avg:middle_third",
+              "value": "19.4",
+              "slice": "seconds"
+            },
+            {
+              "type": "cpu_usage:min",
+              "value": "0.238",
+              "slice": "cores"
+            },
+            {
+              "type": "cpu_usage:max",
+              "value": "0.757",
+              "slice": "cores"
+            },
+            {
+              "type": "cpu_usage:avg",
+              "value": "0.456",
+              "slice": "cores"
+            },
+            {
+              "type": "cpu_usage:p95",
+              "value": "0.632",
+              "slice": "cores"
+            },
+            {
+              "type": "cpu_usage:limit",
+              "value": "2",
+              "slice": "cores"
+            },
+            {
+              "type": "cpu_usage:avg:first_third",
+              "value": "0.292",
+              "slice": "cores"
+            },
+            {
+              "type": "cpu_usage:avg:last_third",
+              "value": "0.628",
+              "slice": "cores"
+            },
+            {
+              "type": "cpu_usage:avg:middle_third",
+              "value": "0.447",
+              "slice": "cores"
+            },
+            {
+              "type": "gpu_memory_used:min",
+              "value": "0",
+              "slice": "MiB"
+            },
+            {
+              "type": "gpu_memory_used:max",
+              "value": "50786",
+              "slice": "MiB"
+            },
+            {
+              "type": "gpu_memory_used:avg",
+              "value": "12124.3",
+              "slice": "MiB"
+            },
+            {
+              "type": "gpu_memory_used:p95",
+              "value": "50784",
+              "slice": "MiB"
+            },
+            {
+              "type": "gpu_memory_used:avg:first_third",
+              "value": "0",
+              "slice": "MiB"
+            },
+            {
+              "type": "gpu_memory_used:avg:last_third",
+              "value": "31082",
+              "slice": "MiB"
+            },
+            {
+              "type": "gpu_memory_used:avg:middle_third",
+              "value": "3832.62",
+              "slice": "MiB"
+            },
+            {
+              "type": "gpu_power:min",
+              "value": "70.01",
+              "slice": "watts"
+            },
+            {
+              "type": "gpu_power:max",
+              "value": "235.72",
+              "slice": "watts"
+            },
+            {
+              "type": "gpu_power:avg",
+              "value": "113.09",
+              "slice": "watts"
+            },
+            {
+              "type": "gpu_power:p95",
+              "value": "232.66",
+              "slice": "watts"
+            },
+            {
+              "type": "gpu_power:avg:first_third",
+              "value": "70.13",
+              "slice": "watts"
+            },
+            {
+              "type": "gpu_power:avg:last_third",
+              "value": "161.09",
+              "slice": "watts"
+            },
+            {
+              "type": "gpu_power:avg:middle_third",
+              "value": "104.35",
+              "slice": "watts"
+            },
+            {
+              "type": "gpu_utilization:min",
+              "value": "0",
+              "slice": "percent"
+            },
+            {
+              "type": "gpu_utilization:max",
+              "value": "80",
+              "slice": "percent"
+            },
+            {
+              "type": "gpu_utilization:avg",
+              "value": "9.25",
+              "slice": "percent"
+            },
+            {
+              "type": "gpu_utilization:p95",
+              "value": "53",
+              "slice": "percent"
+            },
+            {
+              "type": "gpu_utilization:avg:first_third",
+              "value": "0",
+              "slice": "percent"
+            },
+            {
+              "type": "gpu_utilization:avg:last_third",
+              "value": "26.43",
+              "slice": "percent"
+            },
+            {
+              "type": "gpu_utilization:avg:middle_third",
+              "value": "0",
+              "slice": "percent"
+            },
+            {
+              "type": "memory_usage:min",
+              "value": "1.17",
+              "slice": "GiB"
+            },
+            {
+              "type": "memory_usage:max",
+              "value": "3.84",
+              "slice": "GiB"
+            },
+            {
+              "type": "memory_usage:avg",
+              "value": "2.48",
+              "slice": "GiB"
+            },
+            {
+              "type": "memory_usage:p95",
+              "value": "3.84",
+              "slice": "GiB"
+            },
+            {
+              "type": "memory_usage:limit",
+              "value": "8",
+              "slice": "GiB"
+            },
+            {
+              "type": "memory_usage:avg:first_third",
+              "value": "2.5",
+              "slice": "GiB"
+            },
+            {
+              "type": "memory_usage:avg:last_third",
+              "value": "2.64",
+              "slice": "GiB"
+            },
+            {
+              "type": "memory_usage:avg:middle_third",
+              "value": "2.27",
+              "slice": "GiB"
+            },
+            {
+              "type": "network_receive:min",
+              "value": "0",
+              "slice": "Mbps"
+            },
+            {
+              "type": "network_receive:max",
+              "value": "143.33",
+              "slice": "Mbps"
+            },
+            {
+              "type": "network_receive:avg",
+              "value": "57.96",
+              "slice": "Mbps"
+            },
+            {
+              "type": "network_receive:p95",
+              "value": "142.61",
+              "slice": "Mbps"
+            },
+            {
+              "type": "network_receive:avg:first_third",
+              "value": "0.00184",
+              "slice": "Mbps"
+            },
+            {
+              "type": "network_receive:avg:last_third",
+              "value": "97.6",
+              "slice": "Mbps"
+            },
+            {
+              "type": "network_receive:avg:middle_third",
+              "value": "76.28",
+              "slice": "Mbps"
+            },
+            {
+              "type": "network_transmit:min",
+              "value": "3.83e-06",
+              "slice": "Mbps"
+            },
+            {
+              "type": "network_transmit:max",
+              "value": "1.4",
+              "slice": "Mbps"
+            },
+            {
+              "type": "network_transmit:avg",
+              "value": "0.619",
+              "slice": "Mbps"
+            },
+            {
+              "type": "network_transmit:p95",
+              "value": "1.4",
+              "slice": "Mbps"
+            },
+            {
+              "type": "network_transmit:avg:first_third",
+              "value": "0.000122",
+              "slice": "Mbps"
+            },
+            {
+              "type": "network_transmit:avg:last_third",
+              "value": "1.22",
+              "slice": "Mbps"
+            },
+            {
+              "type": "network_transmit:avg:middle_third",
+              "value": "0.639",
+              "slice": "Mbps"
+            },
+            {
+              "type": "storage_read_throughput:min",
+              "value": "0",
+              "slice": "MBps"
+            },
+            {
+              "type": "storage_read_throughput:max",
+              "value": "0",
+              "slice": "MBps"
+            },
+            {
+              "type": "storage_read_throughput:avg",
+              "value": "0",
+              "slice": "MBps"
+            },
+            {
+              "type": "storage_read_throughput:p95",
+              "value": "0",
+              "slice": "MBps"
+            },
+            {
+              "type": "storage_read_throughput:avg:first_third",
+              "value": "0",
+              "slice": "MBps"
+            },
+            {
+              "type": "storage_read_throughput:avg:last_third",
+              "value": "0",
+              "slice": "MBps"
+            },
+            {
+              "type": "storage_read_throughput:avg:middle_third",
+              "value": "0",
+              "slice": "MBps"
+            },
+            {
+              "type": "storage_write_throughput:min",
+              "value": "0",
+              "slice": "MBps"
+            },
+            {
+              "type": "storage_write_throughput:max",
+              "value": "18.79",
+              "slice": "MBps"
+            },
+            {
+              "type": "storage_write_throughput:avg",
+              "value": "7.14",
+              "slice": "MBps"
+            },
+            {
+              "type": "storage_write_throughput:p95",
+              "value": "18.19",
+              "slice": "MBps"
+            },
+            {
+              "type": "storage_write_throughput:avg:first_third",
+              "value": "0",
+              "slice": "MBps"
+            },
+            {
+              "type": "storage_write_throughput:avg:last_third",
+              "value": "15.95",
+              "slice": "MBps"
+            },
+            {
+              "type": "storage_write_throughput:avg:middle_third",
+              "value": "4.74",
+              "slice": "MBps"
+            }
+          ]
+        },
+        "properties": [
+          {
+            "name": "aibomrun:inference:telemetry:collectedAt",
+            "value": "2026-11-02T14:52:09.813189Z"
+          },
+          {
+            "name": "aibomrun:inference:telemetry:summaryIncludesColdStart",
+            "value": "false"
+          },
+          {
+            "name": "aibomrun:telemetry:collectedAt",
+            "value": "2026-11-02T14:52:09.678929Z"
+          },
+          {
+            "name": "aibomrun:telemetry:summaryIncludesColdStart",
+            "value": "false"
+          }
+        ]
+      }
+    },
+    {
+      "bom-ref": "gpu:0",
+      "type": "device",
+      "name": "NVIDIA H100 80GB HBM3",
+      "properties": [
+        {
+          "name": "aibomrun:gpu:memoryMb",
+          "value": "81559"
+        }
+      ]
+    },
+    {
+      "bom-ref": "driver:nvidia",
+      "type": "device-driver",
+      "name": "nvidia-driver",
+      "version": "595.91.07",
+      "properties": [
+        {
+          "name": "aibomrun:gpu:cudaDriverVersion",
+          "value": "13.2"
+        }
+      ]
+    },
+    {
+      "bom-ref": "node:node-1",
+      "type": "device",
+      "name": "node-1",
+      "properties": [
+        {
+          "name": "aibomrun:node:cpu:model",
+          "value": "AMD EPYC 9754 128-Core Processor"
+        },
+        {
+          "name": "aibomrun:node:cpu:cores",
+          "value": "512"
+        },
+        {
+          "name": "aibomrun:node:memoryGb",
+          "value": "1511.38"
+        },
+        {
+          "name": "aibomrun:node:numaNodes",
+          "value": "2"
+        },
+        {
+          "name": "aibomrun:node:kernel:version",
+          "value": "5.14.0-687.46.1.el9_8.x86_64"
+        },
+        {
+          "name": "aibomrun:node:cpu:cacheL3",
+          "value": "512 MiB"
+        },
+        {
+          "name": "aibomrun:node:cpu:architecture",
+          "value": "x86_64"
+        },
+        {
+          "name": "aibomrun:node:cpu:coresPerSocket",
+          "value": "128"
+        },
+        {
+          "name": "aibomrun:node:cpu:threadsPerCore",
+          "value": "2"
+        },
+        {
+          "name": "aibomrun:node:network:primaryMtu",
+          "value": "1400"
+        },
+        {
+          "name": "aibomrun:node:network:rdmaDeviceCount",
+          "value": "6"
+        },
+        {
+          "name": "aibomrun:node:network:rdmaDevices",
+          "value": "[\"mlx5_0\",\"mlx5_1\",\"mlx5_2\",\"mlx5_3\",\"mlx5_4\",\"mlx5_5\"]"
+        },
+        {
+          "name": "aibomrun:node:storage:blockDevices",
+          "value": "[\"nvme0n1 894.3G\",\"nvme1n1 7T\"]"
+        },
+        {
+          "name": "aibomrun:node:kernel:cpuGovernor",
+          "value": "performance"
+        },
+        {
+          "name": "aibomrun:node:kernel:maxMapCount",
+          "value": "262144"
+        },
+        {
+          "name": "aibomrun:node:kernel:numaBalancing",
+          "value": "1"
+        },
+        {
+          "name": "aibomrun:node:kernel:transparentHugepages",
+          "value": "always"
+        }
+      ]
+    },
+    {
+      "bom-ref": "platform:python",
+      "type": "platform",
+      "name": "python",
+      "version": "3.12.3",
+      "purl": "pkg:generic/python@3.12.3"
+    },
+    {
+      "bom-ref": "pypi:flash-attn",
+      "type": "library",
+      "name": "flash-attn",
+      "version": "2.7.4.post1+git5231d95fe1.45164347",
+      "purl": "pkg:pypi/flash-attn@2.7.4.post1+git5231d95fe1.45164347"
+    },
+    {
+      "bom-ref": "pypi:numpy",
+      "type": "library",
+      "name": "numpy",
+      "version": "2.1.0",
+      "purl": "pkg:pypi/numpy@2.1.0"
+    },
+    {
+      "bom-ref": "pypi:safetensors",
+      "type": "library",
+      "name": "safetensors",
+      "version": "0.7.0",
+      "purl": "pkg:pypi/safetensors@0.7.0"
+    },
+    {
+      "bom-ref": "pypi:tokenizers",
+      "type": "library",
+      "name": "tokenizers",
+      "version": "0.22.2",
+      "purl": "pkg:pypi/tokenizers@0.22.2"
+    },
+    {
+      "bom-ref": "pypi:torch",
+      "type": "library",
+      "name": "torch",
+      "version": "2.11.0a0+a6c236b9fd.nv26.3.46836102",
+      "purl": "pkg:pypi/torch@2.11.0a0+a6c236b9fd.nv26.3.46836102",
+      "properties": [
+        {
+          "name": "aibomrun:torch:cudaVersion",
+          "value": "13.2"
+        },
+        {
+          "name": "aibomrun:torch:cudnnVersion",
+          "value": "9.20.0"
+        },
+        {
+          "name": "aibomrun:torch:ncclVersion",
+          "value": "2.29.7"
+        }
+      ]
+    },
+    {
+      "bom-ref": "pypi:torchvision",
+      "type": "library",
+      "name": "torchvision",
+      "version": "0.25.0a0+b7d91027.nv26.3.46836102",
+      "purl": "pkg:pypi/torchvision@0.25.0a0+b7d91027.nv26.3.46836102"
+    },
+    {
+      "bom-ref": "pypi:transformers",
+      "type": "library",
+      "name": "transformers",
+      "version": "4.57.5",
+      "purl": "pkg:pypi/transformers@4.57.5"
+    },
+    {
+      "bom-ref": "pypi:triton",
+      "type": "library",
+      "name": "triton",
+      "version": "3.6.0+git5d72932fc5.nv26.3",
+      "purl": "pkg:pypi/triton@3.6.0+git5d72932fc5.nv26.3"
+    },
+    {
+      "bom-ref": "pypi:vllm",
+      "type": "library",
+      "name": "vllm",
+      "version": "0.17.1+a03ca76a.nv26.3.46967107.cu132",
+      "purl": "pkg:pypi/vllm@0.17.1+a03ca76a.nv26.3.46967107.cu132"
+    },
+    {
+      "bom-ref": "runtime:vllm",
+      "type": "application",
+      "name": "vllm",
+      "properties": [
+        {
+          "name": "aibomrun:runtime:name",
+          "value": "vllm"
+        },
+        {
+          "name": "aibomrun:inference:gpuMemoryUtilization",
+          "value": "0.6"
+        },
+        {
+          "name": "aibomrun:inference:maxModelLen",
+          "value": "10000"
+        },
+        {
+          "name": "aibomrun:inference:temperature",
+          "value": "0.7"
+        },
+        {
+          "name": "aibomrun:inference:topK",
+          "value": "20"
+        },
+        {
+          "name": "aibomrun:inference:topP",
+          "value": "0.9"
+        }
+      ]
+    }
+  ],
+  "dependencies": [
+    {
+      "ref": "run:project-example/aibom-vllm-benchmark-server-0",
+      "dependsOn": [
+        "model:drawais/Granite-3.3-8B-Instruct-AWQ-INT4",
+        "gpu:0",
+        "driver:nvidia",
+        "node:node-1",
+        "platform:python",
+        "pypi:flash-attn",
+        "pypi:numpy",
+        "pypi:safetensors",
+        "pypi:tokenizers",
+        "pypi:torch",
+        "pypi:torchvision",
+        "pypi:transformers",
+        "pypi:triton",
+        "pypi:vllm",
+        "runtime:vllm"
+      ]
+    }
+  ]
+}
