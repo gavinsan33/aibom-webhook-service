@@ -38,6 +38,18 @@ def test_amd_gpus_reads_only_allocated_amd_nodes(tmp_path):
     ]
 
 
+def test_amd_gpus_counts_compute_partitions(tmp_path):
+    # renderD129's device is a platform/amdgpu_xcp_1 partition with no vendor file.
+    dri, drm = tmp_path / "dri", tmp_path / "drm"
+    dri.mkdir()
+    (dri / "renderD129").touch()
+    xcp = tmp_path / "platform" / "amdgpu_xcp_1"
+    xcp.mkdir(parents=True)
+    (drm / "renderD129").mkdir(parents=True)
+    (drm / "renderD129" / "device").symlink_to(xcp)
+    assert amd_gpus(str(dri), str(drm)) == [{"name": "AMD GPU", "vram_mb": None}]
+
+
 def test_amd_gpus_skips_other_vendors(tmp_path):
     dri, drm = tmp_path / "dri", tmp_path / "drm"
     dri.mkdir()

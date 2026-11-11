@@ -58,6 +58,7 @@ def run_cmd(command):
     except Exception as e:
         return "Not available"
 
+
 def _read_sysfs(path):
     try:
         with open(path) as f:
@@ -72,11 +73,15 @@ def amd_gpus(dev_root="/dev/dri", drm_root="/sys/class/drm"):
     renderD* nodes into the container, while sysfs lists every GPU on the
     host, so the device nodes pick which GPUs are ours and sysfs describes
     them. Nothing injects rocm-smi the way the NVIDIA toolkit injects
-    nvidia-smi, hence sysfs."""
+    nvidia-smi, hence sysfs. In MI300-style compute-partition modes every
+    partition but the first has its render node under a
+    platform/amdgpu_xcp_N device with no vendor/product/VRAM files, so it's
+    counted as a plain "AMD GPU"."""
     gpus = []
     for node in sorted(glob.glob(os.path.join(dev_root, "renderD*"))):
         dev = os.path.join(drm_root, os.path.basename(node), "device")
-        if _read_sysfs(os.path.join(dev, "vendor")) != "0x1002":
+        partition = os.path.basename(os.path.realpath(dev)).startswith("amdgpu_xcp_")
+        if not partition and _read_sysfs(os.path.join(dev, "vendor")) != "0x1002":
             continue
         vram = _read_sysfs(os.path.join(dev, "mem_info_vram_total"))
         gpus.append({
