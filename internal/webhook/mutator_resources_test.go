@@ -215,3 +215,42 @@ func TestMutate_DiscoveryInitContainer_SidecarGPU(t *testing.T) {
 	}
 	t.Fatal("aibom-discovery patch not found")
 }
+
+// Without a GPU-holding sidecar, discovery stays after the pod's own init
+// containers: its start_time starts the telemetry window.
+func TestMutate_DiscoveryInitContainer_AppendedWithoutGPUSidecar(t *testing.T) {
+	m := newTestMutator()
+	pod := gpuPod(gpuContainer("train", 1, true))
+	pod.Spec.InitContainers = []corev1.Container{{Name: "download-model", Image: "busybox"}}
+
+	patches, err := m.Mutate(pod, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, p := range patches {
+		if c, ok := p.Value.(corev1.Container); ok && c.Name == "aibom-discovery" {
+			if p.Path != "/spec/initContainers/-" {
+				t.Errorf("discovery patched at %s, want /spec/initContainers/-", p.Path)
+			}
+			return
+		}
+	}
+	t.Fatal("aibom-discovery patch not found")
+}
+
+func TestMutate_DiscoveryInitContainer_CapsSharedGPUAtOne(t *testing.T) {
+	m := newTestMutator()
+	shared := func(name string) corev1.Container {
+		return corev1.Container{Name: name, Resources: corev1.ResourceRequirements{
+			Limits: corev1.ResourceList{"nvidia.com/gpu.shared": resource.MustParse("1")},
+		}}
+	}
+	patches, err := m.Mutate(gpuPod(shared("a"), shared("b")), "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	c := findInitContainer(patches, "aibom-discovery")
+	if got := c.Resources.Limits["nvidia.com/gpu.shared"]; got.Value() != 1 {
+		t.Errorf("discovery nvidia.com/gpu.shared = %s, want 1", got.String())
+	}
+}
