@@ -40,12 +40,12 @@ Captured once per pod by the discovery init container into `discovery-<pod>.json
 | Field | Detection | Surfaced? |
 |---|---|---|
 | GPU count | the pod's own GPU claims (`nvidia.com/gpu`, `gpu.shared`, `mig-*`, `amd.com/gpu`), summed across app containers and native sidecars (limit, else request); `nvidia-smi --query-gpu=name` line count (AMD: allocated `/dev/dri/renderD*` nodes) only when no container claims a GPU | ✅ `environment.gpu_count` |
-| GPU model(s) | DCGM's `modelName` label (`DCGM_FI_DEV_FB_TOTAL`, by `exported_pod`), else `nvidia-smi --query-gpu=name`; AMD: sysfs `product_name` (else the PCI device ID) | ✅ `environment.gpu_type` — only the **first** model; a mixed-model node's other GPU types are dropped |
-| GPU memory per device (VRAM) | DCGM's device framebuffer (`DCGM_FI_DEV_FB_TOTAL`), else `nvidia-smi --query-gpu=memory.total`; AMD: sysfs `mem_info_vram_total` | ✅ `environment.gpu_memory_mb` (list, one per GPU) |
+| GPU model(s) | DCGM's `modelName` label (`DCGM_FI_DEV_FB_TOTAL`, by `exported_pod`), else `nvidia-smi --query-gpu=name`; AMD: the Device Metrics Exporter's `card_model` label (`gpu_total_vram`), else sysfs `product_name` (else the PCI device ID) | ✅ `environment.gpu_type` — only the **first** model; a mixed-model node's other GPU types are dropped |
+| GPU memory per device (VRAM) | DCGM's device framebuffer (`DCGM_FI_DEV_FB_TOTAL`), else `nvidia-smi --query-gpu=memory.total`; AMD: `gpu_total_vram`, else sysfs `mem_info_vram_total` | ✅ `environment.gpu_memory_mb` (list, one per GPU) |
 | GPU driver version | `nvidia-smi --query-gpu=driver_version`; AMD: `/sys/module/amdgpu/version` (DKMS driver only) | ✅ `environment.driver_version` |
 | CUDA version | `nvidia-smi` (`CUDA Version` line) — the newest CUDA the **driver** supports, not the toolkit torch was built with (`environment.torch_cuda_version`, below). Not reported for AMD | ✅ `environment.cuda_version` |
 
-The pod-spec claim and DCGM are read from outside the pod, so a workload can't misreport them; DCGM is a best-effort Prometheus query, and without dcgm-exporter the in-pod `nvidia-smi` values are used (#110). Driver and CUDA versions have no out-of-pod source and stay discovery-sourced.
+The pod-spec claim and DCGM are read from outside the pod, so a workload can't misreport them; DCGM is a best-effort Prometheus query, and without dcgm-exporter the in-pod `nvidia-smi` values are used (#110). AMD GPUs use AMD's Device Metrics Exporter the same way, matched on plain `namespace`/`pod` labels (its ServiceMonitor's default `honorLabels: true`). Driver and CUDA versions have no out-of-pod source and stay discovery-sourced.
 
 The discovery init container's own `nvidia.com/gpu` claim — what makes `nvidia-smi` work in it at all, since the NVIDIA Container Toolkit injects the binary and NVML driver library from the node's driver only when the claim is present — is not detected independently but copied from the pod's **total** `nvidia.com/gpu` allocation (the sum of each container's effective claim), so `nvidia-smi` sees every GPU the pod is scheduled with, not just the first container's.
 
@@ -284,9 +284,9 @@ Queried directly against Prometheus/Thanos Querier (`PROMETHEUS_URL`) once the w
 
 | Metric | Source | Unit |
 |---|---|---|
-| GPU utilization | `DCGM_FI_DEV_GPU_UTIL` | percent |
-| GPU memory used | `DCGM_FI_DEV_FB_USED` | MiB |
-| GPU power draw | `DCGM_FI_DEV_POWER_USAGE` | watts |
+| GPU utilization | `DCGM_FI_DEV_GPU_UTIL`; AMD: `gpu_gfx_activity` | percent |
+| GPU memory used | `DCGM_FI_DEV_FB_USED`; AMD: `gpu_used_vram` | MiB |
+| GPU power draw | `DCGM_FI_DEV_POWER_USAGE`; AMD: `gpu_power_usage`, else `gpu_package_power` | watts |
 | CPU usage | `container_cpu_usage_seconds_total` (rate) | cores |
 | Memory usage | `container_memory_working_set_bytes` | GiB (binary, like a Kubernetes `8Gi` limit) |
 | Network receive throughput | `container_network_receive_bytes_total` (rate) | Mbps (decimal, 10⁶ bits/s) |
