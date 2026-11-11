@@ -775,6 +775,29 @@ def test_dcgm_gpu_hardware_orders_gpu_indices_numerically(monkeypatch):
     assert hw["gpu_memory_mb"] == [1000, 1001, 1002, 1009, 1010, 1011]
 
 
+def test_gpu_hardware_reads_amd_exporter(monkeypatch):
+    # AMD Device Metrics Exporter: gpu_total_vram with card_model/gpu_id (#110).
+    monkeypatch.setattr(pp, "JOB_NAMESPACE", "ns")
+    seen = []
+    response = {"status": "success", "data": {"result": [
+        {"metric": {"__name__": "gpu_total_vram", "gpu_id": "1", "card_model": "MI300X", "pod": "p1"}, "value": [1.7e9, "196592"]},
+        {"metric": {"__name__": "gpu_total_vram", "gpu_id": "0", "card_model": "MI300X", "pod": "p1"}, "value": [1.7e9, "196592"]},
+    ]}}
+    monkeypatch.setattr(pp, "query_prometheus_instant", lambda promql, t: seen.append(promql) or response)
+    hw = pp._dcgm_gpu_hardware("p1")
+    assert hw == {"gpu_models": "MI300X\nMI300X", "gpu_memory_mb": [196592, 196592]}
+    assert 'gpu_total_vram{namespace="ns", pod="p1"}' in seen[0]
+
+
+def test_gpu_queries_fall_back_to_amd_exporter():
+    for key, amd in (("gpu_utilization", "gpu_gfx_activity"), ("gpu_memory_used", "gpu_used_vram"),
+                     ("gpu_power", "gpu_power_usage")):
+        assert amd + '{namespace="{namespace}", pod="{pod_name}"}' in pp.TELEMETRY_QUERIES[key]["query"]
+        series = pp.SERIES_QUERIES[key]["query"]
+        assert "by (pod, gpu_id)" in series and amd + '{namespace="{namespace}", pod=~"{pod_regex}"}' in series
+    assert pp._series_labels({"pod": "p1", "gpu_id": "3"}) == {"pod": "p1", "gpu": "3"}
+
+
 def test_dcgm_gpu_hardware_empty_when_no_series(monkeypatch):
     monkeypatch.setattr(pp, "JOB_NAMESPACE", "ns")
     monkeypatch.setattr(pp, "query_prometheus_instant",
