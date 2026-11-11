@@ -653,18 +653,12 @@ func terminalCondition(job *batchv1.Job) batchv1.JobCondition {
 	return batchv1.JobCondition{}
 }
 
+// podsRequestGPU reports whether any of the pods' containers, init
+// containers and native sidecars included, claims a GPU (#110).
 func podsRequestGPU(pods []corev1.Pod) bool {
-	gpuResource := corev1.ResourceName("nvidia.com/gpu")
-	zero := resource.MustParse("0")
 	for i := range pods {
-		for j := range pods[i].Spec.Containers {
-			c := &pods[i].Spec.Containers[j]
-			if q, ok := c.Resources.Limits[gpuResource]; ok && q.Cmp(zero) > 0 {
-				return true
-			}
-			if q, ok := c.Resources.Requests[gpuResource]; ok && q.Cmp(zero) > 0 {
-				return true
-			}
+		if _, peak := aibomdata.PodGPUClaims(&pods[i]); len(peak) > 0 {
+			return true
 		}
 	}
 	return false
@@ -1113,7 +1107,7 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 		// a real and common case, not a zero value.
 		MemoryLimitBytes *int64 `json:"memory_limit_bytes,omitempty"`
 		CPULimitMillis   *int64 `json:"cpu_limit_millis,omitempty"`
-		// GPULimit is the container's effective nvidia.com/gpu claim (limit if
+		// GPULimit is the container's effective GPU claim (limit if
 		// set, else request) -- what the scheduler placed the pod against, known
 		// at pod-creation time like the cpu/memory limits above. postprocess.py
 		// sums it per pod for an authoritative gpu_count, preferred over the
@@ -1122,6 +1116,11 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 		// that one container was handed, and -- unlike this claim -- is set from
 		// inside the workload. nil when the container claims no GPU.
 		GPULimit *int64 `json:"gpu_limit,omitempty"`
+		// PodGPUCount is the pod's GPUs held while its app containers run:
+		// their claims plus native sidecars' (#110), which aren't listed in
+		// containers.json. The same value on each of the pod's entries;
+		// postprocess.py prefers it over summing GPULimit.
+		PodGPUCount *int64 `json:"pod_gpu_count,omitempty"`
 		// RestartCount/LastTerminatedReason/LastExitCode come from the
 		// container's previous termination (LastTerminationState). With
 		// restartPolicy OnFailure a container that was OOM-killed and then
@@ -1169,6 +1168,8 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 				}
 			}
 		}
+		running, _ := aibomdata.PodGPUClaims(&pod)
+		podGPUs := aibomdata.GPUCount(running)
 		for _, c := range pod.Spec.Containers {
 			ci := containerInfo{
 				PodName: pod.Name,
@@ -1205,13 +1206,12 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 				v := cpu.MilliValue()
 				ci.CPULimitMillis = &v
 			}
-			gpuResource := corev1.ResourceName("nvidia.com/gpu")
-			if gpu, ok := c.Resources.Limits[gpuResource]; ok && gpu.Value() > 0 {
-				v := gpu.Value()
+			if claims := aibomdata.ContainerGPUClaims(&c); len(claims) > 0 {
+				v := aibomdata.GPUCount(claims)
 				ci.GPULimit = &v
-			} else if gpu, ok := c.Resources.Requests[gpuResource]; ok && gpu.Value() > 0 {
-				v := gpu.Value()
-				ci.GPULimit = &v
+			}
+			if podGPUs > 0 {
+				ci.PodGPUCount = &podGPUs
 			}
 			containers = append(containers, ci)
 		}

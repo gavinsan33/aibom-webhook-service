@@ -710,6 +710,12 @@ def test_pod_gpu_count_sums_claims():
     assert pp.pod_gpu_count("p1", None) is None
 
 
+def test_pod_gpu_count_prefers_pod_level_count():
+    # pod_gpu_count includes native sidecars' GPUs, which have no entry (#110).
+    containers = [{"pod_name": "p1", "gpu_limit": 1, "pod_gpu_count": 3}, {"pod_name": "p1"}]
+    assert pp.pod_gpu_count("p1", containers) == 3
+
+
 def test_compile_aibom_prefers_pod_spec_gpu_count_over_nvidia_smi(monkeypatch):
     # Discovery's in-pod nvidia-smi miscounts (reports 1); the pod-spec claim (4)
     # is authoritative. DCGM off so gpu_type still comes from discovery.

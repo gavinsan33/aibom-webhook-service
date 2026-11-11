@@ -9,6 +9,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"strings"
+
+	corev1 "k8s.io/api/core/v1"
 )
 
 const (
@@ -215,4 +217,80 @@ func ConfigMapName(triggerName string) string {
 // names, are also used as label values elsewhere).
 func WorkloadIdentityName(triggerName string) string {
 	return truncatedTriggerBase(triggerName) + WorkloadIdentitySuffix
+}
+
+// IsGPUResource reports whether name is a GPU extended resource (#110):
+// NVIDIA whole GPUs, time-sliced replicas renamed to nvidia.com/gpu.shared,
+// MIG slices under the mixed strategy (nvidia.com/mig-<profile>), and AMD
+// GPUs. DRA resourceClaims aren't covered: whether a claim is a GPU depends
+// on its DeviceClass, which isn't on the pod.
+func IsGPUResource(name corev1.ResourceName) bool {
+	n := string(name)
+	return n == "nvidia.com/gpu" || n == "nvidia.com/gpu.shared" || n == "amd.com/gpu" ||
+		strings.HasPrefix(n, "nvidia.com/mig-")
+}
+
+// ContainerGPUClaims is a container's effective claim on each GPU resource:
+// its limit if set, else its request (extended resources default requests
+// from limits).
+func ContainerGPUClaims(c *corev1.Container) corev1.ResourceList {
+	out := corev1.ResourceList{}
+	for _, list := range []corev1.ResourceList{c.Resources.Requests, c.Resources.Limits} {
+		for name, q := range list {
+			if IsGPUResource(name) && q.Sign() > 0 {
+				out[name] = q
+			}
+		}
+	}
+	return out
+}
+
+// PodGPUClaims returns, per GPU resource, what the pod holds while its app
+// containers run (running: app containers plus native sidecars, which run
+// alongside them) and what the scheduler places it against (peak:
+// max(running, each regular init container plus the sidecars started before
+// it), the kubelet's own formula). peak is what the discovery init container
+// can mirror without changing the pod's footprint, as long as it runs first.
+func PodGPUClaims(pod *corev1.Pod) (running, peak corev1.ResourceList) {
+	running, peak = corev1.ResourceList{}, corev1.ResourceList{}
+	raise := func(q corev1.ResourceList) {
+		for name, v := range q {
+			if cur, ok := peak[name]; !ok || v.Cmp(cur) > 0 {
+				peak[name] = v.DeepCopy()
+			}
+		}
+	}
+	add := func(dst, src corev1.ResourceList) {
+		for name, v := range src {
+			cur := dst[name]
+			cur.Add(v)
+			dst[name] = cur
+		}
+	}
+	for i := range pod.Spec.InitContainers {
+		c := &pod.Spec.InitContainers[i]
+		if c.RestartPolicy != nil && *c.RestartPolicy == corev1.ContainerRestartPolicyAlways {
+			add(running, ContainerGPUClaims(c))
+			raise(running)
+			continue
+		}
+		step := corev1.ResourceList{}
+		add(step, running)
+		add(step, ContainerGPUClaims(c))
+		raise(step)
+	}
+	for i := range pod.Spec.Containers {
+		add(running, ContainerGPUClaims(&pod.Spec.Containers[i]))
+	}
+	raise(running)
+	return running, peak
+}
+
+// GPUCount sums a claim list across GPU resources.
+func GPUCount(claims corev1.ResourceList) int64 {
+	var n int64
+	for _, q := range claims {
+		n += q.Value()
+	}
+	return n
 }

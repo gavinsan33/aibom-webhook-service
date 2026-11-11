@@ -3056,15 +3056,20 @@ def pod_resource_limit(pod_name, containers, resource_key):
 
 
 def pod_gpu_count(pod_name, containers):
-    """A pod's GPU count from its containers' nvidia.com/gpu claims in
-    containers.json (gpu_limit, summed across the pod's containers) -- the
-    number the scheduler actually placed the pod against. Preferred over the
+    """A pod's GPU count from its pod-spec GPU claims in containers.json --
+    pod_gpu_count (app containers plus native sidecars, #110), else
+    gpu_limit summed across the pod's containers (an older watcher's
+    containers.json). Preferred over the
     in-pod discovery container's nvidia-smi count, which can miscount (a
     driver-error line read as a device, #115), sees only the share one
     container was handed, and is set from inside the workload. None if no
     container in the pod claims a GPU, so the discovery value is used as a
     fallback."""
-    counts = [c["gpu_limit"] for c in containers or [] if c.get("pod_name") == pod_name and c.get("gpu_limit") is not None]
+    mine = [c for c in containers or [] if c.get("pod_name") == pod_name]
+    for c in mine:
+        if c.get("pod_gpu_count") is not None:
+            return c["pod_gpu_count"]
+    counts = [c["gpu_limit"] for c in mine if c.get("gpu_limit") is not None]
     return sum(counts) if counts else None
 
 

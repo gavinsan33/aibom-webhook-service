@@ -181,3 +181,37 @@ func assertExplicitResources(t *testing.T, c *corev1.Container, cpuReq, memReq, 
 	check(c.Resources.Limits, "limit", "cpu", cpuLim)
 	check(c.Resources.Limits, "limit", "memory", memLim)
 }
+
+// TestMutate_DiscoveryInitContainer_SidecarGPU (#110): a GPU held only by a
+// native sidecar (vLLM next to a CPU benchmark client) must still instrument
+// the pod and be mirrored onto discovery, which must run first so its claim
+// doesn't stack on the sidecar's.
+func TestMutate_DiscoveryInitContainer_SidecarGPU(t *testing.T) {
+	m := newTestMutator()
+	always := corev1.ContainerRestartPolicyAlways
+	server := gpuContainer("vllm", 1, true)
+	server.Resources.Limits = corev1.ResourceList{"amd.com/gpu": resource.MustParse("1")}
+	server.RestartPolicy = &always
+	pod := gpuPod(corev1.Container{Name: "client", Image: "busybox"})
+	pod.Spec.InitContainers = []corev1.Container{server}
+
+	if !m.shouldMutate(pod, "") {
+		t.Fatal("a pod whose sidecar claims a GPU must be instrumented")
+	}
+	patches, err := m.Mutate(pod, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, p := range patches {
+		if c, ok := p.Value.(corev1.Container); ok && c.Name == "aibom-discovery" {
+			if p.Path != "/spec/initContainers/0" {
+				t.Errorf("discovery patched at %s, want /spec/initContainers/0", p.Path)
+			}
+			if got := c.Resources.Limits["amd.com/gpu"]; got.Value() != 1 {
+				t.Errorf("discovery amd.com/gpu = %s, want 1", got.String())
+			}
+			return
+		}
+	}
+	t.Fatal("aibom-discovery patch not found")
+}
