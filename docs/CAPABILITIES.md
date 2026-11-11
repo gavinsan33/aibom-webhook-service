@@ -39,11 +39,11 @@ Captured once per pod by the discovery init container into `discovery-<pod>.json
 
 | Field | Detection | Surfaced? |
 |---|---|---|
-| GPU count | the pod's own `nvidia.com/gpu` claim, summed across containers (limit, else request); `nvidia-smi --query-gpu=name` line count only when no container claims a GPU | ✅ `environment.gpu_count` |
-| GPU model(s) | DCGM's `modelName` label (`DCGM_FI_DEV_FB_TOTAL`, by `exported_pod`), else `nvidia-smi --query-gpu=name` | ✅ `environment.gpu_type` — only the **first** model; a mixed-model node's other GPU types are dropped |
-| GPU memory per device (VRAM) | DCGM's device framebuffer (`DCGM_FI_DEV_FB_TOTAL`), else `nvidia-smi --query-gpu=memory.total` | ✅ `environment.gpu_memory_mb` (list, one per GPU) |
-| GPU driver version | `nvidia-smi --query-gpu=driver_version` | ✅ `environment.driver_version` |
-| CUDA version | `nvidia-smi` (`CUDA Version` line) — the newest CUDA the **driver** supports, not the toolkit torch was built with (`environment.torch_cuda_version`, below) | ✅ `environment.cuda_version` |
+| GPU count | the pod's own GPU claims (`nvidia.com/gpu`, `gpu.shared`, `mig-*`, `amd.com/gpu`), summed across app containers and native sidecars (limit, else request); `nvidia-smi --query-gpu=name` line count (AMD: allocated `/dev/dri/renderD*` nodes) only when no container claims a GPU | ✅ `environment.gpu_count` |
+| GPU model(s) | DCGM's `modelName` label (`DCGM_FI_DEV_FB_TOTAL`, by `exported_pod`), else `nvidia-smi --query-gpu=name`; AMD: sysfs `product_name` (else the PCI device ID) | ✅ `environment.gpu_type` — only the **first** model; a mixed-model node's other GPU types are dropped |
+| GPU memory per device (VRAM) | DCGM's device framebuffer (`DCGM_FI_DEV_FB_TOTAL`), else `nvidia-smi --query-gpu=memory.total`; AMD: sysfs `mem_info_vram_total` | ✅ `environment.gpu_memory_mb` (list, one per GPU) |
+| GPU driver version | `nvidia-smi --query-gpu=driver_version`; AMD: `/sys/module/amdgpu/version` (DKMS driver only) | ✅ `environment.driver_version` |
+| CUDA version | `nvidia-smi` (`CUDA Version` line) — the newest CUDA the **driver** supports, not the toolkit torch was built with (`environment.torch_cuda_version`, below). Not reported for AMD | ✅ `environment.cuda_version` |
 
 The pod-spec claim and DCGM are read from outside the pod, so a workload can't misreport them; DCGM is a best-effort Prometheus query, and without dcgm-exporter the in-pod `nvidia-smi` values are used (#110). Driver and CUDA versions have no out-of-pod source and stay discovery-sourced.
 

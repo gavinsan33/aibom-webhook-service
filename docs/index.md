@@ -43,7 +43,7 @@ flowchart LR
     post -- "signed" --> aibom
 ```
 
-Pods are matched if they are owned directly by a Job or PyTorchJob, **or** if any container requests `nvidia.com/gpu` resources. JobSet pods match through their child Jobs. Ray pods are matched through a GPU request.
+Pods are matched if they are owned directly by a Job or PyTorchJob, **or** if any container, init containers and native sidecars included, requests a GPU (`nvidia.com/gpu`, `nvidia.com/gpu.shared`, `nvidia.com/mig-*` or `amd.com/gpu`; DRA `resourceClaims` aren't recognized). JobSet pods match through their child Jobs. Ray pods are matched through a GPU request.
 
 The webhook always fails open (`failurePolicy: Ignore`): if the service is down, pods are created normally.
 
