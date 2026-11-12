@@ -31,6 +31,7 @@ nav:
   - Reference:
       - Detected Fields: CAPABILITIES.md
       - AIBOM Schema: reference/schema.md
+      - CycloneDX Mapping: reference/cyclonedx-mapping.md
       - Signing Keys: reference/signing.md
       - Configuration: reference/configuration.md
       - Upgrading: reference/upgrading.md
