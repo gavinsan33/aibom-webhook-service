@@ -2,7 +2,7 @@
   "$schema": "http://cyclonedx.org/schema/bom-1.6.schema.json",
   "bomFormat": "CycloneDX",
   "specVersion": "1.6",
-  "serialNumber": "urn:uuid:0f0869f2-d50b-5d4a-ae10-ef3eef5b28e4",
+  "serialNumber": "urn:uuid:431026b8-db56-5080-aa55-efdae56735b4",
   "version": 1,
   "metadata": {
     "timestamp": "2026-11-02T14:52:10Z",
@@ -15,8 +15,7 @@
       "components": [
         {
           "type": "application",
-          "name": "aibom-webhook",
-          "version": "0.1.0"
+          "name": "aibom-webhook"
         }
       ]
     },
@@ -26,6 +25,10 @@
       "group": "project-example",
       "name": "vllm-granite-benchmark",
       "properties": [
+        {
+          "name": "aibomrun:record:formatVersion",
+          "value": "0.1.0"
+        },
         {
           "name": "aibomrun:experiment:intent",
           "value": "inference"
@@ -75,6 +78,310 @@
           "value": "0"
         },
         {
+          "name": "aibomrun:telemetry:cpu_usage:min",
+          "value": "0.238"
+        },
+        {
+          "name": "aibomrun:telemetry:cpu_usage:max",
+          "value": "0.757"
+        },
+        {
+          "name": "aibomrun:telemetry:cpu_usage:avg",
+          "value": "0.456"
+        },
+        {
+          "name": "aibomrun:telemetry:cpu_usage:p95",
+          "value": "0.632"
+        },
+        {
+          "name": "aibomrun:telemetry:cpu_usage:limit",
+          "value": "2"
+        },
+        {
+          "name": "aibomrun:telemetry:cpu_usage:avg:first_third",
+          "value": "0.292"
+        },
+        {
+          "name": "aibomrun:telemetry:cpu_usage:avg:last_third",
+          "value": "0.628"
+        },
+        {
+          "name": "aibomrun:telemetry:cpu_usage:avg:middle_third",
+          "value": "0.447"
+        },
+        {
+          "name": "aibomrun:telemetry:cpu_usage:unit",
+          "value": "cores"
+        },
+        {
+          "name": "aibomrun:telemetry:gpu_memory_used:min",
+          "value": "0"
+        },
+        {
+          "name": "aibomrun:telemetry:gpu_memory_used:max",
+          "value": "50786"
+        },
+        {
+          "name": "aibomrun:telemetry:gpu_memory_used:avg",
+          "value": "12124.3"
+        },
+        {
+          "name": "aibomrun:telemetry:gpu_memory_used:p95",
+          "value": "50784"
+        },
+        {
+          "name": "aibomrun:telemetry:gpu_memory_used:avg:first_third",
+          "value": "0"
+        },
+        {
+          "name": "aibomrun:telemetry:gpu_memory_used:avg:last_third",
+          "value": "31082"
+        },
+        {
+          "name": "aibomrun:telemetry:gpu_memory_used:avg:middle_third",
+          "value": "3832.62"
+        },
+        {
+          "name": "aibomrun:telemetry:gpu_memory_used:unit",
+          "value": "MiB"
+        },
+        {
+          "name": "aibomrun:telemetry:gpu_power:min",
+          "value": "70.01"
+        },
+        {
+          "name": "aibomrun:telemetry:gpu_power:max",
+          "value": "235.72"
+        },
+        {
+          "name": "aibomrun:telemetry:gpu_power:avg",
+          "value": "113.09"
+        },
+        {
+          "name": "aibomrun:telemetry:gpu_power:p95",
+          "value": "232.66"
+        },
+        {
+          "name": "aibomrun:telemetry:gpu_power:avg:first_third",
+          "value": "70.13"
+        },
+        {
+          "name": "aibomrun:telemetry:gpu_power:avg:last_third",
+          "value": "161.09"
+        },
+        {
+          "name": "aibomrun:telemetry:gpu_power:avg:middle_third",
+          "value": "104.35"
+        },
+        {
+          "name": "aibomrun:telemetry:gpu_power:unit",
+          "value": "watts"
+        },
+        {
+          "name": "aibomrun:telemetry:gpu_utilization:min",
+          "value": "0"
+        },
+        {
+          "name": "aibomrun:telemetry:gpu_utilization:max",
+          "value": "80"
+        },
+        {
+          "name": "aibomrun:telemetry:gpu_utilization:avg",
+          "value": "9.25"
+        },
+        {
+          "name": "aibomrun:telemetry:gpu_utilization:p95",
+          "value": "53"
+        },
+        {
+          "name": "aibomrun:telemetry:gpu_utilization:avg:first_third",
+          "value": "0"
+        },
+        {
+          "name": "aibomrun:telemetry:gpu_utilization:avg:last_third",
+          "value": "26.43"
+        },
+        {
+          "name": "aibomrun:telemetry:gpu_utilization:avg:middle_third",
+          "value": "0"
+        },
+        {
+          "name": "aibomrun:telemetry:gpu_utilization:unit",
+          "value": "percent"
+        },
+        {
+          "name": "aibomrun:telemetry:memory_usage:min",
+          "value": "1.17"
+        },
+        {
+          "name": "aibomrun:telemetry:memory_usage:max",
+          "value": "3.84"
+        },
+        {
+          "name": "aibomrun:telemetry:memory_usage:avg",
+          "value": "2.48"
+        },
+        {
+          "name": "aibomrun:telemetry:memory_usage:p95",
+          "value": "3.84"
+        },
+        {
+          "name": "aibomrun:telemetry:memory_usage:limit",
+          "value": "8"
+        },
+        {
+          "name": "aibomrun:telemetry:memory_usage:avg:first_third",
+          "value": "2.5"
+        },
+        {
+          "name": "aibomrun:telemetry:memory_usage:avg:last_third",
+          "value": "2.64"
+        },
+        {
+          "name": "aibomrun:telemetry:memory_usage:avg:middle_third",
+          "value": "2.27"
+        },
+        {
+          "name": "aibomrun:telemetry:memory_usage:unit",
+          "value": "GiB"
+        },
+        {
+          "name": "aibomrun:telemetry:network_receive:min",
+          "value": "0"
+        },
+        {
+          "name": "aibomrun:telemetry:network_receive:max",
+          "value": "143.33"
+        },
+        {
+          "name": "aibomrun:telemetry:network_receive:avg",
+          "value": "57.96"
+        },
+        {
+          "name": "aibomrun:telemetry:network_receive:p95",
+          "value": "142.61"
+        },
+        {
+          "name": "aibomrun:telemetry:network_receive:avg:first_third",
+          "value": "0.00184"
+        },
+        {
+          "name": "aibomrun:telemetry:network_receive:avg:last_third",
+          "value": "97.6"
+        },
+        {
+          "name": "aibomrun:telemetry:network_receive:avg:middle_third",
+          "value": "76.28"
+        },
+        {
+          "name": "aibomrun:telemetry:network_receive:unit",
+          "value": "Mbps"
+        },
+        {
+          "name": "aibomrun:telemetry:network_transmit:min",
+          "value": "3.83e-06"
+        },
+        {
+          "name": "aibomrun:telemetry:network_transmit:max",
+          "value": "1.4"
+        },
+        {
+          "name": "aibomrun:telemetry:network_transmit:avg",
+          "value": "0.619"
+        },
+        {
+          "name": "aibomrun:telemetry:network_transmit:p95",
+          "value": "1.4"
+        },
+        {
+          "name": "aibomrun:telemetry:network_transmit:avg:first_third",
+          "value": "0.000122"
+        },
+        {
+          "name": "aibomrun:telemetry:network_transmit:avg:last_third",
+          "value": "1.22"
+        },
+        {
+          "name": "aibomrun:telemetry:network_transmit:avg:middle_third",
+          "value": "0.639"
+        },
+        {
+          "name": "aibomrun:telemetry:network_transmit:unit",
+          "value": "Mbps"
+        },
+        {
+          "name": "aibomrun:telemetry:storage_read_throughput:min",
+          "value": "0"
+        },
+        {
+          "name": "aibomrun:telemetry:storage_read_throughput:max",
+          "value": "0"
+        },
+        {
+          "name": "aibomrun:telemetry:storage_read_throughput:avg",
+          "value": "0"
+        },
+        {
+          "name": "aibomrun:telemetry:storage_read_throughput:p95",
+          "value": "0"
+        },
+        {
+          "name": "aibomrun:telemetry:storage_read_throughput:avg:first_third",
+          "value": "0"
+        },
+        {
+          "name": "aibomrun:telemetry:storage_read_throughput:avg:last_third",
+          "value": "0"
+        },
+        {
+          "name": "aibomrun:telemetry:storage_read_throughput:avg:middle_third",
+          "value": "0"
+        },
+        {
+          "name": "aibomrun:telemetry:storage_read_throughput:unit",
+          "value": "MBps"
+        },
+        {
+          "name": "aibomrun:telemetry:storage_write_throughput:min",
+          "value": "0"
+        },
+        {
+          "name": "aibomrun:telemetry:storage_write_throughput:max",
+          "value": "18.79"
+        },
+        {
+          "name": "aibomrun:telemetry:storage_write_throughput:avg",
+          "value": "7.14"
+        },
+        {
+          "name": "aibomrun:telemetry:storage_write_throughput:p95",
+          "value": "18.19"
+        },
+        {
+          "name": "aibomrun:telemetry:storage_write_throughput:avg:first_third",
+          "value": "0"
+        },
+        {
+          "name": "aibomrun:telemetry:storage_write_throughput:avg:last_third",
+          "value": "15.95"
+        },
+        {
+          "name": "aibomrun:telemetry:storage_write_throughput:avg:middle_third",
+          "value": "4.74"
+        },
+        {
+          "name": "aibomrun:telemetry:storage_write_throughput:unit",
+          "value": "MBps"
+        },
+        {
+          "name": "aibomrun:telemetry:collectedAt",
+          "value": "2026-11-02T14:52:09.678929Z"
+        },
+        {
+          "name": "aibomrun:telemetry:summaryIncludesColdStart",
+          "value": "false"
+        },
+        {
           "name": "aibomrun:signature:algorithm",
           "value": "Ed25519"
         },
@@ -109,11 +416,6 @@
             }
           ],
           "comment": "the signed AIBOM record this document was derived from; Ed25519 over its RFC 8785 canonical form"
-        },
-        {
-          "type": "bom",
-          "url": "urn:cdx:5c3a9f1e-2d4b-4c6e-8a7f-0b1c2d3e4f5a/1",
-          "comment": "runtime inventory for the same workload"
         }
       ]
     }
@@ -146,595 +448,119 @@
         "quantitativeAnalysis": {
           "performanceMetrics": [
             {
-              "type": "inference:generation_throughput:min",
-              "value": "11.61",
-              "slice": "tokens_per_sec"
+              "type": "generation_throughput_tokens_per_sec:min",
+              "value": "11.61"
             },
             {
-              "type": "inference:generation_throughput:max",
-              "value": "305.33",
-              "slice": "tokens_per_sec"
+              "type": "generation_throughput_tokens_per_sec:max",
+              "value": "305.33"
             },
             {
-              "type": "inference:generation_throughput:avg",
-              "value": "172.06",
-              "slice": "tokens_per_sec"
+              "type": "generation_throughput_tokens_per_sec:avg",
+              "value": "172.06"
             },
             {
-              "type": "inference:generation_throughput:p95",
-              "value": "305.33",
-              "slice": "tokens_per_sec"
+              "type": "generation_throughput_tokens_per_sec:p95",
+              "value": "305.33"
             },
             {
-              "type": "inference:generation_throughput:avg:first_third",
-              "value": "13.96",
-              "slice": "tokens_per_sec"
+              "type": "generation_throughput_tokens_per_sec:avg:first_third",
+              "value": "13.96"
             },
             {
-              "type": "inference:generation_throughput:avg:last_third",
-              "value": "285.28",
-              "slice": "tokens_per_sec"
+              "type": "generation_throughput_tokens_per_sec:avg:last_third",
+              "value": "285.28"
             },
             {
-              "type": "inference:generation_throughput:avg:middle_third",
-              "value": "160.35",
-              "slice": "tokens_per_sec"
+              "type": "generation_throughput_tokens_per_sec:avg:middle_third",
+              "value": "160.35"
             },
             {
-              "type": "inference:inter_token_latency_seconds:min",
-              "value": "0.00967",
-              "slice": "seconds"
+              "type": "inter_token_latency_seconds:min",
+              "value": "0.00967"
             },
             {
-              "type": "inference:inter_token_latency_seconds:max",
-              "value": "0.068",
-              "slice": "seconds"
+              "type": "inter_token_latency_seconds:max",
+              "value": "0.068"
             },
             {
-              "type": "inference:inter_token_latency_seconds:avg",
-              "value": "0.0463",
-              "slice": "seconds"
+              "type": "inter_token_latency_seconds:avg",
+              "value": "0.0463"
             },
             {
-              "type": "inference:inter_token_latency_seconds:p95",
-              "value": "0.068",
-              "slice": "seconds"
+              "type": "inter_token_latency_seconds:p95",
+              "value": "0.068"
             },
             {
-              "type": "inference:inter_token_latency_seconds:avg:first_third",
-              "value": "0.00967",
-              "slice": "seconds"
+              "type": "inter_token_latency_seconds:avg:first_third",
+              "value": "0.00967"
             },
             {
-              "type": "inference:inter_token_latency_seconds:avg:last_third",
-              "value": "0.0563",
-              "slice": "seconds"
+              "type": "inter_token_latency_seconds:avg:last_third",
+              "value": "0.0563"
             },
             {
-              "type": "inference:inter_token_latency_seconds:avg:middle_third",
-              "value": "0.068",
-              "slice": "seconds"
+              "type": "inter_token_latency_seconds:avg:middle_third",
+              "value": "0.068"
             },
             {
-              "type": "inference:kv_cache_usage:min",
-              "value": "0",
-              "slice": "percent"
+              "type": "prompt_throughput_tokens_per_sec:min",
+              "value": "29.85"
             },
             {
-              "type": "inference:kv_cache_usage:max",
-              "value": "64.9",
-              "slice": "percent"
+              "type": "prompt_throughput_tokens_per_sec:max",
+              "value": "768.53"
             },
             {
-              "type": "inference:kv_cache_usage:avg",
-              "value": "16.29",
-              "slice": "percent"
+              "type": "prompt_throughput_tokens_per_sec:avg",
+              "value": "514.52"
             },
             {
-              "type": "inference:kv_cache_usage:p95",
-              "value": "64.9",
-              "slice": "percent"
+              "type": "prompt_throughput_tokens_per_sec:p95",
+              "value": "768.53"
             },
             {
-              "type": "inference:kv_cache_usage:avg:first_third",
-              "value": "0",
-              "slice": "percent"
+              "type": "prompt_throughput_tokens_per_sec:avg:first_third",
+              "value": "35.89"
             },
             {
-              "type": "inference:kv_cache_usage:avg:last_third",
-              "value": "32.52",
-              "slice": "percent"
+              "type": "prompt_throughput_tokens_per_sec:avg:last_third",
+              "value": "711.08"
             },
             {
-              "type": "inference:kv_cache_usage:avg:middle_third",
-              "value": "0.118",
-              "slice": "percent"
+              "type": "prompt_throughput_tokens_per_sec:avg:middle_third",
+              "value": "698.31"
             },
             {
-              "type": "inference:num_requests_running:min",
-              "value": "0",
-              "slice": "requests"
+              "type": "time_to_first_token_seconds:min",
+              "value": "0.116"
             },
             {
-              "type": "inference:num_requests_running:max",
-              "value": "512",
-              "slice": "requests"
+              "type": "time_to_first_token_seconds:max",
+              "value": "19.4"
             },
             {
-              "type": "inference:num_requests_running:avg",
-              "value": "128.5",
-              "slice": "requests"
+              "type": "time_to_first_token_seconds:avg",
+              "value": "13.22"
             },
             {
-              "type": "inference:num_requests_running:p95",
-              "value": "512",
-              "slice": "requests"
+              "type": "time_to_first_token_seconds:p95",
+              "value": "19.4"
             },
             {
-              "type": "inference:num_requests_running:avg:first_third",
-              "value": "0",
-              "slice": "requests"
+              "type": "time_to_first_token_seconds:avg:first_third",
+              "value": "0.116"
             },
             {
-              "type": "inference:num_requests_running:avg:last_third",
-              "value": "256.5",
-              "slice": "requests"
+              "type": "time_to_first_token_seconds:avg:last_third",
+              "value": "17.84"
             },
             {
-              "type": "inference:num_requests_running:avg:middle_third",
-              "value": "1",
-              "slice": "requests"
-            },
-            {
-              "type": "inference:num_requests_waiting:min",
-              "value": "0",
-              "slice": "requests"
-            },
-            {
-              "type": "inference:num_requests_waiting:max",
-              "value": "0",
-              "slice": "requests"
-            },
-            {
-              "type": "inference:num_requests_waiting:avg",
-              "value": "0",
-              "slice": "requests"
-            },
-            {
-              "type": "inference:num_requests_waiting:p95",
-              "value": "0",
-              "slice": "requests"
-            },
-            {
-              "type": "inference:num_requests_waiting:avg:first_third",
-              "value": "0",
-              "slice": "requests"
-            },
-            {
-              "type": "inference:num_requests_waiting:avg:last_third",
-              "value": "0",
-              "slice": "requests"
-            },
-            {
-              "type": "inference:num_requests_waiting:avg:middle_third",
-              "value": "0",
-              "slice": "requests"
-            },
-            {
-              "type": "inference:prompt_throughput:min",
-              "value": "29.85",
-              "slice": "tokens_per_sec"
-            },
-            {
-              "type": "inference:prompt_throughput:max",
-              "value": "768.53",
-              "slice": "tokens_per_sec"
-            },
-            {
-              "type": "inference:prompt_throughput:avg",
-              "value": "514.52",
-              "slice": "tokens_per_sec"
-            },
-            {
-              "type": "inference:prompt_throughput:p95",
-              "value": "768.53",
-              "slice": "tokens_per_sec"
-            },
-            {
-              "type": "inference:prompt_throughput:avg:first_third",
-              "value": "35.89",
-              "slice": "tokens_per_sec"
-            },
-            {
-              "type": "inference:prompt_throughput:avg:last_third",
-              "value": "711.08",
-              "slice": "tokens_per_sec"
-            },
-            {
-              "type": "inference:prompt_throughput:avg:middle_third",
-              "value": "698.31",
-              "slice": "tokens_per_sec"
-            },
-            {
-              "type": "inference:time_to_first_token_seconds:min",
-              "value": "0.116",
-              "slice": "seconds"
-            },
-            {
-              "type": "inference:time_to_first_token_seconds:max",
-              "value": "19.4",
-              "slice": "seconds"
-            },
-            {
-              "type": "inference:time_to_first_token_seconds:avg",
-              "value": "13.22",
-              "slice": "seconds"
-            },
-            {
-              "type": "inference:time_to_first_token_seconds:p95",
-              "value": "19.4",
-              "slice": "seconds"
-            },
-            {
-              "type": "inference:time_to_first_token_seconds:avg:first_third",
-              "value": "0.116",
-              "slice": "seconds"
-            },
-            {
-              "type": "inference:time_to_first_token_seconds:avg:last_third",
-              "value": "17.84",
-              "slice": "seconds"
-            },
-            {
-              "type": "inference:time_to_first_token_seconds:avg:middle_third",
-              "value": "19.4",
-              "slice": "seconds"
-            },
-            {
-              "type": "cpu_usage:min",
-              "value": "0.238",
-              "slice": "cores"
-            },
-            {
-              "type": "cpu_usage:max",
-              "value": "0.757",
-              "slice": "cores"
-            },
-            {
-              "type": "cpu_usage:avg",
-              "value": "0.456",
-              "slice": "cores"
-            },
-            {
-              "type": "cpu_usage:p95",
-              "value": "0.632",
-              "slice": "cores"
-            },
-            {
-              "type": "cpu_usage:limit",
-              "value": "2",
-              "slice": "cores"
-            },
-            {
-              "type": "cpu_usage:avg:first_third",
-              "value": "0.292",
-              "slice": "cores"
-            },
-            {
-              "type": "cpu_usage:avg:last_third",
-              "value": "0.628",
-              "slice": "cores"
-            },
-            {
-              "type": "cpu_usage:avg:middle_third",
-              "value": "0.447",
-              "slice": "cores"
-            },
-            {
-              "type": "gpu_memory_used:min",
-              "value": "0",
-              "slice": "MiB"
-            },
-            {
-              "type": "gpu_memory_used:max",
-              "value": "50786",
-              "slice": "MiB"
-            },
-            {
-              "type": "gpu_memory_used:avg",
-              "value": "12124.3",
-              "slice": "MiB"
-            },
-            {
-              "type": "gpu_memory_used:p95",
-              "value": "50784",
-              "slice": "MiB"
-            },
-            {
-              "type": "gpu_memory_used:avg:first_third",
-              "value": "0",
-              "slice": "MiB"
-            },
-            {
-              "type": "gpu_memory_used:avg:last_third",
-              "value": "31082",
-              "slice": "MiB"
-            },
-            {
-              "type": "gpu_memory_used:avg:middle_third",
-              "value": "3832.62",
-              "slice": "MiB"
-            },
-            {
-              "type": "gpu_power:min",
-              "value": "70.01",
-              "slice": "watts"
-            },
-            {
-              "type": "gpu_power:max",
-              "value": "235.72",
-              "slice": "watts"
-            },
-            {
-              "type": "gpu_power:avg",
-              "value": "113.09",
-              "slice": "watts"
-            },
-            {
-              "type": "gpu_power:p95",
-              "value": "232.66",
-              "slice": "watts"
-            },
-            {
-              "type": "gpu_power:avg:first_third",
-              "value": "70.13",
-              "slice": "watts"
-            },
-            {
-              "type": "gpu_power:avg:last_third",
-              "value": "161.09",
-              "slice": "watts"
-            },
-            {
-              "type": "gpu_power:avg:middle_third",
-              "value": "104.35",
-              "slice": "watts"
-            },
-            {
-              "type": "gpu_utilization:min",
-              "value": "0",
-              "slice": "percent"
-            },
-            {
-              "type": "gpu_utilization:max",
-              "value": "80",
-              "slice": "percent"
-            },
-            {
-              "type": "gpu_utilization:avg",
-              "value": "9.25",
-              "slice": "percent"
-            },
-            {
-              "type": "gpu_utilization:p95",
-              "value": "53",
-              "slice": "percent"
-            },
-            {
-              "type": "gpu_utilization:avg:first_third",
-              "value": "0",
-              "slice": "percent"
-            },
-            {
-              "type": "gpu_utilization:avg:last_third",
-              "value": "26.43",
-              "slice": "percent"
-            },
-            {
-              "type": "gpu_utilization:avg:middle_third",
-              "value": "0",
-              "slice": "percent"
-            },
-            {
-              "type": "memory_usage:min",
-              "value": "1.17",
-              "slice": "GiB"
-            },
-            {
-              "type": "memory_usage:max",
-              "value": "3.84",
-              "slice": "GiB"
-            },
-            {
-              "type": "memory_usage:avg",
-              "value": "2.48",
-              "slice": "GiB"
-            },
-            {
-              "type": "memory_usage:p95",
-              "value": "3.84",
-              "slice": "GiB"
-            },
-            {
-              "type": "memory_usage:limit",
-              "value": "8",
-              "slice": "GiB"
-            },
-            {
-              "type": "memory_usage:avg:first_third",
-              "value": "2.5",
-              "slice": "GiB"
-            },
-            {
-              "type": "memory_usage:avg:last_third",
-              "value": "2.64",
-              "slice": "GiB"
-            },
-            {
-              "type": "memory_usage:avg:middle_third",
-              "value": "2.27",
-              "slice": "GiB"
-            },
-            {
-              "type": "network_receive:min",
-              "value": "0",
-              "slice": "Mbps"
-            },
-            {
-              "type": "network_receive:max",
-              "value": "143.33",
-              "slice": "Mbps"
-            },
-            {
-              "type": "network_receive:avg",
-              "value": "57.96",
-              "slice": "Mbps"
-            },
-            {
-              "type": "network_receive:p95",
-              "value": "142.61",
-              "slice": "Mbps"
-            },
-            {
-              "type": "network_receive:avg:first_third",
-              "value": "0.00184",
-              "slice": "Mbps"
-            },
-            {
-              "type": "network_receive:avg:last_third",
-              "value": "97.6",
-              "slice": "Mbps"
-            },
-            {
-              "type": "network_receive:avg:middle_third",
-              "value": "76.28",
-              "slice": "Mbps"
-            },
-            {
-              "type": "network_transmit:min",
-              "value": "3.83e-06",
-              "slice": "Mbps"
-            },
-            {
-              "type": "network_transmit:max",
-              "value": "1.4",
-              "slice": "Mbps"
-            },
-            {
-              "type": "network_transmit:avg",
-              "value": "0.619",
-              "slice": "Mbps"
-            },
-            {
-              "type": "network_transmit:p95",
-              "value": "1.4",
-              "slice": "Mbps"
-            },
-            {
-              "type": "network_transmit:avg:first_third",
-              "value": "0.000122",
-              "slice": "Mbps"
-            },
-            {
-              "type": "network_transmit:avg:last_third",
-              "value": "1.22",
-              "slice": "Mbps"
-            },
-            {
-              "type": "network_transmit:avg:middle_third",
-              "value": "0.639",
-              "slice": "Mbps"
-            },
-            {
-              "type": "storage_read_throughput:min",
-              "value": "0",
-              "slice": "MBps"
-            },
-            {
-              "type": "storage_read_throughput:max",
-              "value": "0",
-              "slice": "MBps"
-            },
-            {
-              "type": "storage_read_throughput:avg",
-              "value": "0",
-              "slice": "MBps"
-            },
-            {
-              "type": "storage_read_throughput:p95",
-              "value": "0",
-              "slice": "MBps"
-            },
-            {
-              "type": "storage_read_throughput:avg:first_third",
-              "value": "0",
-              "slice": "MBps"
-            },
-            {
-              "type": "storage_read_throughput:avg:last_third",
-              "value": "0",
-              "slice": "MBps"
-            },
-            {
-              "type": "storage_read_throughput:avg:middle_third",
-              "value": "0",
-              "slice": "MBps"
-            },
-            {
-              "type": "storage_write_throughput:min",
-              "value": "0",
-              "slice": "MBps"
-            },
-            {
-              "type": "storage_write_throughput:max",
-              "value": "18.79",
-              "slice": "MBps"
-            },
-            {
-              "type": "storage_write_throughput:avg",
-              "value": "7.14",
-              "slice": "MBps"
-            },
-            {
-              "type": "storage_write_throughput:p95",
-              "value": "18.19",
-              "slice": "MBps"
-            },
-            {
-              "type": "storage_write_throughput:avg:first_third",
-              "value": "0",
-              "slice": "MBps"
-            },
-            {
-              "type": "storage_write_throughput:avg:last_third",
-              "value": "15.95",
-              "slice": "MBps"
-            },
-            {
-              "type": "storage_write_throughput:avg:middle_third",
-              "value": "4.74",
-              "slice": "MBps"
+              "type": "time_to_first_token_seconds:avg:middle_third",
+              "value": "19.4"
             }
           ]
-        },
-        "properties": [
-          {
-            "name": "aibomrun:inference:telemetry:collectedAt",
-            "value": "2026-11-02T14:52:09.813189Z"
-          },
-          {
-            "name": "aibomrun:inference:telemetry:summaryIncludesColdStart",
-            "value": "false"
-          },
-          {
-            "name": "aibomrun:telemetry:collectedAt",
-            "value": "2026-11-02T14:52:09.678929Z"
-          },
-          {
-            "name": "aibomrun:telemetry:summaryIncludesColdStart",
-            "value": "false"
-          }
-        ]
+        }
       }
     },
     {
@@ -749,7 +575,7 @@
       ]
     },
     {
-      "bom-ref": "driver:nvidia",
+      "bom-ref": "driver:nvidia-driver",
       "type": "device-driver",
       "name": "nvidia-driver",
       "version": "595.91.07",
@@ -847,7 +673,7 @@
       "type": "library",
       "name": "flash-attn",
       "version": "2.7.4.post1+git5231d95fe1.45164347",
-      "purl": "pkg:pypi/flash-attn@2.7.4.post1+git5231d95fe1.45164347"
+      "purl": "pkg:pypi/flash-attn@2.7.4.post1%2Bgit5231d95fe1.45164347"
     },
     {
       "bom-ref": "pypi:numpy",
@@ -875,7 +701,7 @@
       "type": "library",
       "name": "torch",
       "version": "2.11.0a0+a6c236b9fd.nv26.3.46836102",
-      "purl": "pkg:pypi/torch@2.11.0a0+a6c236b9fd.nv26.3.46836102",
+      "purl": "pkg:pypi/torch@2.11.0a0%2Ba6c236b9fd.nv26.3.46836102",
       "properties": [
         {
           "name": "aibomrun:torch:cudaVersion",
@@ -896,7 +722,7 @@
       "type": "library",
       "name": "torchvision",
       "version": "0.25.0a0+b7d91027.nv26.3.46836102",
-      "purl": "pkg:pypi/torchvision@0.25.0a0+b7d91027.nv26.3.46836102"
+      "purl": "pkg:pypi/torchvision@0.25.0a0%2Bb7d91027.nv26.3.46836102"
     },
     {
       "bom-ref": "pypi:transformers",
@@ -910,14 +736,14 @@
       "type": "library",
       "name": "triton",
       "version": "3.6.0+git5d72932fc5.nv26.3",
-      "purl": "pkg:pypi/triton@3.6.0+git5d72932fc5.nv26.3"
+      "purl": "pkg:pypi/triton@3.6.0%2Bgit5d72932fc5.nv26.3"
     },
     {
       "bom-ref": "pypi:vllm",
       "type": "library",
       "name": "vllm",
       "version": "0.17.1+a03ca76a.nv26.3.46967107.cu132",
-      "purl": "pkg:pypi/vllm@0.17.1+a03ca76a.nv26.3.46967107.cu132"
+      "purl": "pkg:pypi/vllm@0.17.1%2Ba03ca76a.nv26.3.46967107.cu132"
     },
     {
       "bom-ref": "runtime:vllm",
@@ -947,8 +773,114 @@
         {
           "name": "aibomrun:inference:topP",
           "value": "0.9"
+        },
+        {
+          "name": "aibomrun:inference:telemetry:kv_cache_usage:min",
+          "value": "0"
+        },
+        {
+          "name": "aibomrun:inference:telemetry:kv_cache_usage:max",
+          "value": "64.9"
+        },
+        {
+          "name": "aibomrun:inference:telemetry:kv_cache_usage:avg",
+          "value": "16.29"
+        },
+        {
+          "name": "aibomrun:inference:telemetry:kv_cache_usage:p95",
+          "value": "64.9"
+        },
+        {
+          "name": "aibomrun:inference:telemetry:kv_cache_usage:avg:first_third",
+          "value": "0"
+        },
+        {
+          "name": "aibomrun:inference:telemetry:kv_cache_usage:avg:last_third",
+          "value": "32.52"
+        },
+        {
+          "name": "aibomrun:inference:telemetry:kv_cache_usage:avg:middle_third",
+          "value": "0.118"
+        },
+        {
+          "name": "aibomrun:inference:telemetry:kv_cache_usage:unit",
+          "value": "percent"
+        },
+        {
+          "name": "aibomrun:inference:telemetry:num_requests_running:min",
+          "value": "0"
+        },
+        {
+          "name": "aibomrun:inference:telemetry:num_requests_running:max",
+          "value": "512"
+        },
+        {
+          "name": "aibomrun:inference:telemetry:num_requests_running:avg",
+          "value": "128.5"
+        },
+        {
+          "name": "aibomrun:inference:telemetry:num_requests_running:p95",
+          "value": "512"
+        },
+        {
+          "name": "aibomrun:inference:telemetry:num_requests_running:avg:first_third",
+          "value": "0"
+        },
+        {
+          "name": "aibomrun:inference:telemetry:num_requests_running:avg:last_third",
+          "value": "256.5"
+        },
+        {
+          "name": "aibomrun:inference:telemetry:num_requests_running:avg:middle_third",
+          "value": "1"
+        },
+        {
+          "name": "aibomrun:inference:telemetry:num_requests_running:unit",
+          "value": "requests"
+        },
+        {
+          "name": "aibomrun:inference:telemetry:num_requests_waiting:min",
+          "value": "0"
+        },
+        {
+          "name": "aibomrun:inference:telemetry:num_requests_waiting:max",
+          "value": "0"
+        },
+        {
+          "name": "aibomrun:inference:telemetry:num_requests_waiting:avg",
+          "value": "0"
+        },
+        {
+          "name": "aibomrun:inference:telemetry:num_requests_waiting:p95",
+          "value": "0"
+        },
+        {
+          "name": "aibomrun:inference:telemetry:num_requests_waiting:avg:first_third",
+          "value": "0"
+        },
+        {
+          "name": "aibomrun:inference:telemetry:num_requests_waiting:avg:last_third",
+          "value": "0"
+        },
+        {
+          "name": "aibomrun:inference:telemetry:num_requests_waiting:avg:middle_third",
+          "value": "0"
+        },
+        {
+          "name": "aibomrun:inference:telemetry:num_requests_waiting:unit",
+          "value": "requests"
+        },
+        {
+          "name": "aibomrun:inference:telemetry:collectedAt",
+          "value": "2026-11-02T14:52:09.813189Z"
+        },
+        {
+          "name": "aibomrun:inference:telemetry:summaryIncludesColdStart",
+          "value": "false"
         }
-      ]
+      ],
+      "version": "0.17.1+a03ca76a.nv26.3.46967107.cu132",
+      "purl": "pkg:pypi/vllm@0.17.1%2Ba03ca76a.nv26.3.46967107.cu132"
     }
   ],
   "dependencies": [
@@ -957,7 +889,7 @@
       "dependsOn": [
         "model:drawais/Granite-3.3-8B-Instruct-AWQ-INT4",
         "gpu:0",
-        "driver:nvidia",
+        "driver:nvidia-driver",
         "node:node-1",
         "platform:python",
         "pypi:flash-attn",
