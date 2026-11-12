@@ -22,7 +22,7 @@ Two principles carry over from the record itself. Every value is identification,
 | `execution_metadata.job_id`, `.namespace` | `metadata.component.group` = namespace, property `aibomrun:job:name` | the run is the root component (below); the Job name is kept as a property because `name` carries `experiment_name`, which defaults to the Job name but can differ |
 | `execution_metadata.status`, `.duration_seconds` | properties `aibomrun:job:status`, `aibomrun:job:durationSeconds` on `metadata.component` | property. The serving record's status is `DeadlineExceeded` while its one pod reports `Completed`: the Job's `activeDeadlineSeconds` ended a benchmark server that would otherwise run forever, which is the record's own distinction between pod status and workload status, and the mapping keeps both |
 | `execution_metadata.pods[]` | per pod: properties `aibomrun:pod:<i>:name`, `:uid`, `:namespace`, `:node`, `:startTime`, `:status`, `:exitCode` on `metadata.component`; nodes become `device` components, see [Hardware](#hardware-as-device-components) | property, indexed in record order. `start_time` in the records has no timezone (`2026-11-03T16:29:57.639439`); the record documents it as UTC, so the mapping appends `Z`. `pod_ip` is dropped: ephemeral and not useful outside the cluster |
-| `execution_metadata.pods[].restarts`, `.serving_role`, `.retried_attempt` | properties `aibomrun:pod:<i>:restarts`, `:servingRole`, `:retriedAttempt` | property; *not seen in the records* |
+| `execution_metadata.pods[].restart_count`, `.last_termination_reason`, `.last_exit_code`, `.serving_role`, `.retried_attempt` | properties `aibomrun:pod:<i>:restartCount`, `:lastTerminationReason`, `:lastExitCode`, `:servingRole`, `:retriedAttempt` | property; *not seen in the records* |
 
 ## The run as model component and modelCard
 
@@ -76,10 +76,10 @@ Each `dataset.auto_detected[]` entry becomes a `data` component with `type: data
 | `.license` | component `licenses[0].license.id` when it is an SPDX id, else `licenses[0].license.name` | transformed |
 | `.description` | component `description` | direct |
 | `.fingerprint` | component `hashes[0]`: `alg: SHA-256`, `content` = the fingerprint, only if the fingerprint is a hex SHA-256; else property `aibomrun:dataset:fingerprint` | transformed. In the training record the fingerprint is 16 hex characters (`a5048bbbf302198f`), so it goes to the property, never to `hashes`. The record's fingerprint is a hash of file names, sizes and mtimes, not of contents; the property `aibomrun:dataset:fingerprint:kind: "metadata"` says so either way, so no reader mistakes it for a content hash (their #185) |
-| `.splits[]` | property `aibomrun:dataset:split`, comma-joined | property. Detected Fields calls this `split`; the records carry `splits` as a list (`["train"]`) |
+| `.split`, `.splits[]` | property `aibomrun:dataset:split`: `split` as is, `splits` comma-joined | property. Both are current: `split` is a string, set when the load named one (`load_dataset(split=...)`, a torchvision train/test flag); `splits` is a list, set when `load_dataset` returned a `DatasetDict` (`["train"]` in the training record) |
 | `.config_name`, `.revision`, `.builder` | properties `aibomrun:dataset:configName`, `:revision`, `:builder` | property; *not seen in the records* |
 | `.root`, `.path`, `.data_dir`, `.data_files` | properties `aibomrun:dataset:root`, `:path`, `:dataDir`, `:dataFiles` (JSON string) | property; these are paths inside the container, kept because they are what makes a local dataset identifiable; *not seen in the records* |
-| `.urls` | one `externalReferences[]` of `type: distribution` per URL | transformed; *not seen in the records* |
+| `.url`, `.urls` | one `externalReferences[]` of `type: distribution` per URL; `urls` is a list or a dict of name to URL, and a dict's values are used | transformed; *not seen in the records* |
 | `.dataset_class`, `.transform`, `.download`, `.description`, `.license` | properties `aibomrun:dataset:class`, `:transform`, `:download`; `description` and `license` as in the rows above | property; *not seen in the records* (the real entry carries `dataset_name`, `source`, `splits`, `version`, `fingerprint`, `batch_size`, `seen_via`, `matches_declared`) |
 | `.batch_size` | property `aibomrun:dataset:batchSize` | property |
 | `.sampling.*` (`sampler`, `shuffle`, `drop_last`, `num_workers`, `generator_seed`, `batch_sampler`, `sampler_seed`, `sampler_drop_last`) | properties `aibomrun:dataset:sampling:<camelCased key>` | property; *not seen in the records* |
@@ -193,9 +193,8 @@ Sub-namespaces used: `aibomrun:experiment`, `aibomrun:job`, `aibomrun:pod`, `aib
 6. **Per-pod telemetry.** The records aggregate across pods (both have one pod, so it did not matter here). If per-pod figures matter for multi-node runs, that is a record change first.
 7. **Numbers as strings in `environment`.** `cpu_cores`, `numa_nodes`, `cpu_cores_per_socket`, `cpu_threads_per_core`, `rdma_device_count` and `primary_mtu` are strings in the records (`"512"`, `"1400"`) while `gpu_count`, `memory_gb` and `gpu_memory_mb[]` are numbers. CycloneDX properties are strings so the document is unaffected, but a record that typed them consistently would spare every consumer a cast.
 8. **`rdma_devices` and `block_devices` as flat strings.** The record carries `mlx5_0,mlx5_1,...` and raw `lsblk` lines in one string each; the mapping splits them. Emitting arrays in the record would remove the parsing from every reader.
-9. **`splits` versus `split`.** Detected Fields says `split`; the record has `splits: ["train"]`. The mapping follows the record; the page should say which is current.
-10. **`step_seconds` versus `stepSeconds`.** The record's `telemetry_series_ref.window` uses `step_seconds`; the `AIBOMTelemetry` CRD's `spec.window` uses `stepSeconds` for the same value. Harmless, but a reader matching the two by hand will trip on it once.
-11. **Pod `start_time` without a timezone.** `2026-11-03T16:29:57.639439` versus the `Z`-suffixed timestamps everywhere else in the record. The mapping appends `Z` on the record's word that it is UTC.
+9. **`step_seconds` versus `stepSeconds`.** The record's `telemetry_series_ref.window` uses `step_seconds`; the `AIBOMTelemetry` CRD's `spec.window` uses `stepSeconds` for the same value. Harmless, but a reader matching the two by hand will trip on it once.
+10. **Pod `start_time` without a timezone.** `2026-11-03T16:29:57.639439` versus the `Z`-suffixed timestamps everywhere else in the record. The mapping appends `Z` on the record's word that it is UTC.
 
 ## Validation
 
