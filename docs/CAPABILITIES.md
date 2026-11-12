@@ -110,7 +110,7 @@ A library imported lazily (flash-attn, bitsandbytes) is listed from the first fl
 | Hook | Fires on | Captures |
 |---|---|---|
 | `torch.utils.data.DataLoader.__init__` | DataLoader construction | dataset class, root/path, split, transform name, dataset name, URLs, content fingerprint (hash of file names/sizes/mtimes), batch size, and `sampling`: sampler class, `shuffle`, `drop_last`, `num_workers`, a passed `generator`'s seed, a custom `batch_sampler`'s class, and a `DistributedSampler`'s `sampler_seed`/`sampler_drop_last` |
-| `datasets.load_dataset` (HuggingFace) | call time | dataset name (for file builders like `json`/`csv`/`parquet`, the `data_files` or `data_dir`, with the builder in `builder`), config name, split(s), revision, `data_dir`/`data_files`, fingerprint, version, license, description |
+| `datasets.load_dataset` (HuggingFace) | call time | dataset name (for file builders like `json`/`csv`/`parquet`, the `data_files` or `data_dir`, with the builder in `builder`), config name, split (`split` when the call names one, `splits` listing a returned `DatasetDict`'s splits), revision, `data_dir`/`data_files`, fingerprint, version, license, description |
 | torchvision datasets (19 known classes: MNIST family, CIFAR, ImageNet, ImageFolder, CelebA, LSUN, STL10, SVHN, VOC*, Coco*, Flickr*, Places365) | construction | dataset name (the most-derived known class: CIFAR100, not also CIFAR10), root, split, download flag, fingerprint |
 | `webdataset.WebDataset.__init__` | construction | dataset name, URL list |
 
