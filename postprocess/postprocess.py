@@ -2573,11 +2573,11 @@ def _dcgm_gpu_hardware(pod_name):
 
     ordered = [devices[k] for k in sorted(devices, key=_device_order)]
     models = [d["model"] for d in ordered if d["model"]]
-    mems = [d["mem_mb"] for d in ordered if d["mem_mb"] is not None]
+    mems = [d["mem_mb"] for d in ordered]
     out = {}
     if models:
         out["gpu_models"] = "\n".join(models)
-    if mems:
+    if mems and None not in mems:  # one per GPU, or the indices shift
         out["gpu_memory_mb"] = mems
     return out
 
@@ -4161,12 +4161,12 @@ def _discovery_details(disc):
         vals = {k: src[k] for k in keys if src.get(k) not in (None, "", "N/A", "None")}
         if vals:
             out[name] = vals
-    mem = [
-        int(float(m)) for m in str(safe_get(disc, "gpu", "gpu_memory_per_device_mb", default="")).split()
-        if _try_float(m) is not None
-    ]
-    if mem:
-        out["gpu_memory_mb"] = mem
+    # One entry per GPU, so all or nothing: dropping an unknown entry (an AMD
+    # partition's N/A, nvidia-smi's [N/A]) would shift the rest onto the
+    # wrong devices.
+    mem = [_try_float(m) for m in str(safe_get(disc, "gpu", "gpu_memory_per_device_mb", default="")).split()]
+    if mem and None not in mem:
+        out["gpu_memory_mb"] = [int(m) for m in mem]
     return out
 
 

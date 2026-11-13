@@ -1388,6 +1388,15 @@ def test_compile_aibom_annotation_intent_overrides_detected_model():
     assert aibom["experiment_intent_declared_via"] == "annotation"
 
 
+def test_discovery_gpu_memory_dropped_unless_every_gpu_reported():
+    # An MI300 compute partition has no VRAM file; keeping only the known
+    # entry would pair partition 0's VRAM with whichever GPU reads index 0.
+    disc = {"gpu": {"gpu_memory_per_device_mb": "196608\nN/A\nN/A"}}
+    assert "gpu_memory_mb" not in pp._discovery_details(disc)
+    disc["gpu"]["gpu_memory_per_device_mb"] = "196608\n196608"
+    assert pp._discovery_details(disc)["gpu_memory_mb"] == [196608, 196608]
+
+
 def test_compile_aibom_surfaces_extra_discovery_and_vllm_fields():
     discovery = {
         "system": {"cpu_architecture": "x86_64", "cache_l3": "N/A", "cache_l2": "10 MiB", "uptime_seconds": "5"},

@@ -177,7 +177,9 @@ if snapshot["gpu"]["gpu_count"] in ("0", "Not available"):
         snapshot["gpu"].update({
             "gpu_count": str(len(_amd)),
             "gpu_models": "\n".join(g["name"] for g in _amd),
-            "gpu_memory_per_device_mb": "\n".join(str(g["vram_mb"]) for g in _amd if g["vram_mb"] is not None),
+            # One line per GPU, like gpu_models: a partition with no VRAM file
+            # gets N/A, not a skipped line that shifts the rest.
+            "gpu_memory_per_device_mb": "\n".join("N/A" if g["vram_mb"] is None else str(g["vram_mb"]) for g in _amd),
             "gpu_driver_version": _read_sysfs("/sys/module/amdgpu/version") or "Not available",
         })
 
