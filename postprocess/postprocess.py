@@ -3100,6 +3100,35 @@ def pod_gpu_count(pod_name, containers):
     return sum(counts) if counts else None
 
 
+def _concurrent_gpu_pods(pods, discoveries, containers, now_s):
+    """The GPU pods running together at the workload's busiest moment, as
+    [(discovery, gpu_count)] in pods order (#115). Parallel pods (a multi-node
+    JobSet) add up; retries of one pod don't, since each attempt starts after
+    the one before it stopped. On a tie the later moment wins, so a retried
+    pod is described by its last attempt."""
+    spans = []
+    for pod, disc in zip(pods, discoveries):  # compile_aibom builds pods[] 1:1 from discoveries
+        name = pod.get("pod_name")
+        n = pod_gpu_count(name, containers)
+        if n is None:
+            n = _try_int(safe_get(disc, "gpu", "gpu_count"))
+        if not n:
+            continue
+        try:
+            start = _parse_start_utc(pod["start_time"]).timestamp()
+        except (KeyError, ValueError, AttributeError, TypeError):
+            start = 0.0  # unknown: assume it overlapped everything
+        end_ms = _pod_finished_ms(name, containers)
+        spans.append((disc, n, start, max(start, end_ms / 1000 if end_ms is not None else now_s)))
+    # ponytail: O(pods^2); a sweep line if a workload ever has thousands of pods.
+    best, best_n = [], 0
+    for t in sorted(s for _, _, s, _ in spans):  # the busiest moment is some pod's start
+        live = [(d, n) for d, n, s, e in spans if s <= t <= e]
+        if sum(n for _, n in live) >= best_n:
+            best, best_n = live, sum(n for _, n in live)
+    return best
+
+
 def compute_metric_limit(metric_name, pod_names, containers, scale):
     """Resolves resource_utilization.metrics.<metric_name>.limit: the
     configured ceiling usage was measured against, scaled the same way the
@@ -3988,9 +4017,14 @@ def compile_aibom(
             )
             aibom["inference"]["performance"] = performance
 
-    # Environment from first discovery
+    # Environment. gpu_count and gpu_memory_mb cover every GPU pod that ran
+    # at the same time (a multi-node JobSet's 4 x 8 GPUs is 32); the rest
+    # describes the first of those pods' node, and node_count says how many
+    # nodes there were (#115). A GPU-less pod (a benchmark client) is only
+    # used when no pod has a GPU.
     if discoveries:
-        first = discoveries[0]
+        gpu_pods = _concurrent_gpu_pods(pods, discoveries, containers, generated_at_dt.timestamp())
+        first = gpu_pods[0][0] if gpu_pods else discoveries[0]
         gpu_info = first.get("gpu", {})
         system_info = first.get("system", {})
 
@@ -4009,7 +4043,9 @@ def compile_aibom(
         # RBAC, so cpu_model/numa/cuda/kernel stay discovery-sourced.
         first_pod = safe_get(first, "pod_metadata", "name")
         dcgm_hw = _dcgm_gpu_hardware(first_pod)
-        spec_gpu_count = pod_gpu_count(first_pod, containers)
+        # No GPU pods means no claim and no discovered GPU anywhere, so this
+        # is 0 or unknown (None), never a string.
+        gpu_count = sum(n for _, n in gpu_pods) if gpu_pods else _try_int(gpu_info.get("gpu_count"))
 
         gpu_models = dcgm_hw.get("gpu_models") or gpu_info.get("gpu_models", "")
         if gpu_models and gpu_models.strip().lower() not in ("", "not available"):
@@ -4021,7 +4057,7 @@ def compile_aibom(
 
         aibom["environment"] = {
             "gpu_type": gpu_type,
-            "gpu_count": spec_gpu_count if spec_gpu_count is not None else gpu_info.get("gpu_count"),
+            "gpu_count": gpu_count,
             "cpu_model": system_info.get("cpu_model"),
             "cpu_cores": system_info.get("cpu_count"),
             "memory_gb": mem_gb,
@@ -4031,9 +4067,30 @@ def compile_aibom(
             "framework_version": fw_label,
             "kernel_version": safe_get(first, "system", "kernel_version"),
         }
-        aibom["environment"].update(_discovery_details(first))
-        if dcgm_hw.get("gpu_memory_mb"):
-            aibom["environment"]["gpu_memory_mb"] = dcgm_hw["gpu_memory_mb"]
+        env = aibom["environment"]
+        env.update(_discovery_details(first))
+        # One VRAM entry per GPU counted above, DCGM first, or no list at all
+        # (see _discovery_details).
+        mems = []
+        for disc, _ in gpu_pods or [(first, 0)]:
+            # No DCGM for the first pod (absent, or Prometheus unreachable):
+            # don't wait out a timeout for each of the others too.
+            if disc is first or not dcgm_hw:
+                hw = dcgm_hw
+            else:
+                hw = _dcgm_gpu_hardware(safe_get(disc, "pod_metadata", "name"))
+            mem = hw.get("gpu_memory_mb") or _discovery_details(disc).get("gpu_memory_mb")
+            if not mem:
+                mems = None
+                break
+            mems += mem
+        if mems:
+            env["gpu_memory_mb"] = mems
+        else:
+            env.pop("gpu_memory_mb", None)
+        nodes = {safe_get(d, "pod_metadata", "node") for d, _ in gpu_pods or [(first, 0)]} - {None, "unknown"}
+        if nodes:
+            env["node_count"] = len(nodes)
     # From the runtime hooks, so present even when discovery data isn't.
     software = software_environment(runtime_info)
     if software:
