@@ -963,6 +963,23 @@ func TestVerifyDiscoverySignature_EmptySignatureFails(t *testing.T) {
 	}
 }
 
+// A key Secret made with --from-file ends in a newline the Python signers
+// strip; the verifier has to read it the same way (#115).
+func TestSigningKeyBytesMatchesPythonStrip(t *testing.T) {
+	payload := `{"gpu":{"gpu_count":"2"}}`
+	sig := hmacHex(t, []byte("test-key"), payload) // what generate_snapshot.py signs with
+	data := map[string][]byte{"hmac-key": []byte("test-key\n")}
+	if !verifySignature(signingKeyBytes(data, "hmac-key"), payload, sig) {
+		t.Error("key with a trailing newline should verify a signature made with the stripped key")
+	}
+	if signingKeyBytes(data, "missing") != nil {
+		t.Error("absent field should be nil (no key configured)")
+	}
+	if k := signingKeyBytes(map[string][]byte{"hmac-key": []byte("\n")}, "hmac-key"); k == nil {
+		t.Error("present but blank field should stay non-nil, so data is still checked")
+	}
+}
+
 // TestPostprocessDropsForgedDiscoveryData is the core regression test for
 // #30/#29: a pod whose discovery-<pod>.json was overwritten by something
 // other than the discovery init container (no valid matching .sig, since
