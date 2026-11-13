@@ -1813,6 +1813,35 @@ func TestBuildPostprocessInputs_CapturesGPUClaim(t *testing.T) {
 	}
 }
 
+// TestBuildPostprocessInputs_PodGPUCountIncludesSidecars (#110): native
+// sidecars aren't listed in containers.json, so their GPUs reach
+// postprocess.py only through pod_gpu_count.
+func TestBuildPostprocessInputs_PodGPUCountIncludesSidecars(t *testing.T) {
+	pod := instrumentedPod("gpu-job", "ns") // training: 1 nvidia.com/gpu
+	always := corev1.ContainerRestartPolicyAlways
+	pod.Spec.InitContainers = []corev1.Container{{
+		Name:          "vllm",
+		RestartPolicy: &always,
+		Resources:     corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("2")}},
+	}}
+	w := &Watcher{clientset: fake.NewSimpleClientset()}
+
+	_, _, containersJSON, _ := w.buildPostprocessInputs(context.Background(), "ns", "cm-name", []corev1.Pod{*pod}, nil)
+
+	var containers []struct {
+		PodGPUCount *int64 `json:"pod_gpu_count"`
+	}
+	if err := json.Unmarshal([]byte(containersJSON), &containers); err != nil {
+		t.Fatalf("unmarshal containers.json: %v", err)
+	}
+	if len(containers) != 1 || containers[0].PodGPUCount == nil || *containers[0].PodGPUCount != 3 {
+		t.Errorf("containers.json = %s, want one entry with pod_gpu_count 3", containersJSON)
+	}
+	if !podsRequestGPU([]corev1.Pod{{Spec: corev1.PodSpec{InitContainers: pod.Spec.InitContainers}}}) {
+		t.Error("a pod whose only GPU is a sidecar's must qualify")
+	}
+}
+
 func TestBuildPostprocessInputs_NoGPUClaimOmitsGPULimit(t *testing.T) {
 	pod := instrumentedPod("cpu-job", "ns")
 	pod.Spec.Containers[0].Resources = corev1.ResourceRequirements{} // drop the GPU claim

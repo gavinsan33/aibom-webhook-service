@@ -710,6 +710,12 @@ def test_pod_gpu_count_sums_claims():
     assert pp.pod_gpu_count("p1", None) is None
 
 
+def test_pod_gpu_count_prefers_pod_level_count():
+    # pod_gpu_count includes native sidecars' GPUs, which have no entry (#110).
+    containers = [{"pod_name": "p1", "gpu_limit": 1, "pod_gpu_count": 3}, {"pod_name": "p1"}]
+    assert pp.pod_gpu_count("p1", containers) == 3
+
+
 def test_compile_aibom_prefers_pod_spec_gpu_count_over_nvidia_smi(monkeypatch):
     # Discovery's in-pod nvidia-smi miscounts (reports 1); the pod-spec claim (4)
     # is authoritative. DCGM off so gpu_type still comes from discovery.
@@ -767,6 +773,29 @@ def test_dcgm_gpu_hardware_orders_gpu_indices_numerically(monkeypatch):
                         lambda promql, t: {"status": "success", "data": {"result": result}})
     hw = pp._dcgm_gpu_hardware("p1")
     assert hw["gpu_memory_mb"] == [1000, 1001, 1002, 1009, 1010, 1011]
+
+
+def test_gpu_hardware_reads_amd_exporter(monkeypatch):
+    # AMD Device Metrics Exporter: gpu_total_vram with card_model/gpu_id (#110).
+    monkeypatch.setattr(pp, "JOB_NAMESPACE", "ns")
+    seen = []
+    response = {"status": "success", "data": {"result": [
+        {"metric": {"__name__": "gpu_total_vram", "gpu_id": "1", "card_model": "MI300X", "pod": "p1"}, "value": [1.7e9, "196592"]},
+        {"metric": {"__name__": "gpu_total_vram", "gpu_id": "0", "card_model": "MI300X", "pod": "p1"}, "value": [1.7e9, "196592"]},
+    ]}}
+    monkeypatch.setattr(pp, "query_prometheus_instant", lambda promql, t: seen.append(promql) or response)
+    hw = pp._dcgm_gpu_hardware("p1")
+    assert hw == {"gpu_models": "MI300X\nMI300X", "gpu_memory_mb": [196592, 196592]}
+    assert 'gpu_total_vram{namespace="ns", pod="p1"}' in seen[0]
+
+
+def test_gpu_queries_fall_back_to_amd_exporter():
+    for key, amd in (("gpu_utilization", "gpu_gfx_activity"), ("gpu_memory_used", "gpu_used_vram"),
+                     ("gpu_power", "gpu_power_usage")):
+        assert amd + '{namespace="{namespace}", pod="{pod_name}"}' in pp.TELEMETRY_QUERIES[key]["query"]
+        series = pp.SERIES_QUERIES[key]["query"]
+        assert "by (pod, gpu_id)" in series and amd + '{namespace="{namespace}", pod=~"{pod_regex}"}' in series
+    assert pp._series_labels({"pod": "p1", "gpu_id": "3"}) == {"pod": "p1", "gpu": "3"}
 
 
 def test_dcgm_gpu_hardware_empty_when_no_series(monkeypatch):
@@ -1357,6 +1386,15 @@ def test_compile_aibom_annotation_intent_overrides_detected_model():
 
     assert aibom["experiment_intent"] == "training"
     assert aibom["experiment_intent_declared_via"] == "annotation"
+
+
+def test_discovery_gpu_memory_dropped_unless_every_gpu_reported():
+    # An MI300 compute partition has no VRAM file; keeping only the known
+    # entry would pair partition 0's VRAM with whichever GPU reads index 0.
+    disc = {"gpu": {"gpu_memory_per_device_mb": "196608\nN/A\nN/A"}}
+    assert "gpu_memory_mb" not in pp._discovery_details(disc)
+    disc["gpu"]["gpu_memory_per_device_mb"] = "196608\n196608"
+    assert pp._discovery_details(disc)["gpu_memory_mb"] == [196608, 196608]
 
 
 def test_compile_aibom_surfaces_extra_discovery_and_vllm_fields():

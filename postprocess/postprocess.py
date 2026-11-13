@@ -114,6 +114,37 @@ _WORKLOAD_CONTAINERS = 'container!="POD", container!="", container!="aibom-datas
 # ponytail: step-sampled, so a spike strictly between two range steps is
 # missed; switch max/min to max_over_time/min_over_time([step]) (as
 # SERIES_QUERIES' {fn} does) if long-run peaks need to be exact.
+# AMD Device Metrics Exporter (#110) exports the same three GPU gauges as
+# gpu_gfx_activity (percent), gpu_used_vram (MB, the MiB DCGM uses) and
+# gpu_power_usage (watts; gpu_package_power on MI3xx where that's absent).
+# Its chart's ServiceMonitor defaults to honorLabels: true, so the workload is
+# in plain `namespace`/`pod` and the GPU index in `gpu_id`, not DCGM's
+# exported_*. A pod only ever has one vendor's series, so `or` takes
+# whichever exists.
+# ponytail: an AMD ServiceMonitor with honorLabels: false renames these to
+# exported_namespace/exported_pod and matches nothing; add those arms if one
+# turns up.
+_AMD_GPU_METRICS = {
+    "gpu_utilization": ["gpu_gfx_activity"],
+    "gpu_memory_used": ["gpu_used_vram"],
+    "gpu_power": ["gpu_power_usage", "gpu_package_power"],
+}
+
+
+def _gpu_stat_query(key, agg, dcgm):
+    terms = [agg + "(" + dcgm + '{exported_namespace="{namespace}", exported_pod="{pod_name}"})']
+    terms += [agg + "(" + n + '{namespace="{namespace}", pod="{pod_name}"})' for n in _AMD_GPU_METRICS[key]]
+    return " or ".join(terms)
+
+
+def _gpu_series_query(key, dcgm):
+    terms = ['{fn} by (exported_pod, gpu) ({fn}_over_time(' + dcgm
+             + '{exported_namespace="{namespace}", exported_pod=~"{pod_regex}"}[{win}s]))']
+    terms += ['{fn} by (pod, gpu_id) ({fn}_over_time(' + n + '{namespace="{namespace}", pod=~"{pod_regex}"}[{win}s]))'
+              for n in _AMD_GPU_METRICS[key]]
+    return " or ".join(terms)
+
+
 TELEMETRY_QUERIES = {
     # Computed directly from dcgm-exporter's own raw metrics (present on any
     # standard DCGM install) rather than a "nerc:"-prefixed recording rule --
@@ -123,15 +154,15 @@ TELEMETRY_QUERIES = {
     # DCGM's own `namespace`/`pod` labels are dcgm-exporter's; the workload's
     # are `exported_namespace`/`exported_pod`.
     "gpu_utilization": {
-        "query": 'avg(DCGM_FI_DEV_GPU_UTIL{exported_namespace="{namespace}", exported_pod="{pod_name}"})',
+        "query": _gpu_stat_query("gpu_utilization", "avg", "DCGM_FI_DEV_GPU_UTIL"),
         "unit": "percent",
     },
     "gpu_memory_used": {
-        "query": 'sum(DCGM_FI_DEV_FB_USED{exported_namespace="{namespace}", exported_pod="{pod_name}"})',
+        "query": _gpu_stat_query("gpu_memory_used", "sum", "DCGM_FI_DEV_FB_USED"),
         "unit": "MiB",
     },
     "gpu_power": {
-        "query": 'sum(DCGM_FI_DEV_POWER_USAGE{exported_namespace="{namespace}", exported_pod="{pod_name}"})',
+        "query": _gpu_stat_query("gpu_power", "sum", "DCGM_FI_DEV_POWER_USAGE"),
         "unit": "watts",
     },
     # rate()'s [5m] window matches what the pre-segmented-stats avg_* fields
@@ -352,24 +383,15 @@ VLLM_TELEMETRY_QUERIES = SERVING_TELEMETRY_QUERIES["vllm"]
 # _WORKLOAD_CONTAINERS filter the stats queries use).
 SERIES_QUERIES = {
     "gpu_utilization": {
-        "query": (
-            '{fn} by (exported_pod, gpu) ({fn}_over_time('
-            'DCGM_FI_DEV_GPU_UTIL{exported_namespace="{namespace}", exported_pod=~"{pod_regex}"}[{win}s]))'
-        ),
+        "query": _gpu_series_query("gpu_utilization", "DCGM_FI_DEV_GPU_UTIL"),
         "unit": "percent", "aggregation": "avg", "gauge": True,
     },
     "gpu_memory_used": {
-        "query": (
-            '{fn} by (exported_pod, gpu) ({fn}_over_time('
-            'DCGM_FI_DEV_FB_USED{exported_namespace="{namespace}", exported_pod=~"{pod_regex}"}[{win}s]))'
-        ),
+        "query": _gpu_series_query("gpu_memory_used", "DCGM_FI_DEV_FB_USED"),
         "unit": "MiB", "aggregation": "sum", "gauge": True,
     },
     "gpu_power": {
-        "query": (
-            '{fn} by (exported_pod, gpu) ({fn}_over_time('
-            'DCGM_FI_DEV_POWER_USAGE{exported_namespace="{namespace}", exported_pod=~"{pod_regex}"}[{win}s]))'
-        ),
+        "query": _gpu_series_query("gpu_power", "DCGM_FI_DEV_POWER_USAGE"),
         "unit": "watts", "aggregation": "sum", "gauge": True,
     },
     "cpu_usage": {
@@ -2512,11 +2534,15 @@ def _dcgm_gpu_hardware(pod_name):
     beyond the cluster-monitoring-view the Job already holds. Returns
     {"gpu_models": "A100\\nA100", "gpu_memory_mb": [40960, 40960]} (one entry per
     GPU, ordered by GPU index), or {} when DCGM isn't present or the pod has no
-    GPU series -- callers fall back to the discovery values. Never raises."""
+    GPU series -- callers fall back to the discovery values. Never raises.
+    AMD's exporter (#110) gives the same from gpu_total_vram (MB) and its
+    `card_model`/`gpu_id` labels, under plain `namespace`/`pod` (see
+    _AMD_GPU_METRICS)."""
     if not JOB_NAMESPACE or not pod_name:
         return {}
     promql = _substitute_pod_query(
-        'DCGM_FI_DEV_FB_TOTAL{exported_namespace="{namespace}", exported_pod="{pod_name}"}',
+        'DCGM_FI_DEV_FB_TOTAL{exported_namespace="{namespace}", exported_pod="{pod_name}"}'
+        ' or gpu_total_vram{namespace="{namespace}", pod="{pod_name}"}',
         pod_name,
     )
     try:
@@ -2529,12 +2555,12 @@ def _dcgm_gpu_hardware(pod_name):
     devices = {}  # gpu index (or UUID) -> {"model": str|None, "mem_mb": int|None}
     for series in resp.get("data", {}).get("result", []):
         metric = series.get("metric", {})
-        key = metric.get("gpu") or metric.get("UUID") or str(len(devices))
+        key = metric.get("gpu") or metric.get("gpu_id") or metric.get("UUID") or str(len(devices))
         try:
             mem_mb = int(round(float(series.get("value", [None, None])[1])))
         except (TypeError, ValueError, IndexError):
             mem_mb = None
-        devices[key] = {"model": metric.get("modelName"), "mem_mb": mem_mb}
+        devices[key] = {"model": metric.get("modelName") or metric.get("card_model"), "mem_mb": mem_mb}
     if not devices:
         return {}
     # gpu indices are strings; sort them numerically so "10" comes after "9",
@@ -2547,11 +2573,11 @@ def _dcgm_gpu_hardware(pod_name):
 
     ordered = [devices[k] for k in sorted(devices, key=_device_order)]
     models = [d["model"] for d in ordered if d["model"]]
-    mems = [d["mem_mb"] for d in ordered if d["mem_mb"] is not None]
+    mems = [d["mem_mb"] for d in ordered]
     out = {}
     if models:
         out["gpu_models"] = "\n".join(models)
-    if mems:
+    if mems and None not in mems:  # one per GPU, or the indices shift
         out["gpu_memory_mb"] = mems
     return out
 
@@ -2681,6 +2707,7 @@ _SERIES_LABEL_SOURCES = (
     ("container", "container"),
     ("interface", "interface"),
     ("gpu", "gpu"),
+    ("gpu_id", "gpu"),  # AMD Device Metrics Exporter
 )
 
 
@@ -3056,15 +3083,20 @@ def pod_resource_limit(pod_name, containers, resource_key):
 
 
 def pod_gpu_count(pod_name, containers):
-    """A pod's GPU count from its containers' nvidia.com/gpu claims in
-    containers.json (gpu_limit, summed across the pod's containers) -- the
-    number the scheduler actually placed the pod against. Preferred over the
+    """A pod's GPU count from its pod-spec GPU claims in containers.json --
+    pod_gpu_count (app containers plus native sidecars, #110), else
+    gpu_limit summed across the pod's containers (an older watcher's
+    containers.json). Preferred over the
     in-pod discovery container's nvidia-smi count, which can miscount (a
     driver-error line read as a device, #115), sees only the share one
     container was handed, and is set from inside the workload. None if no
     container in the pod claims a GPU, so the discovery value is used as a
     fallback."""
-    counts = [c["gpu_limit"] for c in containers or [] if c.get("pod_name") == pod_name and c.get("gpu_limit") is not None]
+    mine = [c for c in containers or [] if c.get("pod_name") == pod_name]
+    for c in mine:
+        if c.get("pod_gpu_count") is not None:
+            return c["pod_gpu_count"]
+    counts = [c["gpu_limit"] for c in mine if c.get("gpu_limit") is not None]
     return sum(counts) if counts else None
 
 
@@ -4129,12 +4161,12 @@ def _discovery_details(disc):
         vals = {k: src[k] for k in keys if src.get(k) not in (None, "", "N/A", "None")}
         if vals:
             out[name] = vals
-    mem = [
-        int(float(m)) for m in str(safe_get(disc, "gpu", "gpu_memory_per_device_mb", default="")).split()
-        if _try_float(m) is not None
-    ]
-    if mem:
-        out["gpu_memory_mb"] = mem
+    # One entry per GPU, so all or nothing: dropping an unknown entry (an AMD
+    # partition's N/A, nvidia-smi's [N/A]) would shift the rest onto the
+    # wrong devices.
+    mem = [_try_float(m) for m in str(safe_get(disc, "gpu", "gpu_memory_per_device_mb", default="")).split()]
+    if mem and None not in mem:
+        out["gpu_memory_mb"] = [int(m) for m in mem]
     return out
 
 

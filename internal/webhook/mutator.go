@@ -145,7 +145,11 @@ func (m *Mutator) Mutate(pod *corev1.Pod, requesterUsername string) ([]PatchOper
 		discovery.VolumeMounts = append(discovery.VolumeMounts, modelSourceVolumeMount(modelSubPath))
 		discovery.Env = append(discovery.Env, corev1.EnvVar{Name: "AIBOM_MODEL_DIR", Value: modelSourceMountPath})
 	}
-	patches = appendInitContainer(patches, pod, discovery)
+	if hasGPUSidecar(pod) {
+		patches = prependInitContainer(patches, pod, discovery)
+	} else {
+		patches = appendInitContainer(patches, pod, discovery)
+	}
 
 	// Inject dataset detector into application containers, and the sidecar
 	// that signs and publishes what it detects (see #47) -- gated on the
@@ -381,18 +385,11 @@ func dataConfigMapEnvVar(pod *corev1.Pod) (corev1.EnvVar, bool) {
 	return corev1.EnvVar{Name: "AIBOM_DATA_CONFIGMAP", Value: aibomdata.ConfigMapName(triggerName(pod))}, true
 }
 
+// requestsGPU reports whether any container, init containers and native
+// sidecars included, claims a GPU (#110).
 func requestsGPU(pod *corev1.Pod) bool {
-	gpuResource := corev1.ResourceName("nvidia.com/gpu")
-	for i := range pod.Spec.Containers {
-		c := &pod.Spec.Containers[i]
-		if q, ok := c.Resources.Limits[gpuResource]; ok && q.Cmp(resource.MustParse("0")) > 0 {
-			return true
-		}
-		if q, ok := c.Resources.Requests[gpuResource]; ok && q.Cmp(resource.MustParse("0")) > 0 {
-			return true
-		}
-	}
-	return false
+	_, peak := aibomdata.PodGPUClaims(pod)
+	return len(peak) > 0
 }
 
 func (m *Mutator) buildDiscoveryInitContainer(pod *corev1.Pod) corev1.Container {
@@ -477,44 +474,25 @@ func (m *Mutator) buildDiscoveryInitContainer(pod *corev1.Pod) corev1.Container 
 	// arbitrary base image. Mirroring costs the pod no extra GPUs: a pod's
 	// per-resource scheduling requirement is max(sum of containers, max of
 	// init containers), and init containers never run concurrently with
-	// the app containers.
-	if gpuRes := podGPUResource(pod); gpuRes != nil {
-		c.Resources.Limits[corev1.ResourceName("nvidia.com/gpu")] = *gpuRes
+	// the app containers. Behind a native sidecar holding GPUs its claim would
+	// add to the sidecar's, so such pods get discovery as their first init
+	// container (hasGPUSidecar). The mirrored claim
+	// is the pod's peak per GPU resource, so a GPU held by an init container
+	// or native sidecar (a vLLM server run as a sidecar) is seen too (#110).
+	// AMD GPUs are mirrored the same way; the AMD device plugin mounts the
+	// allocated /dev/dri nodes, which generate_snapshot.py reads.
+	// Time-sliced replicas (any *.shared name, MIG ones included) are capped at 1: with the device plugin's
+	// failRequestsGreaterThanOne, a container asking for more fails the pod
+	// at admission, and every replica is the same kind of GPU anyway.
+	_, peak := aibomdata.PodGPUClaims(pod)
+	for name, q := range peak {
+		if aibomdata.IsSharedGPUResource(name) {
+			q = resource.MustParse("1")
+		}
+		c.Resources.Limits[name] = q
 	}
 
 	return c
-}
-
-// podGPUResource returns the pod's total nvidia.com/gpu allocation — the
-// sum of each container's effective claim (its limit if set, else its
-// request) — i.e. exactly what the scheduler places the pod against
-// (for extended resources, unset requests default from limits). Summing
-// rather than returning the first container's claim matters for
-// multi-container pods (e.g. 1 GPU per container): the discovery init
-// container must mirror the whole total or the device plugin hands it a
-// subset of the pod's GPUs and nvidia-smi under-reports gpu_count/
-// gpu_models.
-func podGPUResource(pod *corev1.Pod) *resource.Quantity {
-	gpuResource := corev1.ResourceName("nvidia.com/gpu")
-	total := resource.Quantity{}
-	found := false
-	for i := range pod.Spec.Containers {
-		var q *resource.Quantity
-		if v, ok := pod.Spec.Containers[i].Resources.Limits[gpuResource]; ok && v.Cmp(resource.MustParse("0")) > 0 {
-			q = &v
-		} else if v, ok := pod.Spec.Containers[i].Resources.Requests[gpuResource]; ok && v.Cmp(resource.MustParse("0")) > 0 {
-			q = &v
-		}
-		if q == nil {
-			continue
-		}
-		found = true
-		total.Add(*q)
-	}
-	if !found {
-		return nil
-	}
-	return &total
 }
 
 // containerRestartPolicyAlways is a package-level var (rather than an
@@ -1008,7 +986,7 @@ func appendVolume(patches []PatchOperation, pod *corev1.Pod, vol corev1.Volume) 
 func appendInitContainer(patches []PatchOperation, pod *corev1.Pod, c corev1.Container) []PatchOperation {
 	existingCount := len(pod.Spec.InitContainers)
 	for _, p := range patches {
-		if p.Path == "/spec/initContainers" || p.Path == "/spec/initContainers/-" {
+		if p.Path == "/spec/initContainers" || p.Path == "/spec/initContainers/-" || p.Path == "/spec/initContainers/0" {
 			existingCount++
 		}
 	}
@@ -1025,4 +1003,31 @@ func appendInitContainer(patches []PatchOperation, pod *corev1.Pod, c corev1.Con
 		Path:  "/spec/initContainers/-",
 		Value: c,
 	})
+}
+
+// hasGPUSidecar reports whether a native sidecar (restartPolicy Always init
+// container) claims a GPU. Only then does discovery go first: its claim must
+// not stack on a running sidecar's (see buildDiscoveryInitContainer). Other
+// pods keep it after their own init containers, because its start_time is
+// where postprocess.py's telemetry window starts, and a long init step (a
+// model download) ahead of it would otherwise count as idle GPU time.
+func hasGPUSidecar(pod *corev1.Pod) bool {
+	for i := range pod.Spec.InitContainers {
+		c := &pod.Spec.InitContainers[i]
+		if c.RestartPolicy != nil && *c.RestartPolicy == corev1.ContainerRestartPolicyAlways &&
+			len(aibomdata.ContainerGPUClaims(c)) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// prependInitContainer is appendInitContainer, but inserts c ahead of the
+// pod's own init containers.
+func prependInitContainer(patches []PatchOperation, pod *corev1.Pod, c corev1.Container) []PatchOperation {
+	patches = appendInitContainer(patches, pod, c)
+	if last := &patches[len(patches)-1]; last.Path == "/spec/initContainers/-" {
+		last.Path = "/spec/initContainers/0"
+	}
+	return patches
 }

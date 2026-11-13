@@ -1,5 +1,6 @@
 # Taken from coldpress's discovery script in 'user_snapshot.yaml' and modified.
 
+import glob
 import hashlib
 import hmac
 import signal
@@ -56,6 +57,40 @@ def run_cmd(command):
         return out.stdout.strip() if out.returncode == 0 else "Not available"
     except Exception as e:
         return "Not available"
+
+
+def _read_sysfs(path):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def amd_gpus(dev_root="/dev/dri", drm_root="/sys/class/drm"):
+    """The AMD GPUs allocated to this container (#110), as
+    [{"name", "vram_mb"}]. The AMD device plugin mounts only the allocated
+    renderD* nodes into the container, while sysfs lists every GPU on the
+    host, so the device nodes pick which GPUs are ours and sysfs describes
+    them. Nothing injects rocm-smi the way the NVIDIA toolkit injects
+    nvidia-smi, hence sysfs. In MI300-style compute-partition modes every
+    partition but the first has its render node under a
+    platform/amdgpu_xcp_N device with no vendor/product/VRAM files, so it's
+    counted as a plain "AMD GPU"."""
+    gpus = []
+    for node in sorted(glob.glob(os.path.join(dev_root, "renderD*"))):
+        dev = os.path.join(drm_root, os.path.basename(node), "device")
+        partition = os.path.basename(os.path.realpath(dev)).startswith("amdgpu_xcp_")
+        if not partition and _read_sysfs(os.path.join(dev, "vendor")) != "0x1002":
+            continue
+        vram = _read_sysfs(os.path.join(dev, "mem_info_vram_total"))
+        gpus.append({
+            "name": _read_sysfs(os.path.join(dev, "product_name"))
+            or f"AMD GPU {_read_sysfs(os.path.join(dev, 'device'))}".strip(),
+            "vram_mb": int(vram) // (1024 * 1024) if vram.isdigit() else None,
+        })
+    return gpus
+
 
 print("Collecting static system information...")
 
@@ -132,6 +167,22 @@ snapshot = {
         "cgroup_memory_limit_bytes": run_cmd("cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo 'N/A'")
     }
 }
+
+# No NVIDIA GPU visible: try AMD, reported in the same fields so
+# postprocess.py needs no vendor branch. cuda_version stays as nvidia-smi
+# left it (empty).
+if snapshot["gpu"]["gpu_count"] in ("0", "Not available"):
+    _amd = _run_stage("AMD GPU discovery", amd_gpus) or []
+    if _amd:
+        snapshot["gpu"].update({
+            "gpu_count": str(len(_amd)),
+            "gpu_models": "\n".join(g["name"] for g in _amd),
+            # One line per GPU, like gpu_models: a partition with no VRAM file
+            # gets N/A, not a skipped line that shifts the rest.
+            "gpu_memory_per_device_mb": "\n".join("N/A" if g["vram_mb"] is None else str(g["vram_mb"]) for g in _amd),
+            "gpu_driver_version": _read_sysfs("/sys/module/amdgpu/version") or "Not available",
+        })
+
 
 def _write_local_snapshot():
     # Write JSON locally for debugging/parity with prior behavior
