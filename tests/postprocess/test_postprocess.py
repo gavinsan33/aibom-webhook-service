@@ -748,7 +748,52 @@ def test_compile_aibom_falls_back_to_discovery_gpu_count_without_claim(monkeypat
         discoveries=discoveries, detected_datasets=[], runtime_info={}, annotations={},
         telemetry=None, containers=[],
     )
-    assert aibom["environment"]["gpu_count"] == "8"
+    assert aibom["environment"]["gpu_count"] == 8
+
+
+def _gpu_pod(name, node, start, finish, gpus=8):
+    disc = {
+        "pod_metadata": {"name": name, "node": node, "start_time": start},
+        "gpu": {"gpu_count": str(gpus), "gpu_models": "H100", "gpu_memory_per_device_mb": "\n".join(["81559"] * gpus)},
+        "system": {"cpu_model": name},
+    }
+    return disc, {"pod_name": name, "gpu_limit": gpus, "pod_gpu_count": gpus, "finished_at": finish}
+
+
+def test_compile_aibom_counts_every_concurrent_gpu_pod(monkeypatch):
+    # A 4-node JobSet is 32 GPUs on 4 nodes, not the first pod's 8 (#115);
+    # the GPU-less client pod listed first doesn't describe the hardware.
+    dcgm_calls = []
+    monkeypatch.setattr(pp, "_dcgm_gpu_hardware", lambda pod: dcgm_calls.append(pod) or {})
+    client = {"pod_metadata": {"name": "client", "node": "cpu-0", "start_time": "2026-01-01T00:00:00"},
+              "gpu": {"gpu_count": "0"}, "system": {"cpu_model": "client cpu"}}
+    pods = [_gpu_pod(f"w{i}", f"gpu-{i}", "2026-01-01T00:00:10", "2026-01-01T01:00:00Z") for i in range(4)]
+    aibom = pp.compile_aibom(
+        discoveries=[client] + [d for d, _ in pods], detected_datasets=[], runtime_info={}, annotations={},
+        telemetry=None, containers=[{"pod_name": "client", "finished_at": "2026-01-01T01:00:00Z"}] + [c for _, c in pods],
+    )
+    env = aibom["environment"]
+    assert env["gpu_count"] == 32 and env["node_count"] == 4
+    assert env["gpu_memory_mb"] == [81559] * 32
+    assert env["gpu_type"] == "H100" and env["cpu_model"] == "w0"  # a GPU node's, not the client's
+    assert dcgm_calls == ["w0"]  # no DCGM for the first pod: the others aren't queried
+
+
+def test_compile_aibom_does_not_add_up_sequential_retries(monkeypatch):
+    # backoffLimit retries of one 8-GPU pod held 8 GPUs at a time.
+    monkeypatch.setattr(pp, "_dcgm_gpu_hardware", lambda pod: {})
+    attempts = [
+        _gpu_pod("a0", "gpu-0", "2026-01-01T00:00:00", "2026-01-01T00:10:00Z"),
+        _gpu_pod("a1", "gpu-1", "2026-01-01T00:10:30", "2026-01-01T00:20:00Z"),
+    ]
+    aibom = pp.compile_aibom(
+        discoveries=[d for d, _ in attempts], detected_datasets=[], runtime_info={}, annotations={},
+        telemetry=None, containers=[c for _, c in attempts],
+    )
+    env = aibom["environment"]
+    assert env["gpu_count"] == 8 and env["node_count"] == 1
+    assert len(env["gpu_memory_mb"]) == 8
+    assert env["cpu_model"] == "a1"  # the last attempt's node
 
 
 def test_dcgm_gpu_hardware_parses_models_and_memory(monkeypatch):

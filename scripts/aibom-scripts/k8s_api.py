@@ -5,6 +5,7 @@
 # container) as well as the pinned discovery image, without requiring the
 # `kubernetes` pip package to be installed anywhere it's imported.
 
+import hashlib
 import json
 import os
 import ssl
@@ -154,9 +155,14 @@ def get_cluster_object(group, version, plural, name):
 def _postprocess_job_name(trigger_name):
     # Budgeted against _WORKLOAD_IDENTITY_SUFFIX_LEN, not len(_POSTPROCESS_SUFFIX)
     # -- see that constant's comment for why.
+    # A truncated name ends in a hash of the full one, as truncatedTriggerBase
+    # does (#130), so long-named replicas of one predictor don't share a
+    # ConfigMap.
     max_base = _MAX_JOB_NAME_LENGTH - _WORKLOAD_IDENTITY_SUFFIX_LEN
-    trigger_name = trigger_name[:max_base].rstrip("-")
-    return trigger_name + _POSTPROCESS_SUFFIX
+    if len(trigger_name) <= max_base:
+        return trigger_name.rstrip("-") + _POSTPROCESS_SUFFIX
+    suffix = "-" + hashlib.sha256(trigger_name.encode()).hexdigest()[:8]
+    return trigger_name[:max_base - len(suffix)].rstrip("-") + suffix + _POSTPROCESS_SUFFIX
 
 
 def resolve_data_configmap_name():

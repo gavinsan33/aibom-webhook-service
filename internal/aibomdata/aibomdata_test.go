@@ -51,3 +51,21 @@ func TestWorkloadIdentityNameTrimsTrailingHyphenAfterTruncation(t *testing.T) {
 		t.Errorf("WorkloadIdentityName() = %q, base %q should not end in a hyphen", got, base)
 	}
 }
+
+// Pinned to the same strings as tests/aibom_scripts/test_k8s_api.py, so the
+// Go and Python name derivations can't drift apart (#130).
+func TestTruncatedNamesCarryHashOfFullName(t *testing.T) {
+	cases := map[string]string{
+		"granite-lora-finetune-experiment-a-run-1": "granite-lora-finetune-experime-a657d58b",
+		"granite-lora-finetune-experiment-a-run-2": "granite-lora-finetune-experime-e1abb80c",
+		"granite-model-predictor-58f446b5c-6mmc7":  "granite-model-predictor-58f446b5c-6mmc7",
+	}
+	for trigger, base := range cases {
+		if got := WorkloadIdentityName(trigger); got != base+WorkloadIdentitySuffix {
+			t.Errorf("WorkloadIdentityName(%q) = %q, want %q", trigger, got, base+WorkloadIdentitySuffix)
+		}
+		if got := ConfigMapName(trigger); got != base+PostprocessSuffix+ConfigMapSuffix {
+			t.Errorf("ConfigMapName(%q) = %q", trigger, got)
+		}
+	}
+}

@@ -1,6 +1,7 @@
 package watcher
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/hmac"
@@ -764,7 +765,7 @@ func (w *Watcher) fetchDiscoverySigningKey(ctx context.Context, namespace string
 		}
 		return nil, err
 	}
-	return secret.Data[aibomdata.DiscoverySigningKeyDataKey], nil
+	return signingKeyBytes(secret.Data, aibomdata.DiscoverySigningKeyDataKey), nil
 }
 
 // fetchDatasetSigningKey is fetchDiscoverySigningKey's counterpart for the
@@ -780,7 +781,21 @@ func (w *Watcher) fetchDatasetSigningKey(ctx context.Context, namespace string) 
 		}
 		return nil, err
 	}
-	return secret.Data[aibomdata.DatasetSigningKeyDataKey], nil
+	return signingKeyBytes(secret.Data, aibomdata.DatasetSigningKeyDataKey), nil
+}
+
+// signingKeyBytes reads an HMAC key field trimmed exactly as the Python
+// signers read the mounted file (bytes.strip(): ASCII whitespace only), so a
+// Secret made with --from-file (a trailing newline) still verifies instead of
+// every entry being dropped (#115). A field that is present stays non-nil
+// even when empty, so it's still checked rather than treated as "no key
+// configured".
+func signingKeyBytes(data map[string][]byte, field string) []byte {
+	v, ok := data[field]
+	if !ok {
+		return nil
+	}
+	return append([]byte{}, bytes.Trim(v, " \t\n\r\v\f")...)
 }
 
 // verifySignature reports whether sigHex is a valid HMAC-SHA256 of payload
