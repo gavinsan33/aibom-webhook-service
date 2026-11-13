@@ -56,3 +56,15 @@ func TestPodGPUClaimsIgnoresNonGPU(t *testing.T) {
 		t.Errorf("peak = %v, want empty", peak)
 	}
 }
+
+func TestGPUCountCountsSharedReplicasOnce(t *testing.T) {
+	pod := &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{
+		gpuCtr("a", "nvidia.com/gpu.shared", 1, false), gpuCtr("b", "nvidia.com/gpu.shared", 1, false),
+		gpuCtr("c", "nvidia.com/mig-1g.5gb.shared", 1, false), gpuCtr("d", "nvidia.com/mig-1g.5gb.shared", 1, false),
+		gpuCtr("e", "nvidia.com/gpu", 2, false),
+	}}}
+	running, _ := PodGPUClaims(pod)
+	if got := GPUCount(running); got != 4 {
+		t.Errorf("GPUCount = %d, want 4 (1 gpu.shared + 1 mig .shared + 2 gpu)", got)
+	}
+}

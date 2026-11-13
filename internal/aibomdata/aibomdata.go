@@ -286,10 +286,25 @@ func PodGPUClaims(pod *corev1.Pod) (running, peak corev1.ResourceList) {
 	return running, peak
 }
 
-// GPUCount sums a claim list across GPU resources.
+// IsSharedGPUResource reports whether name is a time-sliced replica
+// resource: nvidia.com/gpu.shared, or a MIG profile renamed the same way
+// (nvidia.com/mig-1g.5gb.shared). Replicas aren't distinct devices.
+func IsSharedGPUResource(name corev1.ResourceName) bool {
+	return strings.HasSuffix(string(name), ".shared")
+}
+
+// GPUCount sums a claim list across GPU resources, counting each
+// time-sliced replica resource as one GPU however many replicas are
+// claimed, as the discovery init container's mirror does.
+// ponytail: replicas from two physical GPUs still count as one; the claim
+// doesn't say which GPU a replica is on.
 func GPUCount(claims corev1.ResourceList) int64 {
 	var n int64
-	for _, q := range claims {
+	for name, q := range claims {
+		if IsSharedGPUResource(name) {
+			n++
+			continue
+		}
 		n += q.Value()
 	}
 	return n

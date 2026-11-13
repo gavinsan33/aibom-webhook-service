@@ -481,12 +481,12 @@ func (m *Mutator) buildDiscoveryInitContainer(pod *corev1.Pod) corev1.Container 
 	// or native sidecar (a vLLM server run as a sidecar) is seen too (#110).
 	// AMD GPUs are mirrored the same way; the AMD device plugin mounts the
 	// allocated /dev/dri nodes, which generate_snapshot.py reads.
-	// Time-sliced replicas are capped at 1: with the device plugin's
+	// Time-sliced replicas (any *.shared name, MIG ones included) are capped at 1: with the device plugin's
 	// failRequestsGreaterThanOne, a container asking for more fails the pod
 	// at admission, and every replica is the same kind of GPU anyway.
 	_, peak := aibomdata.PodGPUClaims(pod)
 	for name, q := range peak {
-		if name == "nvidia.com/gpu.shared" {
+		if aibomdata.IsSharedGPUResource(name) {
 			q = resource.MustParse("1")
 		}
 		c.Resources.Limits[name] = q
