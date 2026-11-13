@@ -93,10 +93,12 @@ def test_resolve_data_configmap_name_truncates_long_pod_names(monkeypatch):
     # module's own (shorter) _POSTPROCESS_SUFFIX -- see
     # _WORKLOAD_IDENTITY_SUFFIX_LEN's comment in k8s_api.py for why a past
     # mismatch here silently broke every long-named bare pod's AIBOM.
+    # Pinned to the same names as aibomdata_test.go's
+    # TestTruncatedNamesCarryHashOfFullName (#130).
     monkeypatch.delenv("AIBOM_DATA_CONFIGMAP", raising=False)
-    monkeypatch.setenv("POD_NAME", "a" * 63)
-    max_base = 63 - len("-aibom-workload-identity")
-    assert (
-        k8s_api.resolve_data_configmap_name()
-        == ("a" * max_base) + "-aibom-postprocess-data"
-    )
+    for pod, base in [
+        ("granite-lora-finetune-experiment-a-run-1", "granite-lora-finetune-experime-a657d58b"),
+        ("granite-lora-finetune-experiment-a-run-2", "granite-lora-finetune-experime-e1abb80c"),
+    ]:
+        monkeypatch.setenv("POD_NAME", pod)
+        assert k8s_api.resolve_data_configmap_name() == base + "-aibom-postprocess-data"

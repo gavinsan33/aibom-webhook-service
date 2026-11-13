@@ -165,12 +165,20 @@ const (
 // watcher read from -- silently, since a not-found ConfigMap Get() isn't
 // logged as an error -- so every such pod's AIBOM had empty
 // discovery/environment/pod data with no visible failure at all.
+//
+// A truncated name ends in a short hash of the full name (#130), so two
+// workloads sharing their first 39 characters (KServe replicas of one
+// predictor, or reruns named <experiment>-run-1/-run-2) don't share a data
+// ConfigMap and identity, which the first to finish would delete. Names that
+// fit are unchanged.
 func truncatedTriggerBase(triggerName string) string {
 	maxBase := MaxJobNameLength - len(WorkloadIdentitySuffix)
-	if len(triggerName) > maxBase {
-		triggerName = triggerName[:maxBase]
+	if len(triggerName) <= maxBase {
+		return strings.TrimRight(triggerName, "-")
 	}
-	return strings.TrimRight(triggerName, "-")
+	sum := sha256.Sum256([]byte(triggerName))
+	hash := "-" + hex.EncodeToString(sum[:4])
+	return strings.TrimRight(triggerName[:maxBase-len(hash)], "-") + hash
 }
 
 // PostprocessJobName returns the deterministic name of the postprocess Job

@@ -21,6 +21,13 @@ Existing AIBOMs are not changed by any of this.
 
 The `AIBOM` CRD's short name changed from `aibom` to `aibomrun`, and the `AIBOMTelemetry` CRD no longer declares the `aibom` category, so the project no longer claims [k8s-aibom](https://github.com/GoogleCloudPlatform/k8s-aibom)'s short name. The category was also why `oc get aibom` listed `AIBOMTelemetry` objects rather than AIBOMs: kubectl expands a category before it looks up a short name. Both changes take effect once the CRDs are re-applied (step 1 above). After that, `oc get aibom` fails unless k8s-aibom is installed, so update scripts to `oc get aibomrun` or `oc get aiboms.aibom.io`. The CLI was renamed at the same time and is now `oc aibomrun`; reinstall it as described in its docs.
 
+## Long workload names
+
+A workload name longer than 39 characters now gets a short hash in its data ConfigMap and per-job identity names, so two long names that share a prefix (KServe replicas of one predictor, `<experiment>-run-1` and `-run-2`) no longer share them. Names of 39 characters or fewer are unchanged. Two effects during the upgrade:
+
+- A long-named workload already running when the webhook is upgraded writes to the old name, which the new watcher doesn't read, so its AIBOM has no hardware data or GPU telemetry, and its old data ConfigMap and identity are left behind. Find them with `oc get cm,sa -n <ns> | grep -E 'aibom-(postprocess-data|workload-identity)'` once those workloads have finished; an identity is a ServiceAccount, Role, RoleBinding and Secret sharing one name (`oc delete sa,role,rolebinding,secret <name> -n <ns>`).
+- A bare pod (a KServe predictor) computes its ConfigMap name from the namespace's `aibom-scripts` ConfigMap. Until step 3 refreshes it, long-named predictors have the same problem, so upgrade enabled namespaces right after the webhook.
+
 ## Image caching (OpenShift)
 
 On OpenShift, `cacheImages.enabled` (default `true`) creates `ImageStream`s that mirror the injected images into the cluster's internal registry, and points the injection flags at that registry. On a `helm upgrade` into this from an earlier version:
