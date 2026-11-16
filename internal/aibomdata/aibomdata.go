@@ -219,6 +219,18 @@ func ConfigMapName(triggerName string) string {
 	return name
 }
 
+// LegacyConfigMapName is ConfigMapName before #130 added the hash: where pods
+// admitted by an older webhook (or, for bare pods, an older k8s_api.py) wrote
+// their data. Read it, never delete by it: a long name's legacy form is also
+// the current name of a workload called exactly its first 39 characters.
+// ponytail: remove once no pod admitted before #130 can still be running.
+func LegacyConfigMapName(triggerName string) string {
+	if max := MaxJobNameLength - len(WorkloadIdentitySuffix); len(triggerName) > max {
+		triggerName = triggerName[:max]
+	}
+	return strings.TrimRight(triggerName, "-") + PostprocessSuffix + ConfigMapSuffix
+}
+
 // WorkloadIdentityName returns the deterministic name for the per-job
 // ServiceAccount/Role/RoleBinding/Secret quartet, truncated to fit
 // Kubernetes' 63-character name limit (ServiceAccount names, like Job

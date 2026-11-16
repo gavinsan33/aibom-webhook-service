@@ -1684,6 +1684,27 @@ func TestJobNameTruncation(t *testing.T) {
 	}
 }
 
+// A long-named pod admitted before #130 wrote to the unhashed ConfigMap name;
+// its data must still be read after the upgrade, and only its own keys.
+func TestBuildPostprocessInputs_ReadsPre130ConfigMapName(t *testing.T) {
+	job := "granite-lora-finetune-experiment-a-run-1"
+	pod := instrumentedPod(job, "ns")
+	legacy := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: aibomdata.LegacyConfigMapName(job), Namespace: "ns"},
+		Data:       map[string]string{"discovery-" + pod.Name + ".json": `{"gpu":{"gpu_count":"1"}}`},
+	}
+	if legacy.Name == aibomdata.ConfigMapName(job) {
+		t.Fatal("test needs a name that truncates")
+	}
+	w := &Watcher{clientset: fake.NewSimpleClientset(legacy)}
+
+	discoveries, _, _, _ := w.buildPostprocessInputs(context.Background(), "ns", aibomdata.ConfigMapName(job), []corev1.Pod{*pod}, nil)
+
+	if len(discoveries) != 1 || discoveries[0] != `{"gpu":{"gpu_count":"1"}}` {
+		t.Errorf("discoveries = %q, want the pre-#130 ConfigMap's entry", discoveries)
+	}
+}
+
 func TestBuildPostprocessInputs_CapturesOOMKilledStatus(t *testing.T) {
 	pod := instrumentedPod("oom-job", "ns")
 	pod.Status.ContainerStatuses = []corev1.ContainerStatus{

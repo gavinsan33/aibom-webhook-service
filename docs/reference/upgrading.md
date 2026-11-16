@@ -23,10 +23,15 @@ The `AIBOM` CRD's short name changed from `aibom` to `aibomrun`, and the `AIBOMT
 
 ## Long workload names
 
-A workload name longer than 39 characters now gets a short hash in its data ConfigMap and per-job identity names, so two long names that share a prefix (KServe replicas of one predictor, `<experiment>-run-1` and `-run-2`) no longer share them. Names of 39 characters or fewer are unchanged. Two effects during the upgrade:
+A workload name longer than 39 characters now gets a short hash in its data ConfigMap and per-job identity names, so two long names that share a prefix (KServe replicas of one predictor, `<experiment>-run-1` and `-run-2`) no longer share them. Names of 39 characters or fewer are unchanged.
 
-- A long-named workload already running when the webhook is upgraded writes to the old name, which the new watcher doesn't read, so its AIBOM has no hardware data or GPU telemetry, and its old data ConfigMap and identity are left behind. Find them with `oc get cm,sa -n <ns> | grep -E 'aibom-(postprocess-data|workload-identity)'` once those workloads have finished; an identity is a ServiceAccount, Role, RoleBinding and Secret sharing one name (`oc delete sa,role,rolebinding,secret <name> -n <ns>`).
-- A bare pod (a KServe predictor) computes its ConfigMap name from the namespace's `aibom-scripts` ConfigMap. Until step 3 refreshes it, long-named predictors have the same problem, so upgrade enabled namespaces right after the webhook.
+Pods admitted before the upgrade wrote to the old, unhashed name. The watcher still reads a pod's data from there when the new ConfigMap has none for it, which also covers bare pods (KServe predictors) in namespaces whose `aibom-scripts` haven't been refreshed by step 3 yet. It never deletes by the old name, because the old name of a long workload can be the current name of another workload called exactly its first 39 characters. So each long-named workload that was running at the upgrade leaves its old data ConfigMap behind, and, for Jobs, its old identity (a ServiceAccount, Role, RoleBinding and Secret sharing one name). Once every workload that was running at upgrade time has finished and been postprocessed, any `*-aibom-postprocess-data` ConfigMap or `*-aibom-workload-identity` object created before the upgrade is safe to delete:
+
+```bash
+oc get cm,sa -n <namespace> --sort-by=.metadata.creationTimestamp | grep -E 'aibom-(postprocess-data|workload-identity)'
+oc delete cm <name> -n <namespace>
+oc delete sa,role,rolebinding,secret <identity-name> -n <namespace>
+```
 
 ## Image caching (OpenShift)
 

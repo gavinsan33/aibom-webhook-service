@@ -64,8 +64,18 @@ func TestTruncatedNamesCarryHashOfFullName(t *testing.T) {
 		if got := WorkloadIdentityName(trigger); got != base+WorkloadIdentitySuffix {
 			t.Errorf("WorkloadIdentityName(%q) = %q, want %q", trigger, got, base+WorkloadIdentitySuffix)
 		}
-		if got := ConfigMapName(trigger); got != base+PostprocessSuffix+ConfigMapSuffix {
-			t.Errorf("ConfigMapName(%q) = %q", trigger, got)
+		if got, want := ConfigMapName(trigger), base+PostprocessSuffix+ConfigMapSuffix; got != want {
+			t.Errorf("ConfigMapName(%q) = %q, want %q", trigger, got, want)
 		}
+	}
+}
+
+func TestLegacyConfigMapNameIsThePre130Truncation(t *testing.T) {
+	if got, want := LegacyConfigMapName("granite-lora-finetune-experiment-a-run-1"),
+		"granite-lora-finetune-experiment-a-run-aibom-postprocess-data"; got != want {
+		t.Errorf("LegacyConfigMapName = %q, want %q", got, want)
+	}
+	if LegacyConfigMapName("short") != ConfigMapName("short") {
+		t.Error("names that fit should be the same in both schemes")
 	}
 }
