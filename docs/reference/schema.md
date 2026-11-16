@@ -44,7 +44,7 @@ A workload can have several pods: a multi-node JobSet, a server and its benchmar
 
 - **Whole workload:** `environment.gpu_count`, `environment.gpu_memory_mb` and `environment.node_count` cover the GPU pods that ran at the same time. A 4-node JobSet with 8 GPUs per pod reports 32 GPUs on 4 nodes. Retries of one pod run one after another, so they aren't added up. AIBOMs created before this reported only the first pod's GPUs.
 - **One node:** the rest of `environment` (`gpu_type`, `cpu_model`, `cpu_cores`, `memory_gb`, `numa_nodes`, driver and kernel versions) describes the first of those GPU pods, or the first pod if none has a GPU.
-- **Per pod:** each `execution_metadata.pods[]` entry has its own `gpu_count`, including retried attempts.
+- **Per pod:** each `execution_metadata.pods[]` entry has its own `gpu_count`, including retried attempts, and `containers`: each app container's `name`, `image` and `image_id` (with the digest of the image that ran).
 - **Per pod, then combined:** each `resource_utilization.metrics` value is computed per pod, summed across that pod's GPUs and containers. Across pods, `min`/`max` are the extremes and `avg`/`p95`/`segments` are averaged. So `gpu_power.avg` is one pod's power: divide it by a pod's `gpu_count` for watts per GPU, not by `environment.gpu_count`.
 
 ## Telemetry
