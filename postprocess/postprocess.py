@@ -3037,6 +3037,18 @@ def pod_serving_role(pod_name, containers):
     return None
 
 
+def pod_containers(pod_name, containers):
+    """The pod's app containers and the images they ran (#208): the spec's
+    image reference and the kubelet-reported image_id, which carries the
+    digest. containers.json lists only Spec.Containers, so our injected init
+    containers (and any native sidecar) aren't included."""
+    return [
+        {k: c[k] for k in ("name", "image", "image_id") if c.get(k)}
+        for c in containers
+        if c.get("pod_name") == pod_name
+    ]
+
+
 def pod_restart_info(pod_name, containers):
     """What a pod's containers went through before their current state, from
     the container statuses' lastState (#112). With restartPolicy OnFailure a
@@ -3714,6 +3726,9 @@ def compile_aibom(
         serving_role = pod_serving_role(pod_name, containers or [])
         if serving_role:
             pod_entry["serving_role"] = serving_role
+        images = pod_containers(pod_name, containers or [])
+        if images:
+            pod_entry["containers"] = images
         # A failed pod of a Job that went on to complete is an earlier attempt
         # (restartPolicy Never + backoffLimit). Its own status stays above as
         # attempt detail, but it must not make the whole workload look failed.

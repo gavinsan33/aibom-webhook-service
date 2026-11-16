@@ -4283,3 +4283,22 @@ def test_compile_aibom_megatron_tp_plus_dp_is_model_parallel():
     )
     assert aibom["training"]["distributed"]["strategies"] == ["data_parallel", "tensor_parallel"]
     assert aibom["training"]["parallelization_strategy"] == "model_parallel"
+
+
+def test_pods_record_container_images():
+    # #208: each pod lists its app containers' image and digest.
+    discovery = {"pod_metadata": {"name": "p0"}}
+    containers = [
+        {"pod_name": "p0", "name": "train", "image": "quay.io/org/train:v1",
+         "image_id": "quay.io/org/train@sha256:abc", "command": ["python"]},
+        {"pod_name": "p0", "name": "istio-proxy", "image": "istio/proxyv2:1.2", "image_id": ""},
+        {"pod_name": "other", "name": "x", "image": "x:1"},
+    ]
+    pods = pp.compile_aibom(
+        discoveries=[discovery], detected_datasets=[], runtime_info={}, annotations={},
+        telemetry=None, detected_model={}, cli_dataset=None, containers=containers,
+    )["execution_metadata"]["pods"]
+    assert pods[0]["containers"] == [
+        {"name": "train", "image": "quay.io/org/train:v1", "image_id": "quay.io/org/train@sha256:abc"},
+        {"name": "istio-proxy", "image": "istio/proxyv2:1.2"},
+    ]
