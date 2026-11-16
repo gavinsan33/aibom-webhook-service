@@ -4078,9 +4078,9 @@ def compile_aibom(
             "gpu_type": gpu_type,
             "gpu_count": gpu_count,
             "cpu_model": system_info.get("cpu_model"),
-            "cpu_cores": system_info.get("cpu_count"),
+            "cpu_cores": _try_int(system_info.get("cpu_count")),
             "memory_gb": mem_gb,
-            "numa_nodes": system_info.get("numa_node_count"),
+            "numa_nodes": _try_int(system_info.get("numa_node_count")),
             "cuda_version": gpu_info.get("cuda_version"),
             "driver_version": gpu_info.get("gpu_driver_version"),
             "framework_version": fw_label,
@@ -4229,12 +4229,44 @@ def software_environment(runtime_info):
     return out
 
 
+# Discovery writes every value as a shell command's output string; these are
+# converted so readers don't have to (#209). A value that doesn't convert is
+# dropped, like an empty one.
+_DISCOVERY_INTS = {"cpu_cores_per_socket", "cpu_threads_per_core", "rdma_device_count", "primary_mtu"}
+
+
+def _block_devices(lsblk):
+    """`lsblk -nd -o NAME,SIZE` lines as [{"name", "size"}]."""
+    out = []
+    for line in lsblk.splitlines():
+        parts = line.split()
+        if len(parts) == 2:
+            out.append({"name": parts[0], "size": parts[1]})
+    return out or None
+
+
+_DISCOVERY_CONVERT = {
+    **{k: lambda v: _try_int(v) for k in _DISCOVERY_INTS},
+    "rdma_devices": lambda v: [d.strip() for d in v.split(",") if d.strip()] or None,
+    "block_devices": _block_devices,
+}
+
+
 def _discovery_details(disc):
     """Extra environment sections from one discovery snapshot; empty/'N/A' values dropped."""
     out = {}
     for name, (section, keys) in _DISCOVERY_DETAILS.items():
         src = disc.get(section) or {}
-        vals = {k: src[k] for k in keys if src.get(k) not in (None, "", "N/A", "None")}
+        vals = {}
+        for k in keys:
+            v = src.get(k)
+            if v in (None, "", "N/A", "None"):
+                continue
+            if k in _DISCOVERY_CONVERT:
+                v = _DISCOVERY_CONVERT[k](str(v))
+                if v is None:
+                    continue
+            vals[k] = v
         if vals:
             out[name] = vals
     # One entry per GPU, so all or nothing: dropping an unknown entry (an AMD

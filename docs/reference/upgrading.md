@@ -21,6 +21,10 @@ Existing AIBOMs are not changed by any of this.
 
 The `AIBOM` CRD's short name changed from `aibom` to `aibomrun`, and the `AIBOMTelemetry` CRD no longer declares the `aibom` category, so the project no longer claims [k8s-aibom](https://github.com/GoogleCloudPlatform/k8s-aibom)'s short name. The category was also why `oc get aibom` listed `AIBOMTelemetry` objects rather than AIBOMs: kubectl expands a category before it looks up a short name. Both changes take effect once the CRDs are re-applied (step 1 above). After that, `oc get aibom` fails unless k8s-aibom is installed, so update scripts to `oc get aibomrun` or `oc get aiboms.aibom.io`. The CLI was renamed at the same time and is now `oc aibomrun`; reinstall it as described in its docs.
 
+## Typed `environment` values
+
+`environment.cpu_cores`, `numa_nodes`, `cpu.cpu_cores_per_socket`, `cpu.cpu_threads_per_core`, `network.rdma_device_count` and `network.primary_mtu` are now numbers, `network.rdma_devices` is a list of device names, and `storage.block_devices` is a list of `{name, size}` objects. AIBOMs created before the upgrade keep the strings (`"512"`, `"mlx5_0,mlx5_1"`, raw `lsblk` output), so a script reading both should accept either form. Update `oc aibomrun` and the console plugin to versions that display both.
+
 ## Long workload names
 
 A workload name longer than 39 characters now gets a short hash in its data ConfigMap and per-job identity names, so two long names that share a prefix (KServe replicas of one predictor, `<experiment>-run-1` and `-run-2`) no longer share them. Names of 39 characters or fewer are unchanged.

@@ -1491,8 +1491,8 @@ def test_compile_aibom_surfaces_extra_discovery_and_vllm_fields():
     env = aibom["environment"]
     assert env["cpu"] == {"cpu_architecture": "x86_64"}  # N/A dropped, L2 not surfaced
     assert env["gpu_memory_mb"] == [81920, 81920]
-    assert env["network"] == {"primary_mtu": "1400"}  # "None" dropped, TCP tuning not surfaced
-    assert env["storage"] == {"block_devices": "nvme0n1 894G"}
+    assert env["network"] == {"primary_mtu": 1400}  # "None" dropped, TCP tuning not surfaced
+    assert env["storage"] == {"block_devices": [{"name": "nvme0n1", "size": "894G"}]}
     assert env["kernel_config"] == {"cpu_governor": "performance"}  # swappiness not surfaced
     assert "process_limits" not in env and "benchmarks" not in env
     inf = aibom["inference"]
@@ -4283,6 +4283,25 @@ def test_compile_aibom_megatron_tp_plus_dp_is_model_parallel():
     )
     assert aibom["training"]["distributed"]["strategies"] == ["data_parallel", "tensor_parallel"]
     assert aibom["training"]["parallelization_strategy"] == "model_parallel"
+
+
+def test_environment_numbers_and_lists_are_typed():
+    # #209: discovery writes shell output strings; readers get numbers and lists.
+    discovery = {
+        "system": {"cpu_count": "512", "numa_node_count": "8", "cpu_cores_per_socket": "64",
+                   "cpu_threads_per_core": "2"},
+        "network": {"rdma_devices": "mlx5_0,mlx5_1", "rdma_device_count": "2", "primary_mtu": "abc"},
+        "storage": {"block_devices": "nvme0n1 894.3G\nnvme1n1     7T\n"},
+    }
+    env = pp.compile_aibom(
+        discoveries=[discovery], detected_datasets=[], runtime_info={}, annotations={},
+        telemetry=None, detected_model={}, cli_dataset=None,
+    )["environment"]
+    assert (env["cpu_cores"], env["numa_nodes"]) == (512, 8)
+    assert env["cpu"] == {"cpu_cores_per_socket": 64, "cpu_threads_per_core": 2}
+    assert env["network"] == {"rdma_devices": ["mlx5_0", "mlx5_1"], "rdma_device_count": 2}  # bad MTU dropped
+    assert env["storage"]["block_devices"] == [{"name": "nvme0n1", "size": "894.3G"},
+                                               {"name": "nvme1n1", "size": "7T"}]
 
 
 def test_pods_record_container_images():
