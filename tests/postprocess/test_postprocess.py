@@ -777,6 +777,35 @@ def test_compile_aibom_counts_every_concurrent_gpu_pod(monkeypatch):
     assert env["gpu_memory_mb"] == [81559] * 32
     assert env["gpu_type"] == "H100" and env["cpu_model"] == "w0"  # a GPU node's, not the client's
     assert dcgm_calls == ["w0"]  # no DCGM for the first pod: the others aren't queried
+    assert [p.get("gpu_count") for p in aibom["execution_metadata"]["pods"]] == [0, 8, 8, 8, 8]
+
+
+def test_compile_aibom_counts_pods_that_never_finished_as_running(monkeypatch):
+    # A Job deleted while running: no finished_at anywhere, so both pods run
+    # until collection and both count.
+    monkeypatch.setattr(pp, "_dcgm_gpu_hardware", lambda pod: {})
+    pods = [_gpu_pod(f"w{i}", f"gpu-{i}", "2026-01-01T00:00:00", None) for i in range(2)]
+    for _, c in pods:
+        del c["finished_at"]
+    aibom = pp.compile_aibom(
+        discoveries=[d for d, _ in pods], detected_datasets=[], runtime_info={}, annotations={},
+        telemetry=None, containers=[c for _, c in pods],
+    )
+    assert aibom["environment"]["gpu_count"] == 16
+
+
+def test_compile_aibom_pod_without_start_time_is_assumed_concurrent(monkeypatch):
+    # No start time means no way to tell a retry from a parallel pod; it's
+    # counted as overlapping everything rather than dropped.
+    monkeypatch.setattr(pp, "_dcgm_gpu_hardware", lambda pod: {})
+    a0 = _gpu_pod("a0", "gpu-0", "2026-01-01T00:00:00", "2026-01-01T00:10:00Z")
+    a1 = _gpu_pod("a1", "gpu-1", None, "2026-01-01T00:20:00Z")
+    del a1[0]["pod_metadata"]["start_time"]
+    aibom = pp.compile_aibom(
+        discoveries=[a0[0], a1[0]], detected_datasets=[], runtime_info={}, annotations={},
+        telemetry=None, containers=[a0[1], a1[1]],
+    )
+    assert aibom["environment"]["gpu_count"] == 16
 
 
 def test_compile_aibom_does_not_add_up_sequential_retries(monkeypatch):

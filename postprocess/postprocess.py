@@ -3108,10 +3108,7 @@ def _concurrent_gpu_pods(pods, discoveries, containers, now_s):
     pod is described by its last attempt."""
     spans = []
     for pod, disc in zip(pods, discoveries):  # compile_aibom builds pods[] 1:1 from discoveries
-        name = pod.get("pod_name")
-        n = pod_gpu_count(name, containers)
-        if n is None:
-            n = _try_int(safe_get(disc, "gpu", "gpu_count"))
+        name, n = pod.get("pod_name"), pod.get("gpu_count")
         if not n:
             continue
         try:
@@ -3707,6 +3704,13 @@ def compile_aibom(
             "exit_code": exit_code,
         }
         pod_entry.update(pod_restart_info(pod_name, containers or []))
+        # The pod's own claim, else what its discovery saw, so a reader can
+        # see how environment.gpu_count adds up (4 pods x 8 = 32).
+        pod_gpus = pod_gpu_count(pod_name, containers)
+        if pod_gpus is None:
+            pod_gpus = _try_int(safe_get(discovery, "gpu", "gpu_count"))
+        if pod_gpus is not None:
+            pod_entry["gpu_count"] = pod_gpus
         serving_role = pod_serving_role(pod_name, containers or [])
         if serving_role:
             pod_entry["serving_role"] = serving_role
