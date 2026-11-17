@@ -453,7 +453,7 @@ VLLM_SERIES_QUERIES = SERVING_SERIES_QUERIES["vllm"]
 SERIES_SCHEMA_VERSION = 1
 SERIES_OBJECT_KIND = "AIBOMTelemetry"
 SERIES_API_GROUP = "aibom.io"
-SERIES_API_VERSION = "v1alpha1"
+SERIES_API_VERSION = "v1"
 SERIES_PLURAL = "aibomtelemetries"
 # Roughly the number of points kept per metric (the query step is derived from it).
 SERIES_TARGET_POINTS = int(os.environ.get("AIBOM_SERIES_TARGET_POINTS", "200"))
@@ -4512,7 +4512,7 @@ def main():
             series_object_name = series_ref["name"]
             print(f"  Stored telemetry series in {SERIES_OBJECT_KIND}/{series_object_name} ({series_ref['size_bytes']} bytes)")
     aibom_cr = {
-        "apiVersion": "aibom.io/v1alpha1",
+        "apiVersion": "aibom.io/v1",
         "kind": "AIBOM",
         "metadata": {
             "generateName": f"{JOB_NAME}-",
@@ -4555,7 +4555,7 @@ def main():
     else:
         print("  Skipped signing (no AIBOM_SIGNING_KEY_PATH configured for this namespace)")
     try:
-        created = k8s_api.create_custom_object(JOB_NAMESPACE, "aibom.io", "v1alpha1", "aiboms", aibom_cr)
+        created = k8s_api.create_custom_object(JOB_NAMESPACE, "aibom.io", "v1", "aiboms", aibom_cr)
     except Exception as e:
         print(f"ERROR: could not create AIBOM custom resource: {e}", file=sys.stderr)
         if series_object_name:
@@ -4581,7 +4581,7 @@ def main():
                 SERIES_PLURAL,
                 series_object_name,
                 {
-                    "apiVersion": "aibom.io/v1alpha1",
+                    "apiVersion": "aibom.io/v1",
                     "kind": "AIBOM",
                     "name": created_meta["name"],
                     "uid": created_meta["uid"],

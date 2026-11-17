@@ -3001,10 +3001,10 @@ def test_publish_series_object_creates_aibomtelemetry_and_returns_ref(monkeypatc
     ref = pp.publish_series_object(encoded)
 
     assert (created["ns"], created["group"], created["version"], created["plural"]) == (
-        "ns", "aibom.io", "v1alpha1", "aibomtelemetries",
+        "ns", "aibom.io", "v1", "aibomtelemetries",
     )
     body = created["body"]
-    assert body["apiVersion"] == "aibom.io/v1alpha1" and body["kind"] == "AIBOMTelemetry"
+    assert body["apiVersion"] == "aibom.io/v1" and body["kind"] == "AIBOMTelemetry"
     assert body["metadata"]["name"].startswith("train-job-telemetry-")
     assert body["metadata"]["namespace"] == "ns"
     assert body["metadata"]["labels"] == {"aibom.io/job-name": "train-job"}
@@ -3094,7 +3094,7 @@ def test_main_stores_series_object_signs_its_digest_and_owns_it_to_the_aibom(mai
     _, _, owned_name, owner = calls[2]
     assert owned_name == telemetry_name
     assert owner == {
-        "apiVersion": "aibom.io/v1alpha1", "kind": "AIBOM", "name": "train-job-abc12",
+        "apiVersion": "aibom.io/v1", "kind": "AIBOM", "name": "train-job-abc12",
         "uid": "aibom-uid", "blockOwnerDeletion": True,
     }
 

@@ -37,7 +37,7 @@ spec:
           urllib.request.urlopen("https://{{ include "aibom-webhook.serviceDNSName" . }}/healthz",
                                  context=ssl._create_unverified_context(), timeout=10)
           print("webhook /healthz: ok")
-          req = urllib.request.Request("https://kubernetes.default.svc/apis/aibom.io/v1alpha1",
+          req = urllib.request.Request("https://kubernetes.default.svc/apis/aibom.io/v1",
                                        headers={"Authorization": "Bearer " + open(sa + "/token").read()})
           ctx = ssl.create_default_context(cafile=sa + "/ca.crt")
           served = {r["name"] for r in json.load(urllib.request.urlopen(req, context=ctx, timeout=10))["resources"]}

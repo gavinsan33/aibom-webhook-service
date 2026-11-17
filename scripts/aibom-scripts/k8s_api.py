@@ -101,7 +101,7 @@ def patch_configmap(namespace, name, data_updates):
 
 
 def create_custom_object(namespace, group, version, plural, body):
-    """POST a namespaced custom resource, e.g. an AIBOM (aibom.io/v1alpha1)."""
+    """POST a namespaced custom resource, e.g. an AIBOM (aibom.io/v1)."""
     path = f"/apis/{group}/{version}/namespaces/{namespace}/{plural}"
     return _request("POST", path, body=body)
 
