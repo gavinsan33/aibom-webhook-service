@@ -4253,14 +4253,15 @@ _DISCOVERY_CONVERT = {
 
 
 def _discovery_details(disc):
-    """Extra environment sections from one discovery snapshot; empty/'N/A' values dropped."""
+    """Extra environment sections from one discovery snapshot; empty, 'N/A' and
+    run_cmd's 'Not available' (any failed command) values dropped."""
     out = {}
     for name, (section, keys) in _DISCOVERY_DETAILS.items():
         src = disc.get(section) or {}
         vals = {}
         for k in keys:
             v = src.get(k)
-            if v in (None, "", "N/A", "None"):
+            if v in (None, "", "N/A", "None", "Not available"):
                 continue
             if k in _DISCOVERY_CONVERT:
                 v = _DISCOVERY_CONVERT[k](str(v))
@@ -4272,28 +4273,33 @@ def _discovery_details(disc):
     # One entry per GPU, so all or nothing: dropping an unknown entry (an AMD
     # partition's N/A, nvidia-smi's [N/A]) would shift the rest onto the
     # wrong devices.
-    mem = [_try_float(m) for m in str(safe_get(disc, "gpu", "gpu_memory_per_device_mb", default="")).split()]
+    mem = [_try_int(_try_float(m)) for m in str(safe_get(disc, "gpu", "gpu_memory_per_device_mb", default="")).split()]
     if mem and None not in mem:
-        out["gpu_memory_mb"] = [int(m) for m in mem]
+        out["gpu_memory_mb"] = mem
     return out
 
 
 def _try_int(value):
+    """int(value), or None if it doesn't convert or is past 2^53, which JCS
+    can't canonicalize (the AIBOM would publish unsigned)."""
     if value is None:
         return None
     try:
-        return int(value)
-    except (ValueError, TypeError):
+        n = int(value)
+    except (ValueError, TypeError, OverflowError):
         return None
+    return n if abs(n) <= 2 ** 53 - 1 else None
 
 
 def _try_float(value):
+    """float(value), or None if it doesn't convert or isn't finite."""
     if value is None:
         return None
     try:
-        return float(value)
+        f = float(value)
     except (ValueError, TypeError):
         return None
+    return f if math.isfinite(f) else None
 
 
 def _first_not_none(*values):

@@ -16,7 +16,7 @@ Any field can also be set directly via an `aibom.io/*` annotation, which overrid
 
 Captured once per pod by the discovery init container into `discovery-<pod>.json`, HMAC-signed with a per-namespace key (see [Signing Keys](reference/signing.md)).
 
-**Surfacing note**: `postprocess.py` copies only the rows marked ✅ *surfaced* into `environment.*`. Rows marked ⚠️ *captured only* are still written to `discovery-<pod>.json` but never reach the final `AIBOM`: that file lives in the per-workload data ConfigMap, which is deleted once the postprocess Job succeeds. They're left out because they are node-level tuning, point-in-time readings, or wrong from inside a container. Values of `N/A`/empty are omitted from the AIBOM. Counts and the MTU are numbers, and the RDMA device and block device listings are lists (#209); AIBOMs created before that have them as strings.
+**Surfacing note**: `postprocess.py` copies only the rows marked ✅ *surfaced* into `environment.*`. Rows marked ⚠️ *captured only* are still written to `discovery-<pod>.json` but never reach the final `AIBOM`: that file lives in the per-workload data ConfigMap, which is deleted once the postprocess Job succeeds. They're left out because they are node-level tuning, point-in-time readings, or wrong from inside a container. Values of `N/A`/empty, and `Not available` (the command failed), are omitted from the AIBOM, as are numbers that don't convert or are past 2^53. Counts and the MTU are numbers, and the RDMA device and block device listings are lists (#209); AIBOMs created before that have them as strings.
 
 **CPU / memory / kernel**
 

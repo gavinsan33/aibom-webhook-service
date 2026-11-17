@@ -1343,6 +1343,12 @@ def test_try_int_and_float():
     assert pp._try_int(None) is None
     assert pp._try_float("0.5") == 0.5
     assert pp._try_float("nope") is None
+    # Past 2^53 JCS can't sign the AIBOM; inf/nan aren't JSON.
+    assert pp._try_int(str(2 ** 53)) is None
+    assert pp._try_int(2 ** 53 - 1) == 2 ** 53 - 1
+    assert pp._try_int(float("inf")) is None
+    assert pp._try_float("inf") is None
+    assert pp._try_float("nan") is None
 
 
 def test_first_not_none():
@@ -4302,6 +4308,15 @@ def test_environment_numbers_and_lists_are_typed():
     assert env["network"] == {"rdma_devices": ["mlx5_0", "mlx5_1"], "rdma_device_count": 2}  # bad MTU dropped
     assert env["storage"]["block_devices"] == [{"name": "nvme0n1", "size": "894.3G"},
                                                {"name": "nvme1n1", "size": "7T"}]
+
+
+def test_discovery_failed_commands_are_dropped():
+    # run_cmd returns "Not available" on any failure (lsblk | grep -v loop on a
+    # loop-only node); it mustn't parse into [{"name": "Not", ...}].
+    disc = {"storage": {"block_devices": "Not available"},
+            "network": {"rdma_devices": "Not available", "primary_mtu": str(2 ** 60)},
+            "gpu": {"gpu_memory_per_device_mb": "1e300 80"}}
+    assert pp._discovery_details(disc) == {}
 
 
 def test_pods_record_container_images():
