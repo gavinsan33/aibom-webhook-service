@@ -412,7 +412,7 @@
           "hashes": [
             {
               "alg": "SHA-256",
-              "content": "dd37ca8a7a991dd92c414045390738607c62847e8858e567585c64fbd666b4a4"
+              "content": "017896c12adbd9b39bf882791e475c1a45bd1462b9f6344ede81359d87fa3c89"
             }
           ],
           "comment": "the signed AIBOM record this document was derived from; Ed25519 over its RFC 8785 canonical form"
@@ -641,7 +641,7 @@
         },
         {
           "name": "aibomrun:node:storage:blockDevices",
-          "value": "[\"nvme0n1 894.3G\",\"nvme1n1 7T\"]"
+          "value": "[{\"name\":\"nvme0n1\",\"size\":\"894.3G\"},{\"name\":\"nvme1n1\",\"size\":\"7T\"}]"
         },
         {
           "name": "aibomrun:node:kernel:cpuGovernor",
@@ -749,6 +749,7 @@
       "bom-ref": "runtime:vllm",
       "type": "application",
       "name": "vllm",
+      "version": "0.17.1+a03ca76a.nv26.3.46967107.cu132",
       "properties": [
         {
           "name": "aibomrun:runtime:name",
@@ -878,8 +879,7 @@
           "name": "aibomrun:inference:telemetry:summaryIncludesColdStart",
           "value": "false"
         }
-      ],
-      "version": "0.17.1+a03ca76a.nv26.3.46967107.cu132"
+      ]
     }
   ],
   "dependencies": [
