@@ -1193,7 +1193,7 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 		// ContainerStatuses, not Spec.Containers -- Spec only has the mutable tag the
 		// pod was created with. Git-provenance detection in postprocess.py keys off
 		// this digest specifically so a re-tagged image can't spoof the commit labels
-		// baked onto the original build (see CLAUDE.md's git provenance section).
+		// baked onto the original build (see IMPLEMENTATION_NOTES.md's git provenance section).
 		imageIDs := make(map[string]string, len(pod.Status.ContainerStatuses))
 		terminatedReasons := make(map[string]string, len(pod.Status.ContainerStatuses))
 		exitCodes := make(map[string]int32, len(pod.Status.ContainerStatuses))
@@ -1365,6 +1365,8 @@ func (w *Watcher) createPostprocessJobCore(ctx context.Context, namespace, trigg
 							Env: []corev1.EnvVar{
 								{Name: "AIBOM_JOB_NAME", Value: triggerName},
 								{Name: "AIBOM_JOB_NAMESPACE", Value: namespace},
+								{Name: "AIBOM_TRIGGER_KIND", Value: triggerKind},
+								{Name: "AIBOM_TRIGGER_UID", Value: string(triggerUID)},
 								{Name: "AIBOM_INPUT_DIR", Value: "/data/input"},
 								{Name: "PROMETHEUS_URL", Value: w.prometheusURL},
 								{Name: "AIBOM_DEBUG_TELEMETRY_ALL_PODS", Value: strconv.FormatBool(w.debugTelemetryAllPods)},

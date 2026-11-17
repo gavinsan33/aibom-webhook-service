@@ -32,6 +32,9 @@ import k8s_api
 INPUT_DIR = os.environ.get("AIBOM_INPUT_DIR", "/data/input")
 JOB_NAME = os.environ.get("AIBOM_JOB_NAME", "")
 JOB_NAMESPACE = os.environ.get("AIBOM_JOB_NAMESPACE", "")
+# The Job or bare Pod this AIBOM is for; the UID tells same-named reruns apart.
+TRIGGER_KIND = os.environ.get("AIBOM_TRIGGER_KIND") or None
+TRIGGER_UID = os.environ.get("AIBOM_TRIGGER_UID") or None
 PROMETHEUS_URL = os.environ.get("PROMETHEUS_URL", "")
 
 # Auth is always automatic, never configured per-query: the postprocess Job's own
@@ -3799,6 +3802,7 @@ def compile_aibom(
     aibom["execution_metadata"] = {
         "job_id": JOB_NAME,
         "namespace": JOB_NAMESPACE,
+        "trigger": {"kind": TRIGGER_KIND, "uid": TRIGGER_UID} if TRIGGER_UID else None,
         "pods": pods,
         "duration_seconds": duration_seconds,
         "status": status,

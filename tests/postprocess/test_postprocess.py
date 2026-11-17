@@ -1769,6 +1769,17 @@ def test_compile_aibom_no_telemetry_notes_unavailable():
     assert aibom["resource_utilization"] == {"note": "No telemetry data available."}
 
 
+def test_compile_aibom_records_trigger(monkeypatch):
+    monkeypatch.setattr(pp, "TRIGGER_KIND", "Job")
+    monkeypatch.setattr(pp, "TRIGGER_UID", "abc-123")
+    aibom = pp.compile_aibom(
+        discoveries=[{"pod_metadata": {"name": "p1"}}], detected_datasets=[],
+        runtime_info={}, annotations={}, telemetry=None,
+    )
+    em = aibom["execution_metadata"]
+    assert em["trigger"] == {"kind": "Job", "uid": "abc-123"}
+
+
 def test_parse_start_utc_accepts_discovery_utc_offset():
     # generate_snapshot.py writes UTC with a Z suffix.
     dt = pp._parse_start_utc("2026-01-01T00:00:00.123456Z")
