@@ -15,7 +15,7 @@ rules:
   # a compromised postprocess could erase any other run's series in this
   # namespace, and unlike aiboms (create/get only) that would widen what this
   # identity can destroy. The cost is that an object created just before a
-  # failed AIBOM create is orphaned rather than cleaned up (see CLAUDE.md's
+  # failed AIBOM create is orphaned rather than cleaned up (see IMPLEMENTATION_NOTES.md's
   # Telemetry Time Series). Deliberately a custom kind, not a ConfigMap: no
   # other ServiceAccount in the namespace is granted it (unlike
   # aibom-workload-data below), so a workload pod can't forge or overwrite a

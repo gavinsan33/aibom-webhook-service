@@ -14,7 +14,7 @@ it's only terminated after they exit.
 That separation is the point: the discovery signing key for
 discovery-<pod-name>.json/storage-<pod-name>.json is never mounted into the
 app container specifically so it can't produce a validly-signed forgery of
-its own hardware/storage claims (see CLAUDE.md's Discovery Data Signing
+its own hardware/storage claims (see IMPLEMENTATION_NOTES.md's Discovery Data Signing
 section). The same protection didn't previously exist for
 dataset-<pod-name>.json, since the app container itself performed that
 ConfigMap write using whatever credentials it held. Moving the write (and
@@ -65,7 +65,7 @@ def _handle_sigterm(signum, frame):
     _dbg("received SIGTERM, will do one final pass before exiting")
 
 
-# PID 1 drops unhandled signals: install before the slow imports below (see CLAUDE.md).
+# PID 1 drops unhandled signals: install before the slow imports below (see IMPLEMENTATION_NOTES.md).
 if __name__ == "__main__":
     signal.signal(signal.SIGTERM, _handle_sigterm)
 

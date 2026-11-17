@@ -1,5 +1,5 @@
 {{- if .Values.finalizerCleanup.enabled }}
-# Strips our finalizers on uninstall; see CLAUDE.md "Stale Finalizers" (#104).
+# Strips our finalizers on uninstall; see IMPLEMENTATION_NOTES.md "Stale Finalizers" (#104).
 apiVersion: v1
 kind: ServiceAccount
 metadata:

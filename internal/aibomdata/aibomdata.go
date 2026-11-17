@@ -123,7 +123,7 @@ const (
 
 	// CompiledSigningPublicKeyConfigMapName is the cluster-side anchor
 	// postprocess.py publishes the compiled-AIBOM Ed25519 public key to
-	// (see sign_aibom / CLAUDE.md's Compiled AIBOM Signing), so a verifier
+	// (see sign_aibom / IMPLEMENTATION_NOTES.md's Compiled AIBOM Signing), so a verifier
 	// (oc-aibom) checking an AIBOM's embedded signaturePublicKey has
 	// something to cross-check it against beyond trusting whatever key a
 	// given document claims for itself. ValidateSigningPublicKeyConfigMap

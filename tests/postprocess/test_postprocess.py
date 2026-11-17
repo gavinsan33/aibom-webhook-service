@@ -2595,7 +2595,7 @@ def test_sign_aibom_signature_survives_json_round_trip(monkeypatch, tmp_path):
     or `kubectl get -o json` later). If re-canonicalizing *that*
     round-tripped object didn't reproduce the exact bytes that were signed,
     verification would spuriously fail for every AIBOM, not just tampered
-    ones. See CLAUDE.md's Compiled AIBOM Signing section.
+    ones. See IMPLEMENTATION_NOTES.md's Compiled AIBOM Signing section.
     """
     import rfc8785
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey

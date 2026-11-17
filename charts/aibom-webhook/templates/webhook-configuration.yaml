@@ -41,7 +41,7 @@ webhooks:
       # ConfigMap create/update is also intercepted so
       # aibom-compiled-signing-public-key -- the cluster-side anchor
       # oc-aibom cross-checks a compiled AIBOM's embedded signing key
-      # against, see CLAUDE.md's Compiled AIBOM Signing -- can only ever be
+      # against, see IMPLEMENTATION_NOTES.md's Compiled AIBOM Signing -- can only ever be
       # written by the aibom-postprocess ServiceAccount that's actually
       # supposed to publish it. Without this, rbac.yaml's broad
       # aibom-workload-data Role (bound to every ServiceAccount in the
