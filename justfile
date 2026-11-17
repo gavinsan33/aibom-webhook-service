@@ -601,8 +601,7 @@ uninstall-namespace *args: _check-auth
 # X.Y.Z with appVersion X.Y.Z, so their images default to :X.Y.Z -- the tags
 # .github/workflows/release.yml builds from the same git tag. Refuses a version
 # that's already published: a release is pushed once.
-# --out keeps the packages, which release.yml also adds to the Helm repo on
-# GitHub Pages.
+# --out keeps the packages, which release.yml attaches to the GitHub release.
 # Usage: just chart-push [--version=X.Y.Z] [--repo=<repo>] [--out=<dir>]
 [group('charts')]
 chart-push *args:
