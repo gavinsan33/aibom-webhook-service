@@ -26,6 +26,7 @@ nav:
   - Home: index.md
   - User Guide:
       - Getting Started: user-guide/getting-started.md
+      - Installing with Argo CD: user-guide/argocd.md
       - Annotations: user-guide/annotations.md
       - Troubleshooting: user-guide/troubleshooting.md
   - Reference:

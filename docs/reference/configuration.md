@@ -55,6 +55,7 @@ Set chart values with `--set key=value` or `-f values.yaml` on `helm upgrade --i
 | `platform` | `auto` | As in the webhook chart. On OpenShift this chart also creates the image-puller RoleBinding. |
 | `aibomSystemNamespace` | `project-aibom` | The namespace the webhook chart was installed into. The Roles that let its watcher and the `aibom-postprocess` ServiceAccount act in this namespace are bound to ServiceAccounts there, and on OpenShift the image-puller RoleBinding is created there. |
 | `vllmMetrics.enabled` | `true` | Adds a `PodMonitor` scraping vLLM's `/metrics` on port 8000 for instrumented pods. Needs the Prometheus Operator CRDs, or the install fails. Set `false` without them. Inference metrics also need the webhook chart's `monitoringAccess.enabled`. |
+| `signing.createKeys` | `true` | Generates the discovery and dataset HMAC key Secrets. Set `false` for offline renders such as Argo CD, which would replace them on every sync; the webhook then creates any missing key at pod admission. |
 | `scripts.generateSnapshot`, `.runtimeDetector`, `.k8sApi`, `.datasetSidecar` | `""` | Only for installing from a checkout, where `--set-file` reads the scripts from `scripts/aibom-scripts/`. Leave unset for an OCI install, which embeds them. |
 
 ## Server flags

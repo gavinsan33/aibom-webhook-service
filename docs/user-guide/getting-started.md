@@ -49,6 +49,8 @@ The chart installs cluster-scoped RBAC, which a namespace-scoped admin cannot gr
 
 Without `--version`, Helm installs the newest release. Pass `--version=X.Y.Z` to pin one, or `--version=<version>-<git-sha>` for a dev build from `main` (see [Upgrading](../reference/upgrading.md#versions)).
 
+To manage both charts from Argo CD or OpenShift GitOps instead, see [Installing with Argo CD](argocd.md).
+
 ## Install from the OpenShift console
 
 Both charts are listed in the OpenShift Helm catalog as community charts, so they appear under Developer Catalog → Helm Charts on any cluster that keeps the default `openshift-helm-charts` repository. Each chart's form is built from its values. Install the webhook chart once, as a cluster-admin, then the namespace chart in each namespace that runs workloads, still after labeling the namespace with `oc label`. The catalog lists a release once its maintainers approve it, usually within a day or so; until then, install it with `helm` as above. Upgrades are not automatic: the Helm release's Upgrade action installs a newer version, and the CRDs still need the separate apply described in [Upgrading](../reference/upgrading.md).

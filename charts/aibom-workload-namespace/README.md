@@ -18,5 +18,6 @@ helm upgrade --install aibom-ns-<namespace> oci://quay.io/project-aibom/aibom-wo
 
 - Set `aibomSystemNamespace` if the webhook chart isn't in `project-aibom`.
 - Set `vllmMetrics.enabled=false` on a cluster without the Prometheus Operator, or the install fails on the PodMonitor.
+- When rendering offline (Argo CD, `helm template`), set `platform` and `signing.createKeys=false`. The chart can't see the existing HMAC keys then and would replace them on every sync. With it off, the webhook creates any missing key when it admits the namespace's first instrumented pod.
 
 Run `helm test aibom-ns-<namespace> -n <namespace>` to check the scripts are in place. Upgrade the namespace chart whenever you upgrade the webhook chart: a stale `aibom-scripts` ConfigMap can stop instrumented pods from starting.

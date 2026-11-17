@@ -21,6 +21,13 @@ platform: auto
 vllmMetrics:
   enabled: true
 
+# Generate the discovery and dataset HMAC key Secrets in this chart. Set to
+# false when rendering offline (Argo CD, helm template), where the chart can't
+# see an existing key and would replace it on every sync; the webhook creates
+# any missing key when it admits the namespace's first pod instead.
+signing:
+  createKeys: true
+
 # Only needed for a local install from a checked-out repo (`just setup-namespace`
 # sets these via --set-file, reading straight from scripts/aibom-scripts/*.py, so
 # script edits take effect on the very next install). Leave unset for an OCI

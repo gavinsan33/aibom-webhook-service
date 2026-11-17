@@ -2,6 +2,8 @@ package webhook
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"time"
 
@@ -186,4 +188,33 @@ func ensureTokenSecret(ctx context.Context, clientset kubernetes.Interface, name
 		return nil
 	}
 	return err
+}
+
+// ensureSigningKeys creates the namespace's discovery and dataset HMAC key
+// Secrets when they're missing, and never touches existing ones. The
+// workload-namespace chart can create them too (signing.createKeys), but its
+// lookup-based "keep the existing key" sees nothing under an offline render
+// such as Argo CD's, so every sync would rotate the keys and drop data signed
+// by pods already running. Doing it here, at admission, means the key exists
+// before the pod that mounts it starts.
+func ensureSigningKeys(ctx context.Context, clientset kubernetes.Interface, namespace string) error {
+	for _, k := range []struct{ name, field string }{
+		{aibomdata.DiscoverySigningKeySecretName, aibomdata.DiscoverySigningKeyDataKey},
+		{aibomdata.DatasetSigningKeySecretName, aibomdata.DatasetSigningKeyDataKey},
+	} {
+		key := make([]byte, 32)
+		if _, err := rand.Read(key); err != nil {
+			return err
+		}
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: k.name, Namespace: namespace},
+			Type:       corev1.SecretTypeOpaque,
+			Data:       map[string][]byte{k.field: []byte(hex.EncodeToString(key))},
+		}
+		_, err := clientset.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{})
+		if err != nil && !apierrors.IsAlreadyExists(err) {
+			return fmt.Errorf("create %s/%s: %w", namespace, k.name, err)
+		}
+	}
+	return nil
 }
