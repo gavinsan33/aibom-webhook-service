@@ -35,6 +35,8 @@ JOB_NAMESPACE = os.environ.get("AIBOM_JOB_NAMESPACE", "")
 # The Job or bare Pod this AIBOM is for; the UID tells same-named reruns apart.
 TRIGGER_KIND = os.environ.get("AIBOM_TRIGGER_KIND") or None
 TRIGGER_UID = os.environ.get("AIBOM_TRIGGER_UID") or None
+# The release or commit this image was built from (postprocess/Dockerfile).
+GENERATOR_VERSION = os.environ.get("AIBOM_GENERATOR_VERSION") or None
 PROMETHEUS_URL = os.environ.get("PROMETHEUS_URL", "")
 
 # Auth is always automatic, never configured per-query: the postprocess Job's own
@@ -4170,6 +4172,7 @@ def compile_aibom(
         "aibom_version": "0.1.0",
         "generated_at": generated_at,
         "generator": "aibom-webhook postprocess",
+        "generator_version": GENERATOR_VERSION,
     }
 
     return aibom

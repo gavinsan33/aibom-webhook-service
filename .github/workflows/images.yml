@@ -42,6 +42,7 @@ jobs:
         with:
           context: .
           file: ${{ matrix.file }}
+          build-args: VERSION=${{ steps.sha.outputs.sha }}
           push: true
           tags: |
             ${{ env.REGISTRY }}/${{ matrix.image }}:latest

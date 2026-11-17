@@ -1772,13 +1772,15 @@ def test_compile_aibom_no_telemetry_notes_unavailable():
 def test_compile_aibom_records_trigger_and_no_constant_metadata(monkeypatch):
     monkeypatch.setattr(pp, "TRIGGER_KIND", "Job")
     monkeypatch.setattr(pp, "TRIGGER_UID", "abc-123")
+    monkeypatch.setattr(pp, "GENERATOR_VERSION", "0.3.0")
     aibom = pp.compile_aibom(
         discoveries=[{"pod_metadata": {"name": "p1"}}], detected_datasets=[],
         runtime_info={}, annotations={}, telemetry=None,
     )
     em = aibom["execution_metadata"]
     assert em["trigger"] == {"kind": "Job", "uid": "abc-123"}
-    assert set(aibom["_metadata"]) == {"aibom_version", "generated_at", "generator"}
+    assert set(aibom["_metadata"]) == {"aibom_version", "generated_at", "generator", "generator_version"}
+    assert aibom["_metadata"]["generator_version"] == "0.3.0"
 
 
 def test_parse_start_utc_accepts_discovery_utc_offset():
