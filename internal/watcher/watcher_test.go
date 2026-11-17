@@ -963,6 +963,23 @@ func TestVerifyDiscoverySignature_EmptySignatureFails(t *testing.T) {
 	}
 }
 
+// A key Secret made with --from-file ends in a newline the Python signers
+// strip; the verifier has to read it the same way (#115).
+func TestSigningKeyBytesMatchesPythonStrip(t *testing.T) {
+	payload := `{"gpu":{"gpu_count":"2"}}`
+	sig := hmacHex(t, []byte("test-key"), payload) // what generate_snapshot.py signs with
+	data := map[string][]byte{"hmac-key": []byte("test-key\n")}
+	if !verifySignature(signingKeyBytes(data, "hmac-key"), payload, sig) {
+		t.Error("key with a trailing newline should verify a signature made with the stripped key")
+	}
+	if signingKeyBytes(data, "missing") != nil {
+		t.Error("absent field should be nil (no key configured)")
+	}
+	if k := signingKeyBytes(map[string][]byte{"hmac-key": []byte("\n")}, "hmac-key"); k == nil {
+		t.Error("present but blank field should stay non-nil, so data is still checked")
+	}
+}
+
 // TestPostprocessDropsForgedDiscoveryData is the core regression test for
 // #30/#29: a pod whose discovery-<pod>.json was overwritten by something
 // other than the discovery init container (no valid matching .sig, since
@@ -1664,6 +1681,27 @@ func TestJobNameTruncation(t *testing.T) {
 	}
 	if len(dashResult) > maxJobNameLength {
 		t.Errorf("postprocess job name length %d exceeds max %d", len(dashResult), maxJobNameLength)
+	}
+}
+
+// A long-named pod admitted before #130 wrote to the unhashed ConfigMap name;
+// its data must still be read after the upgrade, and only its own keys.
+func TestBuildPostprocessInputs_ReadsPre130ConfigMapName(t *testing.T) {
+	job := "granite-lora-finetune-experiment-a-run-1"
+	pod := instrumentedPod(job, "ns")
+	legacy := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: aibomdata.LegacyConfigMapName(job), Namespace: "ns"},
+		Data:       map[string]string{"discovery-" + pod.Name + ".json": `{"gpu":{"gpu_count":"1"}}`},
+	}
+	if legacy.Name == aibomdata.ConfigMapName(job) {
+		t.Fatal("test needs a name that truncates")
+	}
+	w := &Watcher{clientset: fake.NewSimpleClientset(legacy)}
+
+	discoveries, _, _, _ := w.buildPostprocessInputs(context.Background(), "ns", aibomdata.ConfigMapName(job), []corev1.Pod{*pod}, nil)
+
+	if len(discoveries) != 1 || discoveries[0] != `{"gpu":{"gpu_count":"1"}}` {
+		t.Errorf("discoveries = %q, want the pre-#130 ConfigMap's entry", discoveries)
 	}
 }
 

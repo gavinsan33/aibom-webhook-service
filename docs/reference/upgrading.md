@@ -21,6 +21,18 @@ Existing AIBOMs are not changed by any of this.
 
 The `AIBOM` CRD's short name changed from `aibom` to `aibomrun`, and the `AIBOMTelemetry` CRD no longer declares the `aibom` category, so the project no longer claims [k8s-aibom](https://github.com/GoogleCloudPlatform/k8s-aibom)'s short name. The category was also why `oc get aibom` listed `AIBOMTelemetry` objects rather than AIBOMs: kubectl expands a category before it looks up a short name. Both changes take effect once the CRDs are re-applied (step 1 above). After that, `oc get aibom` fails unless k8s-aibom is installed, so update scripts to `oc get aibomrun` or `oc get aiboms.aibom.io`. The CLI was renamed at the same time and is now `oc aibomrun`; reinstall it as described in its docs.
 
+## Long workload names
+
+A workload name longer than 39 characters now gets a short hash in its data ConfigMap and per-job identity names, so two long names that share a prefix (KServe replicas of one predictor, `<experiment>-run-1` and `-run-2`) no longer share them. Names of 39 characters or fewer are unchanged.
+
+Pods admitted before the upgrade wrote to the old, unhashed name. The watcher still reads a pod's data from there when the new ConfigMap has none for it, which also covers bare pods (KServe predictors) in namespaces whose `aibom-scripts` haven't been refreshed by step 3 yet. It never deletes by the old name, because the old name of a long workload can be the current name of another workload called exactly its first 39 characters. So each long-named workload that was running at the upgrade leaves its old data ConfigMap behind, and, for Jobs, its old identity (a ServiceAccount, Role, RoleBinding and Secret sharing one name). Once every workload that was running at upgrade time has finished and been postprocessed, any `*-aibom-postprocess-data` ConfigMap or `*-aibom-workload-identity` object created before the upgrade is safe to delete:
+
+```bash
+oc get cm,sa -n <namespace> --sort-by=.metadata.creationTimestamp | grep -E 'aibom-(postprocess-data|workload-identity)'
+oc delete cm <name> -n <namespace>
+oc delete sa,role,rolebinding,secret <identity-name> -n <namespace>
+```
+
 ## Image caching (OpenShift)
 
 On OpenShift, `cacheImages.enabled` (default `true`) creates `ImageStream`s that mirror the injected images into the cluster's internal registry, and points the injection flags at that registry. On a `helm upgrade` into this from an earlier version:

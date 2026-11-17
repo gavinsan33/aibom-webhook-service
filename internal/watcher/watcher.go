@@ -1,6 +1,7 @@
 package watcher
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/hmac"
@@ -764,7 +765,7 @@ func (w *Watcher) fetchDiscoverySigningKey(ctx context.Context, namespace string
 		}
 		return nil, err
 	}
-	return secret.Data[aibomdata.DiscoverySigningKeyDataKey], nil
+	return signingKeyBytes(secret.Data, aibomdata.DiscoverySigningKeyDataKey), nil
 }
 
 // fetchDatasetSigningKey is fetchDiscoverySigningKey's counterpart for the
@@ -780,7 +781,21 @@ func (w *Watcher) fetchDatasetSigningKey(ctx context.Context, namespace string) 
 		}
 		return nil, err
 	}
-	return secret.Data[aibomdata.DatasetSigningKeyDataKey], nil
+	return signingKeyBytes(secret.Data, aibomdata.DatasetSigningKeyDataKey), nil
+}
+
+// signingKeyBytes reads an HMAC key field trimmed exactly as the Python
+// signers read the mounted file (bytes.strip(): ASCII whitespace only), so a
+// Secret made with --from-file (a trailing newline) still verifies instead of
+// every entry being dropped (#115). A field that is present stays non-nil
+// even when empty, so it's still checked rather than treated as "no key
+// configured".
+func signingKeyBytes(data map[string][]byte, field string) []byte {
+	v, ok := data[field]
+	if !ok {
+		return nil
+	}
+	return append([]byte{}, bytes.Trim(v, " \t\n\r\v\f")...)
 }
 
 // verifySignature reports whether sigHex is a valid HMAC-SHA256 of payload
@@ -1010,18 +1025,16 @@ func mergeDatasets(datasets []string) string {
 // configMapName.
 func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configMapName string, pods []corev1.Pod, jobResults map[string]batchv1.JobCondition) (discoveries, datasets []string, containersJSON, storageJSON string) {
 	dataCMs := map[string]*corev1.ConfigMap{}
-	dataCMFor := func(pod *corev1.Pod) *corev1.ConfigMap {
-		name := configMapName
-		if job := pod.Labels["batch.kubernetes.io/job-name"]; job != "" {
-			name = aibomdata.ConfigMapName(job)
-		}
+	getCM := func(name string, logMissing bool) *corev1.ConfigMap {
 		if cm, ok := dataCMs[name]; ok {
 			return cm
 		}
 		cm, err := w.clientset.CoreV1().ConfigMaps(namespace).Get(ctx, name, metav1.GetOptions{})
 		switch {
 		case errors.IsNotFound(err):
-			log.Printf("no data configmap %s/%s; pods writing to it contribute no discovery or dataset data", namespace, name)
+			if logMissing {
+				log.Printf("no data configmap %s/%s; pods writing to it contribute no discovery or dataset data", namespace, name)
+			}
 			cm = nil
 		case err != nil:
 			log.Printf("warning: could not read data configmap %s/%s: %v", namespace, name, err)
@@ -1029,6 +1042,29 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 		}
 		dataCMs[name] = cm
 		return cm
+	}
+	dataCMFor := func(pod *corev1.Pod) *corev1.ConfigMap {
+		name := configMapName
+		if job := pod.Labels["batch.kubernetes.io/job-name"]; job != "" {
+			name = aibomdata.ConfigMapName(job)
+		}
+		return getCM(name, true)
+	}
+	// A long-named pod admitted before #130 wrote to the unhashed name; a
+	// KServe predictor can run for weeks after the upgrade, and without this
+	// its AIBOM would have no discovery data and so no telemetry. Only this
+	// pod's own keys are read, so a ConfigMap shared under the old scheme is
+	// harmless here. nil when the name was never truncated.
+	legacyCMFor := func(pod *corev1.Pod) *corev1.ConfigMap {
+		trigger := pod.Name
+		if job := pod.Labels["batch.kubernetes.io/job-name"]; job != "" {
+			trigger = job
+		}
+		name := aibomdata.LegacyConfigMapName(trigger)
+		if name == aibomdata.ConfigMapName(trigger) {
+			return nil
+		}
+		return getCM(name, false)
 	}
 
 	signingKey, err := w.fetchDiscoverySigningKey(ctx, namespace)
@@ -1043,6 +1079,14 @@ func (w *Watcher) buildPostprocessInputs(ctx context.Context, namespace, configM
 	dsByPod := make(map[string]string, len(pods))
 	for _, pod := range pods {
 		disc, discSig, ds, dsSig, storage, storageSig := extractDataFromPod(&pod, dataCMFor(&pod))
+		if disc == "" && ds == "" && storage == "" {
+			if legacy := legacyCMFor(&pod); legacy != nil {
+				disc, discSig, ds, dsSig, storage, storageSig = extractDataFromPod(&pod, legacy)
+				if disc != "" || ds != "" || storage != "" {
+					log.Printf("read data for pod %s/%s from pre-#130 configmap %s", namespace, pod.Name, legacy.Name)
+				}
+			}
+		}
 		if disc != "" && signingKey != nil && !verifySignature(signingKey, disc, discSig) {
 			log.Printf("warning: dropping unverified discovery data for pod %s/%s (missing or invalid signature)", namespace, pod.Name)
 			disc = ""
