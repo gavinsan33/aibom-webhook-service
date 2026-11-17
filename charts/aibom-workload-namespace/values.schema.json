@@ -27,6 +27,16 @@
         }
       }
     },
+    "signing": {
+      "type": "object",
+      "description": "HMAC signing keys.",
+      "properties": {
+        "createKeys": {
+          "type": "boolean",
+          "description": "Generate the HMAC key Secrets in the chart. Set false for offline renders such as Argo CD; the webhook then creates missing keys."
+        }
+      }
+    },
     "scripts": {
       "type": "object",
       "description": "Script contents, only for installing from a checkout with --set-file. Leave empty for a packaged chart, which embeds them.",
