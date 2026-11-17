@@ -4170,10 +4170,6 @@ def compile_aibom(
         "aibom_version": "0.1.0",
         "generated_at": generated_at,
         "generator": "aibom-webhook postprocess",
-        "schema_compliance": "partial - focuses on reproducibility and telemetry fields",
-        "dataset_detection": (
-            "enabled" if detected_datasets else "no datasets detected"
-        ),
     }
 
     return aibom
