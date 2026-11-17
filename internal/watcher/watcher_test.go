@@ -375,6 +375,9 @@ func TestOnJobEvent_CreatesPostprocessJob(t *testing.T) {
 	if envNames["AIBOM_JOB_NAMESPACE"] != "test-ns" {
 		t.Errorf("AIBOM_JOB_NAMESPACE = %q, want %q", envNames["AIBOM_JOB_NAMESPACE"], "test-ns")
 	}
+	if envNames["AIBOM_TRIGGER_KIND"] != "Job" || envNames["AIBOM_TRIGGER_UID"] != string(testJobUID("train-job")) {
+		t.Errorf("trigger env = %q/%q, want Job/%s", envNames["AIBOM_TRIGGER_KIND"], envNames["AIBOM_TRIGGER_UID"], testJobUID("train-job"))
+	}
 	if envNames["AIBOM_INPUT_DIR"] != "/data/input" {
 		t.Errorf("AIBOM_INPUT_DIR = %q, want %q", envNames["AIBOM_INPUT_DIR"], "/data/input")
 	}

@@ -55,7 +55,7 @@ spec:
                     Base64 Ed25519 signature over data's canonical
                     (sort_keys, no whitespace) JSON serialization, or absent
                     if the namespace has no aibom-compiled-signing-key
-                    Secret (see #27 / CLAUDE.md's Compiled AIBOM Signing).
+                    Secret (see #27 / IMPLEMENTATION_NOTES.md's Compiled AIBOM Signing).
                 signaturePublicKey:
                   type: string
                   description: >-
@@ -78,7 +78,7 @@ spec:
           type: date
           jsonPath: .metadata.creationTimestamp
 ---
-# Downsampled telemetry time series for one AIBOM (see CLAUDE.md's Telemetry
+# Downsampled telemetry time series for one AIBOM (see IMPLEMENTATION_NOTES.md's Telemetry
 # Time Series). Kept as its own kind, in the same file as the AIBOM CRD so the
 # justfile's existing `oc apply -f .../aibom-crd.yaml` (and the --skip-crds
 # instructions) cover both, rather than

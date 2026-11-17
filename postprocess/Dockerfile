@@ -8,6 +8,10 @@
 # oc-aibom's Go-side verifier, which a hand-rolled sort_keys/separators convention
 # can't guarantee across languages.
 FROM registry.access.redhat.com/ubi9/python-312-minimal@sha256:0ee75328b9fd716773396a1e9f86a9ca8b3cde9818078c43f920d4e556f78c2e
+# Recorded as _metadata.generator_version: the release (X.Y.Z) or commit that
+# built this image, set by release.yml, images.yml and the in-cluster BuildConfig.
+ARG VERSION=dev
+ENV AIBOM_GENERATOR_VERSION=$VERSION
 WORKDIR /app
 USER 0
 RUN pip install --no-cache-dir cryptography==43.* rfc8785==0.1.*

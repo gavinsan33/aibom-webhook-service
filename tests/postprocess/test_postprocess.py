@@ -1769,6 +1769,26 @@ def test_compile_aibom_no_telemetry_notes_unavailable():
     assert aibom["resource_utilization"] == {"note": "No telemetry data available."}
 
 
+def test_compile_aibom_records_trigger_and_no_constant_metadata(monkeypatch):
+    monkeypatch.setattr(pp, "TRIGGER_KIND", "Job")
+    monkeypatch.setattr(pp, "TRIGGER_UID", "abc-123")
+    monkeypatch.setattr(pp, "GENERATOR_VERSION", "0.3.0")
+    aibom = pp.compile_aibom(
+        discoveries=[{"pod_metadata": {"name": "p1"}}], detected_datasets=[],
+        runtime_info={}, annotations={}, telemetry=None,
+    )
+    em = aibom["execution_metadata"]
+    assert em["trigger"] == {"kind": "Job", "uid": "abc-123"}
+    assert set(aibom["_metadata"]) == {"aibom_version", "generated_at", "generator", "generator_version"}
+    assert aibom["_metadata"]["generator_version"] == "0.3.0"
+
+
+def test_parse_start_utc_accepts_discovery_utc_offset():
+    # generate_snapshot.py writes UTC with a Z suffix.
+    dt = pp._parse_start_utc("2026-01-01T00:00:00.123456Z")
+    assert dt.utcoffset().total_seconds() == 0 and dt.hour == 0
+
+
 # ---------------------------------------------------------------------------
 # compile_aibom: execution_metadata.duration_seconds
 # ---------------------------------------------------------------------------
@@ -2577,7 +2597,7 @@ def test_sign_aibom_signature_survives_json_round_trip(monkeypatch, tmp_path):
     or `kubectl get -o json` later). If re-canonicalizing *that*
     round-tripped object didn't reproduce the exact bytes that were signed,
     verification would spuriously fail for every AIBOM, not just tampered
-    ones. See CLAUDE.md's Compiled AIBOM Signing section.
+    ones. See IMPLEMENTATION_NOTES.md's Compiled AIBOM Signing section.
     """
     import rfc8785
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey

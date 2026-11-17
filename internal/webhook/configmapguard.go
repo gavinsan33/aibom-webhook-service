@@ -9,7 +9,7 @@ import (
 
 // ValidateSigningPublicKeyConfigMap denies a create/update of the
 // aibom-compiled-signing-public-key ConfigMap (see aibomdata's
-// CompiledSigningPublicKeyConfigMapName, and CLAUDE.md's Compiled AIBOM
+// CompiledSigningPublicKeyConfigMapName, and IMPLEMENTATION_NOTES.md's Compiled AIBOM
 // Signing) from anyone other than the aibom-postprocess ServiceAccount in the webhook's
 // own namespace, where every postprocess Job runs (#149).
 //

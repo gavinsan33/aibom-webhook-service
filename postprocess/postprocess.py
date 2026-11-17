@@ -32,6 +32,11 @@ import k8s_api
 INPUT_DIR = os.environ.get("AIBOM_INPUT_DIR", "/data/input")
 JOB_NAME = os.environ.get("AIBOM_JOB_NAME", "")
 JOB_NAMESPACE = os.environ.get("AIBOM_JOB_NAMESPACE", "")
+# The Job or bare Pod this AIBOM is for; the UID tells same-named reruns apart.
+TRIGGER_KIND = os.environ.get("AIBOM_TRIGGER_KIND") or None
+TRIGGER_UID = os.environ.get("AIBOM_TRIGGER_UID") or None
+# The release or commit this image was built from (postprocess/Dockerfile).
+GENERATOR_VERSION = os.environ.get("AIBOM_GENERATOR_VERSION") or None
 PROMETHEUS_URL = os.environ.get("PROMETHEUS_URL", "")
 
 # Auth is always automatic, never configured per-query: the postprocess Job's own
@@ -46,7 +51,7 @@ SERVICE_ACCOUNT_TOKEN_FILE = "/var/run/secrets/kubernetes.io/serviceaccount/toke
 SERVICE_CA_CERT_FILE = "/etc/aibom-postprocess/service-ca/service-ca.crt"
 
 # Path to the per-namespace Ed25519 private key (see charts/aibom-workload-namespace's
-# templates/signing.yaml and CLAUDE.md's Compiled AIBOM Signing section) this Job signs
+# templates/signing.yaml and IMPLEMENTATION_NOTES.md's Compiled AIBOM Signing section) this Job signs
 # the compiled AIBOM with before creating the custom resource. Empty/missing means the
 # namespace's aibom-workload-namespace chart install predates this Secret -- the AIBOM
 # is still created, just unsigned, mirroring how a missing discovery-signing key degrades
@@ -95,7 +100,7 @@ _WORKLOAD_CONTAINERS = 'container!="POD", container!="", container!="aibom-datas
 # average) so stats -- min/max/p95 and a first/middle/last-third breakdown --
 # can be derived from the same series a run's shape actually traced out,
 # instead of needing a second `avg_over_time` query per metric. See
-# compute_metric_stats() and CLAUDE.md's Telemetry Retries section.
+# compute_metric_stats() and IMPLEMENTATION_NOTES.md's Telemetry Retries section.
 #
 # Every query aggregates to exactly one series per pod (sum, or avg for
 # utilization), so compute_metric_stats sees one value per timestamp. Without
@@ -220,7 +225,7 @@ TELEMETRY_QUERIES = {
 }
 
 # A serving engine's own serving-level metrics (TTFT, ITL, queue depth,
-# KV-cache usage, throughput) -- see CLAUDE.md's Inference Performance Telemetry
+# KV-cache usage, throughput) -- see IMPLEMENTATION_NOTES.md's Inference Performance Telemetry
 # section. Collected separately from TELEMETRY_QUERIES above and only for pods
 # where detected_model.serving_engine is one we have queries for (main()); these
 # are series the engine exposes on its own /metrics endpoint (not DCGM/cAdvisor)
@@ -364,7 +369,7 @@ SERVING_SERIES_QUERIES = {e: _build_serving_queries(m, series=True) for e, m in 
 VLLM_TELEMETRY_QUERIES = SERVING_TELEMETRY_QUERIES["vllm"]
 
 # ---------------------------------------------------------------------------
-# Persisted telemetry time series (see CLAUDE.md's Telemetry Time Series)
+# Persisted telemetry time series (see IMPLEMENTATION_NOTES.md's Telemetry Time Series)
 # ---------------------------------------------------------------------------
 #
 # Separate from TELEMETRY_QUERIES/VLLM_TELEMETRY_QUERIES on purpose: those feed
@@ -2246,7 +2251,7 @@ def detect_git_provenance_from_containers(containers):
     commit label exists) -- looked up by the image's digest (containers.json's
     image_id, from ContainerStatuses, not the mutable image tag) against the
     cluster-scoped Image object, so a re-tagged image can't spoof the labels.
-    See CLAUDE.md's git provenance section for why this is identification,
+    See IMPLEMENTATION_NOTES.md's git provenance section for why this is identification,
     not an authorization/trust guarantee: it reports what the build
     controller recorded, not whether the source was vetted. Without an Image
     object, the labels are read from the image's registry instead.
@@ -2405,7 +2410,7 @@ def compute_metric_stats(data_points):
     A flat average can't distinguish a run that held steady from one that
     started high and degraded (thermal throttling, a stalled data loader,
     checkpoint pauses); the three segments make that shape visible without
-    storing the full series. See CLAUDE.md's Segmented Performance Stats
+    storing the full series. See IMPLEMENTATION_NOTES.md's Segmented Performance Stats
     section. Values are left unrounded here; aggregate_pod_metrics rounds
     once, after scaling to the display unit."""
     if not data_points:
@@ -2430,7 +2435,7 @@ def compute_metric_stats(data_points):
 
 def _collect_metrics_with_retry(query_defs, metrics, stats_start_ms, end_ms):
     """Runs one pod's worth of range queries with the shared retry-on-empty
-    logic (see CLAUDE.md's Telemetry Retries) -- only metrics still
+    logic (see IMPLEMENTATION_NOTES.md's Telemetry Retries) -- only metrics still
     missing on a given attempt are re-queried, not the whole batch. query_defs
     is the {name: {"query": ..., "unit": ...}} dict (e.g. TELEMETRY_QUERIES)
     that `metrics` (name -> pod-substituted PromQL string) was built from."""
@@ -2758,8 +2763,8 @@ def _aggregate_points(series_list, how):
 
 
 def _parse_start_utc(start_time):
-    """Parses a pod start_time as UTC. A suffix-less value (what the discovery
-    init container writes) is taken as UTC too, not this process's local zone."""
+    """Parses a pod start_time as UTC. Discovery writes a Z suffix; a
+    suffix-less value (older pods, local time) is taken as UTC too."""
     dt = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
@@ -2898,7 +2903,7 @@ def _fit_series_doc(doc, max_bytes):
 
 def collect_telemetry_series(telemetry, vllm_telemetry, engine="vllm"):
     """Builds the downsampled time-series document persisted alongside the
-    AIBOM (see CLAUDE.md's Telemetry Time Series). Returns the encoded JSON
+    AIBOM (see IMPLEMENTATION_NOTES.md's Telemetry Time Series). Returns the encoded JSON
     string, or None if nothing came back. Never raises for missing data --
     an AIBOM without series is still a complete AIBOM."""
     resource_pods = (telemetry or {}).get("pods") or []
@@ -3145,7 +3150,7 @@ def compute_metric_limit(metric_name, pod_names, containers, scale):
     (e.g. "used 7.8 of an 8.0 GiB limit"). When a JobSet's sibling pods carry
     different limits, the tightest one wins -- the ceiling closest to
     actually constraining usage -- mirroring the same "pods can disagree"
-    tension CLAUDE.md's Segmented Performance Stats section already notes
+    tension IMPLEMENTATION_NOTES.md's Segmented Performance Stats section already notes
     for avg/p95 across pods. None if the metric has no limit concept
     (_METRIC_LIMIT_KEYS) or no pod in this workload reported one."""
     resource_key = _METRIC_LIMIT_KEYS.get(metric_name)
@@ -3167,7 +3172,7 @@ def aggregate_pod_metrics(pods, unit_map):
     a JobSet's sibling pods). avg/p95/segments are averaged across pods (an
     approximation -- a true cross-pod percentile would need every pod's raw
     series merged first); min/max take the true extreme across all of them,
-    since a single pod's outlier is still real. See CLAUDE.md's Segmented
+    since a single pod's outlier is still real. See IMPLEMENTATION_NOTES.md's Segmented
     Performance Stats section. Shared by resource_utilization (which adds a
     k8s resource `limit` on top, a concept these metrics alone don't have)
     and inference.performance."""
@@ -3799,6 +3804,7 @@ def compile_aibom(
     aibom["execution_metadata"] = {
         "job_id": JOB_NAME,
         "namespace": JOB_NAMESPACE,
+        "trigger": {"kind": TRIGGER_KIND, "uid": TRIGGER_UID} if TRIGGER_UID else None,
         "pods": pods,
         "duration_seconds": duration_seconds,
         "status": status,
@@ -4011,7 +4017,7 @@ def compile_aibom(
         # Serving-level SLOs (TTFT, ITL, queue depth, KV-cache usage,
         # throughput) -- a distinct top-level section from
         # resource_utilization since these describe the application's own
-        # behavior, not the hardware underneath it (see CLAUDE.md's
+        # behavior, not the hardware underneath it (see IMPLEMENTATION_NOTES.md's
         # Inference Performance Telemetry section). Populated for any engine in
         # SERVING_TELEMETRY_QUERIES (vLLM, SGLang, LMDeploy, TGI); the
         # units below are the same canonical set across engines, so a metric a
@@ -4166,10 +4172,7 @@ def compile_aibom(
         "aibom_version": "0.1.0",
         "generated_at": generated_at,
         "generator": "aibom-webhook postprocess",
-        "schema_compliance": "partial - focuses on reproducibility and telemetry fields",
-        "dataset_detection": (
-            "enabled" if detected_datasets else "no datasets detected"
-        ),
+        "generator_version": GENERATOR_VERSION,
     }
 
     return aibom

@@ -1,7 +1,7 @@
 {{- if .Values.vllmMetrics.enabled }}
 # Tells OpenShift's user-workload-monitoring Prometheus to scrape each serving
 # engine's own /metrics endpoint (TTFT, ITL, queue depth, KV-cache usage -- see
-# CLAUDE.md's Inference Performance Telemetry section) on every instrumented pod
+# IMPLEMENTATION_NOTES.md's Inference Performance Telemetry section) on every instrumented pod
 # in this namespace, so postprocess.py's serving-engine queries have something
 # to read from Thanos Querier in the first place. Without this, those metrics
 # are only ever visible in-process on the pod's own port -- nothing scrapes them

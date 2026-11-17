@@ -9,7 +9,7 @@ import sys
 import json
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 
 try:
     import k8s_api
@@ -94,15 +94,18 @@ def amd_gpus(dev_root="/dev/dri", drm_root="/sys/class/drm"):
 
 print("Collecting static system information...")
 
+# UTC with an explicit offset: postprocess builds telemetry windows and
+# concurrency from start_time, and a local time read as UTC shifts them.
+now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 snapshot = {
-    "timestamp": datetime.now().isoformat(),
+    "timestamp": now,
     "pod_metadata": {
         "name": os.environ.get("POD_NAME", "unknown"),
         "uid": os.environ.get("POD_UID", "unknown"),
         "namespace": os.environ.get("POD_NAMESPACE", "unknown"),
         "ip": os.environ.get("POD_IP", "unknown"),
         "node": os.environ.get("NODE_NAME", "unknown"),
-        "start_time": datetime.now().isoformat()
+        "start_time": now
     },
     "system": {
         "cpu_model": run_cmd("grep 'model name' /proc/cpuinfo | head -1 | cut -d: -f2 | xargs"),

@@ -457,7 +457,7 @@ def _git_dirty(worktree_dir):
 def _capture_git_provenance(check_dirty=True):
     """Best-effort git provenance from a .git directory in the working
     tree -- covers workloads that `git clone` their training code at
-    runtime rather than baking it into the image (see CLAUDE.md's git
+    runtime rather than baking it into the image (see IMPLEMENTATION_NOTES.md's git
     provenance section). Ranked above postprocess.py's command-line `git
     clone` parsing: this reflects the actual final checked-out state
     (after any `git checkout`/`git pull` beyond the initial clone), not

@@ -59,6 +59,7 @@ jobs:
         with:
           context: .
           file: postprocess/Dockerfile
+          build-args: VERSION=${{ steps.version.outputs.version }}
           push: true
           tags: ${{ env.REGISTRY }}/aibom-postprocess:${{ steps.version.outputs.version }}
 
