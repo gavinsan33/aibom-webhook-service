@@ -3037,6 +3037,18 @@ def pod_serving_role(pod_name, containers):
     return None
 
 
+def pod_containers(pod_name, containers):
+    """The pod's app containers and the images they ran (#208): the spec's
+    image reference and the kubelet-reported image_id, which carries the
+    digest. containers.json lists only Spec.Containers, so our injected init
+    containers (and any native sidecar) aren't included."""
+    return [
+        {k: c[k] for k in ("name", "image", "image_id") if c.get(k)}
+        for c in containers
+        if c.get("pod_name") == pod_name
+    ]
+
+
 def pod_restart_info(pod_name, containers):
     """What a pod's containers went through before their current state, from
     the container statuses' lastState (#112). With restartPolicy OnFailure a
@@ -3714,6 +3726,9 @@ def compile_aibom(
         serving_role = pod_serving_role(pod_name, containers or [])
         if serving_role:
             pod_entry["serving_role"] = serving_role
+        images = pod_containers(pod_name, containers or [])
+        if images:
+            pod_entry["containers"] = images
         # A failed pod of a Job that went on to complete is an earlier attempt
         # (restartPolicy Never + backoffLimit). Its own status stays above as
         # attempt detail, but it must not make the whole workload look failed.
@@ -4063,9 +4078,9 @@ def compile_aibom(
             "gpu_type": gpu_type,
             "gpu_count": gpu_count,
             "cpu_model": system_info.get("cpu_model"),
-            "cpu_cores": system_info.get("cpu_count"),
+            "cpu_cores": _try_int(system_info.get("cpu_count")),
             "memory_gb": mem_gb,
-            "numa_nodes": system_info.get("numa_node_count"),
+            "numa_nodes": _try_int(system_info.get("numa_node_count")),
             "cuda_version": gpu_info.get("cuda_version"),
             "driver_version": gpu_info.get("gpu_driver_version"),
             "framework_version": fw_label,
@@ -4214,39 +4229,77 @@ def software_environment(runtime_info):
     return out
 
 
+# Discovery writes every value as a shell command's output string; these are
+# converted so readers don't have to (#209). A value that doesn't convert is
+# dropped, like an empty one.
+_DISCOVERY_INTS = {"cpu_cores_per_socket", "cpu_threads_per_core", "rdma_device_count", "primary_mtu"}
+
+
+def _block_devices(lsblk):
+    """`lsblk -nd -o NAME,SIZE` lines as [{"name", "size"}]."""
+    out = []
+    for line in lsblk.splitlines():
+        parts = line.split()
+        if len(parts) == 2:
+            out.append({"name": parts[0], "size": parts[1]})
+    return out or None
+
+
+_DISCOVERY_CONVERT = {
+    **{k: lambda v: _try_int(v) for k in _DISCOVERY_INTS},
+    "rdma_devices": lambda v: [d.strip() for d in v.split(",") if d.strip()] or None,
+    "block_devices": _block_devices,
+}
+
+
 def _discovery_details(disc):
-    """Extra environment sections from one discovery snapshot; empty/'N/A' values dropped."""
+    """Extra environment sections from one discovery snapshot; empty, 'N/A' and
+    run_cmd's 'Not available' (any failed command) values dropped."""
     out = {}
     for name, (section, keys) in _DISCOVERY_DETAILS.items():
         src = disc.get(section) or {}
-        vals = {k: src[k] for k in keys if src.get(k) not in (None, "", "N/A", "None")}
+        vals = {}
+        for k in keys:
+            v = src.get(k)
+            if v in (None, "", "N/A", "None", "Not available"):
+                continue
+            if k in _DISCOVERY_CONVERT:
+                v = _DISCOVERY_CONVERT[k](str(v))
+                if v is None:
+                    continue
+            vals[k] = v
         if vals:
             out[name] = vals
     # One entry per GPU, so all or nothing: dropping an unknown entry (an AMD
     # partition's N/A, nvidia-smi's [N/A]) would shift the rest onto the
     # wrong devices.
-    mem = [_try_float(m) for m in str(safe_get(disc, "gpu", "gpu_memory_per_device_mb", default="")).split()]
+    mem = [_try_int(_try_float(m)) for m in str(safe_get(disc, "gpu", "gpu_memory_per_device_mb", default="")).split()]
     if mem and None not in mem:
-        out["gpu_memory_mb"] = [int(m) for m in mem]
+        out["gpu_memory_mb"] = mem
     return out
 
 
 def _try_int(value):
+    """int(value), or None if it doesn't convert or is past 2^53, which JCS
+    can't canonicalize (the AIBOM would publish unsigned)."""
     if value is None:
         return None
     try:
-        return int(value)
-    except (ValueError, TypeError):
+        n = int(value)
+    except (ValueError, TypeError, OverflowError):
         return None
+    return n if abs(n) <= 2 ** 53 - 1 else None
 
 
 def _try_float(value):
+    """float(value), or None if it doesn't convert or isn't finite."""
     if value is None:
         return None
     try:
-        return float(value)
+        f = float(value)
     except (ValueError, TypeError):
         return None
+    return f if math.isfinite(f) else None
 
 
 def _first_not_none(*values):

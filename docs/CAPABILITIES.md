@@ -16,7 +16,7 @@ Any field can also be set directly via an `aibom.io/*` annotation, which overrid
 
 Captured once per pod by the discovery init container into `discovery-<pod>.json`, HMAC-signed with a per-namespace key (see [Signing Keys](reference/signing.md)).
 
-**Surfacing note**: `postprocess.py` copies only the rows marked ✅ *surfaced* into `environment.*`. Rows marked ⚠️ *captured only* are still written to `discovery-<pod>.json` but never reach the final `AIBOM`: that file lives in the per-workload data ConfigMap, which is deleted once the postprocess Job succeeds. They're left out because they are node-level tuning, point-in-time readings, or wrong from inside a container. Values of `N/A`/empty are omitted from the AIBOM.
+**Surfacing note**: `postprocess.py` copies only the rows marked ✅ *surfaced* into `environment.*`. Rows marked ⚠️ *captured only* are still written to `discovery-<pod>.json` but never reach the final `AIBOM`: that file lives in the per-workload data ConfigMap, which is deleted once the postprocess Job succeeds. They're left out because they are node-level tuning, point-in-time readings, or wrong from inside a container. Values of `N/A`/empty, and `Not available` (the command failed), are omitted from the AIBOM, as are numbers that don't convert or are past 2^53. Counts and the MTU are numbers, and the RDMA device and block device listings are lists (#209); AIBOMs created before that have them as strings.
 
 **CPU / memory / kernel**
 
@@ -53,7 +53,7 @@ The discovery init container's own `nvidia.com/gpu` claim — what makes `nvidia
 
 | Field | Detection | Surfaced? |
 |---|---|---|
-| RDMA devices / count | `/sys/class/infiniband` listing | ✅ `environment.network` |
+| RDMA devices / count | `/sys/class/infiniband` listing | ✅ `environment.network` (`rdma_devices` a list of names) |
 | Primary interface MTU | `/sys/class/net/eth0/mtu` | ✅ `environment.network` |
 | Interface names | `/sys/class/net` listing | ⚠️ captured only |
 | TCP read/write memory buffers | `/proc/sys/net/ipv4/tcp_{rmem,wmem}` | ⚠️ captured only — node defaults |
@@ -63,7 +63,7 @@ The discovery init container's own `nvidia.com/gpu` claim — what makes `nvidia
 
 | Field | Detection | Surfaced? |
 |---|---|---|
-| Block devices + size | `lsblk -nd -o NAME,SIZE` (loop devices excluded) | ✅ `environment.storage` |
+| Block devices + size | `lsblk -nd -o NAME,SIZE` (loop devices excluded) | ✅ `environment.storage` (`block_devices` a list of `{name, size}`) |
 | NVMe device count | `ls /dev/nvme*` piped through `grep -c nvme0n` — counts only controller 0's namespaces and partitions, and `/dev` inside an unprivileged container usually has no host NVMe devices at all (#115) | ⚠️ captured only — unreliable |
 | `/tmp` size / available space | `df -h /tmp` | ⚠️ captured only — overlay size, point-in-time free space |
 | Active I/O scheduler | `/sys/block/sda/queue/scheduler` (hardcoded `sda`; empty on NVMe-only nodes) | ⚠️ captured only — unreliable |
@@ -81,7 +81,7 @@ The discovery init container's own `nvidia.com/gpu` claim — what makes `nvidia
 | cgroup CPU quota / period | `/sys/fs/cgroup/cpu/cpu.cfs_{quota,period}_us` — cgroup v1 path only; always `N/A` on cgroup v2 nodes (OpenShift 4.14+) | ⚠️ captured only — unreliable |
 | cgroup memory limit | `/sys/fs/cgroup/memory/memory.limit_in_bytes` — cgroup v1 path only; always `N/A` on cgroup v2 nodes | ⚠️ captured only — unreliable |
 
-**Pod metadata** — ✅ surfaced into `execution_metadata.pods[]`: `pod_name`/`pod_uid`/`pod_namespace`/`pod_ip`/`node_name`/`start_time` (from downward-API env vars + a capture timestamp).
+**Pod metadata** — ✅ surfaced into `execution_metadata.pods[]`: `pod_name`/`pod_uid`/`pod_namespace`/`pod_ip`/`node_name`/`start_time` (from downward-API env vars + a capture timestamp). Each entry's `containers` lists its app containers' `name`, `image` (the spec's reference) and `image_id` (the kubelet-reported image, with its `sha256` digest), read by the watcher from the Pod object (#208); our injected init containers and native sidecars aren't listed.
 
 **InferenceService storage resolution** (KServe only) — ✅ surfaced. Reads `spec.predictor.model.storage.{path,key}` / `storageUri` off the pod's own `InferenceService` object (via its `INFERENCESERVICE_NAME` downward-API env var) and writes `storage-<pod>.json`; consumed by `postprocess.py`'s `detect_model_from_storage` to derive `model.name` (see below). Identification only — doesn't touch the actual bucket.
 

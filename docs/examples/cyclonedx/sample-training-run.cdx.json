@@ -79,6 +79,14 @@
           "value": "0"
         },
         {
+          "name": "aibomrun:model:framework",
+          "value": "trl"
+        },
+        {
+          "name": "aibomrun:model:dtype",
+          "value": "bfloat16"
+        },
+        {
           "name": "aibomrun:dataset:declared:name",
           "value": "tatsu-lab/alpaca"
         },
@@ -613,7 +621,7 @@
           "hashes": [
             {
               "alg": "SHA-256",
-              "content": "97b8cce925cb49b5532817a0bc8a3728a6cb949d8ccbb45d6158cda3f36cb240"
+              "content": "6a580082cfcc4fae72a880935af7b43c0e2d6d6ec5c0fa9e86568159596d2e87"
             }
           ],
           "comment": "the signed AIBOM record this document was derived from; Ed25519 over its RFC 8785 canonical form"
@@ -754,7 +762,7 @@
         },
         {
           "name": "aibomrun:node:storage:blockDevices",
-          "value": "[\"nvme0n1 894.3G\",\"nvme1n1 7T\"]"
+          "value": "[{\"name\":\"nvme0n1\",\"size\":\"894.3G\"},{\"name\":\"nvme1n1\",\"size\":\"7T\"}]"
         },
         {
           "name": "aibomrun:node:kernel:cpuGovernor",
