@@ -2758,8 +2758,8 @@ def _aggregate_points(series_list, how):
 
 
 def _parse_start_utc(start_time):
-    """Parses a pod start_time as UTC. A suffix-less value (what the discovery
-    init container writes) is taken as UTC too, not this process's local zone."""
+    """Parses a pod start_time as UTC. Discovery writes a Z suffix; a
+    suffix-less value (older pods, local time) is taken as UTC too."""
     dt = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
