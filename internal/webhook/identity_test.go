@@ -6,6 +6,7 @@ import (
 
 	"github.com/gavinsan33/aibom-webhook-service/internal/aibomdata"
 	authenticationv1 "k8s.io/api/authentication/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
@@ -111,5 +112,38 @@ func TestEnsureWorkloadIdentityScopesDifferentJobsToDifferentConfigMaps(t *testi
 	}
 	if roleA.Rules[0].ResourceNames[0] == roleB.Rules[0].ResourceNames[0] {
 		t.Errorf("job-a and job-b roles both scoped to %q, want distinct ConfigMaps", roleA.Rules[0].ResourceNames[0])
+	}
+}
+
+func TestEnsureSigningKeysCreatesOnceAndKeepsExisting(t *testing.T) {
+	ctx := context.Background()
+	existing := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: aibomdata.DatasetSigningKeySecretName, Namespace: "ns1"},
+		Data:       map[string][]byte{aibomdata.DatasetSigningKeyDataKey: []byte("chart-made")},
+	}
+	clientset := fake.NewSimpleClientset(existing)
+
+	if err := ensureSigningKeys(ctx, clientset, "ns1"); err != nil {
+		t.Fatalf("ensureSigningKeys() error = %v", err)
+	}
+	disc, err := clientset.CoreV1().Secrets("ns1").Get(ctx, aibomdata.DiscoverySigningKeySecretName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("discovery key not created: %v", err)
+	}
+	first := string(disc.Data[aibomdata.DiscoverySigningKeyDataKey])
+	if len(first) != 64 {
+		t.Errorf("discovery key = %q, want 64 hex chars", first)
+	}
+
+	if err := ensureSigningKeys(ctx, clientset, "ns1"); err != nil {
+		t.Fatalf("second ensureSigningKeys() error = %v", err)
+	}
+	disc, _ = clientset.CoreV1().Secrets("ns1").Get(ctx, aibomdata.DiscoverySigningKeySecretName, metav1.GetOptions{})
+	if got := string(disc.Data[aibomdata.DiscoverySigningKeyDataKey]); got != first {
+		t.Errorf("discovery key rotated on second call")
+	}
+	ds, _ := clientset.CoreV1().Secrets("ns1").Get(ctx, aibomdata.DatasetSigningKeySecretName, metav1.GetOptions{})
+	if got := string(ds.Data[aibomdata.DatasetSigningKeyDataKey]); got != "chart-made" {
+		t.Errorf("existing dataset key overwritten: %q", got)
 	}
 }

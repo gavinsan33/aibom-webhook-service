@@ -113,6 +113,7 @@ func (m *Mutator) Mutate(pod *corev1.Pod, requesterUsername string) ([]PatchOper
 	// buildTokenVolume below falls back to today's behavior: a projected
 	// token for the pod's own (shared, namespace-wide) ServiceAccount.
 	identitySecretName := m.ensurePodWorkloadIdentity(pod)
+	m.ensurePodSigningKeys(pod)
 
 	// Add aibom-data emptyDir volume
 	patches = appendVolume(patches, pod, buildAIBOMVolume())
@@ -350,6 +351,20 @@ func (m *Mutator) ensurePodWorkloadIdentity(pod *corev1.Pod) string {
 		return ""
 	}
 	return secretName
+}
+
+// ensurePodSigningKeys makes sure the HMAC keys this pod's discovery init
+// container and dataset sidecar mount exist. Fails open: the mounts are
+// optional, and the watcher passes unsigned data through when no key exists.
+func (m *Mutator) ensurePodSigningKeys(pod *corev1.Pod) {
+	if m.Clientset == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), workloadIdentityProvisionTimeout)
+	defer cancel()
+	if err := ensureSigningKeys(ctx, m.Clientset, pod.Namespace); err != nil {
+		log.Printf("warning: could not ensure signing keys for %s/%s: %v", pod.Namespace, pod.Name, err)
+	}
 }
 
 // triggerName returns the identity the watcher will later use to name the
