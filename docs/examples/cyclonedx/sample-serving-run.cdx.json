@@ -879,8 +879,7 @@
           "value": "false"
         }
       ],
-      "version": "0.17.1+a03ca76a.nv26.3.46967107.cu132",
-      "purl": "pkg:pypi/vllm@0.17.1%2Ba03ca76a.nv26.3.46967107.cu132"
+      "version": "0.17.1+a03ca76a.nv26.3.46967107.cu132"
     }
   ],
   "dependencies": [
