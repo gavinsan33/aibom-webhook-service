@@ -18,7 +18,7 @@ A Kubernetes mutating admission webhook that automatically instruments AI worklo
 
 When the workload finishes, a postprocess Job compiles everything (hardware, datasets, model and training config, git provenance, Prometheus telemetry) into a signed, immutable `AIBOM` custom resource in the workload's namespace. To browse, filter, and compare AIBOMs, use the companion tools:
 
-- [`oc-aibom`](https://github.com/gavinsan33/oc-aibom): a `kubectl`/`oc` plugin (`oc aibomrun list|describe|diff|compare`). It also verifies the AIBOM's signature.
+- [`oc-aibom`](https://github.com/gavinsan33/oc-aibom): a `kubectl`/`oc` plugin (`oc aibomrun list|describe|diff|compare|export`). It also verifies the AIBOM's signature.
 - [`aibom-console-plugin`](https://github.com/gavinsan33/aibom-console-plugin): an OpenShift web console plugin with list, detail, and compare views and telemetry charts.
 
 **Full documentation lives on the [docs site](https://gavinsan33.github.io/project-aibom/aibom-webhook-service/).** This README only covers what the project does and how to install it.
@@ -69,6 +69,7 @@ Preferred: the `oc aibomrun` plugin (install [`oc-aibom`](https://github.com/gav
 # Requires the oc-aibom plugin
 oc aibomrun list -n <namespace>
 oc aibomrun describe <name> -n <namespace>
+oc aibomrun export <name> -n <namespace> -o cyclonedx   # CycloneDX 1.6 JSON on stdout
 ```
 
 Fallback, with no plugin needed (standard `oc`/`kubectl` on the `AIBOM` custom resource):

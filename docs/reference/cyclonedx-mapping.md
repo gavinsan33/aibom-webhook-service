@@ -4,6 +4,12 @@ How an `AIBOM` record (`aiboms.aibom.io`, `spec.data` as `postprocess.py` writes
 
 The field list follows [Detected Fields](../CAPABILITIES.md) and the record structure follows `compile_aibom` in `postprocess.py`, checked against two real records (a DeepSpeed ZeRO-3 LoRA fine-tune and a vLLM serving run, both record format 0.1.0). Rows marked *not seen in the records* come from Detected Fields alone and are kept so the table stays complete; their rule is the same as the neighbouring rows and has not been exercised against a real value. Every `spec.data` path is listed once with its rule: **direct** (copied into a native CycloneDX field), **transformed** (native field after a conversion stated in the row), **property** (a `properties[]` entry under the `aibomrun:` namespace, see [Property namespace](#property-namespace)), or **dropped**, with the reason.
 
+The converter is the [oc-aibom](https://github.com/gavinsan33/oc-aibom) plugin's `export` command (`internal/aibom/cyclonedx.go`). It reads one `AIBOM` from the cluster and prints the CycloneDX document on stdout; nothing is written to the cluster or to disk:
+
+```sh
+oc aibomrun export <name> -n <namespace> -o cyclonedx   # -o defaults to cyclonedx
+```
+
 Two principles carry over from the record itself. Every value is identification, not attestation, so nothing in the mapping claims more than the record does; the `*_declared_via` fields travel with the facts they qualify. And the mapping never invents a value: a field the record does not have produces no CycloneDX element.
 
 ## Document identity and lifecycle
@@ -43,12 +49,12 @@ The root of the document, `metadata.component`, is the run. Its type depends on 
 | `model.quantization`, `model.quantization_bits` | properties `aibomrun:model:quantization`, `aibomrun:model:quantization:bits` | property |
 | `model.speculative_decoding` (`method`, `num_speculative_tokens`, `prompt_lookup_max` in the serving record) | property `aibomrun:model:speculativeDecoding` (JSON string) | property; structured value kept whole rather than flattened, since its keys follow the engine's own config (`ngram` with `prompt_lookup_max` in the record; a draft-model config would carry different keys) |
 | `experiment_intent` (as `modelParameters.approach` or `.task`) | dropped | `sft` in the record means a training tool plus a PEFT adapter, which also covers `trl dpo` and `trl grpo` with `--use_peft`, so `approach.type: supervised` would say more than the record knows; and `modelParameters.task` means the ML task (classification, regression, generation), which the record does not capture. The intent itself is kept as the `aibomrun:experiment:intent` property above |
-| `dataset.*` | `modelCard.modelParameters.datasets[]` as `{ "ref": "<bom-ref of the data component>" }` | transformed; the data components themselves are in [Datasets](#datasets) |
+| `dataset.*` | `modelCard.modelParameters.datasets[]` as `{ "ref": "<bom-ref of the data component>" }`, for `training` and `sft` runs only | transformed; the data components themselves are in [Datasets](#datasets). A serving run's datasets were loaded by the run (a benchmark client), not used to train the served model, so they are not put in its model card |
 | `inference.performance.metrics.*` (time to first token, inter-token latency, generation and prompt throughput only) | `modelCard.quantitativeAnalysis.performanceMetrics[]` on the served model | transformed, see [Telemetry](#telemetry). Hardware, network and server-load telemetry never enter the model card |
 
 ## Hardware as device components
 
-The record's GPU count and VRAM list cover every GPU pod that ran at the same time (#115; a 4-node JobSet with 8 GPUs per pod is 32), while its CPU, memory and kernel facts describe the first of those pods' node. The mapping follows: one GPU `device` component per GPU counted, one `device` per distinct node name across pods, and the CPU, memory and kernel facts as properties on that first node's device. The record does not say which node each GPU is on, so GPU components are not nested under nodes. A `device` component is the CycloneDX type for hardware; `device-driver` is used for the GPU driver.
+The record's GPU count and VRAM list cover every GPU pod that ran at the same time (#115; a 4-node JobSet with 8 GPUs per pod is 32), while its CPU, memory and kernel facts describe the first of those pods' node. The mapping follows: one GPU `device` component per GPU counted, one `device` per distinct node name across pods, and the CPU, memory and kernel facts as properties on that first node's device. The record does not say which node each GPU is on, so GPU components are not nested under nodes. Nor does it name the pod the node facts came from; the converter takes the first pod with a GPU claim (`pods[].gpu_count`) that isn't a retried attempt, else the first pod. A `device` component is the CycloneDX type for hardware; `device-driver` is used for the GPU driver.
 
 | `spec.data` path | CycloneDX 1.6 | Rule |
 |---|---|---|
@@ -88,7 +94,7 @@ Each `dataset.auto_detected[]` entry becomes a `data` component with `type: data
 | `.matches_declared` | property `aibomrun:dataset:matchesDeclared` (`true`, `false`, or absent for `null`) | property |
 | `dataset.declared.name`, `.version`, `.source`, `.license`, `.config_name`, `.split`, `.declared_via` | properties `aibomrun:dataset:declared:name`, `:version`, `:source`, `:license`, `:configName`, `:split`, `:declaredVia` on `metadata.component` | property |
 
-Every dataset component is also referenced from `modelCard.modelParameters.datasets[]` by `bom-ref`.
+For a training run, every dataset component is also referenced from `modelCard.modelParameters.datasets[]` by `bom-ref`.
 
 ## Software
 
@@ -157,7 +163,7 @@ Two kinds of numbers come out of a run and they go to different places. Hardware
 The existing signature cannot simply be copied into the CycloneDX document, because it signs the record's bytes, not the document's. Two honest options, and the mapping uses the first:
 
 1. **Carry the record's signature as evidence of the source.** `metadata.component.externalReferences[]` of `type: attestation` with `url: urn:aibomrun:<namespace>/AIBOM/<name>` and `hashes[0]: {alg: SHA-256, content: <sha256 of the RFC 8785 bytes>}`, plus properties `aibomrun:signature:algorithm: "Ed25519"`, `aibomrun:signature:value: <spec.signature>`, `aibomrun:signature:publicKey: <spec.signaturePublicKey>` on `metadata.component`. A verifier fetches the record, canonicalises `spec.data`, and checks the Ed25519 signature against the embedded key, which is exactly what `oc aibomrun describe` does today. The CycloneDX document itself is unsigned and says so.
-2. **Sign the CycloneDX document too.** If the converter runs in the postprocess Job it holds the per-namespace key and can add a root `signature` in JSF with the same key. That makes the CycloneDX document self-verifying, at the cost of two signatures over two serialisations of one record. Worth doing only if a downstream consumer verifies JSF, and none of the three named ones do today.
+2. **Sign the CycloneDX document too.** If the conversion ran in the postprocess Job, that Job would hold the per-namespace key and can add a root `signature` in JSF with the same key. That makes the CycloneDX document self-verifying, at the cost of two signatures over two serialisations of one record. Worth doing only if a downstream consumer verifies JSF, and none of the three named ones do today.
 
 Properties under `aibomrun:signature:*` are facts about the record's signature, not a claim that the CycloneDX bytes are signed.
 
@@ -202,8 +208,7 @@ Agreed follow-ups on the record side, from the review of this page, which the ma
 
 - The triggering workload's kind and UID in `execution_metadata`, which makes the serial rule and the k8s-aibom link possible.
 - Pod `start_time` emitted in UTC with a `Z`, which removes the assumption the mapping makes today.
-- The converter itself is implemented in this repository, following this page.
 
 ## Validation
 
-The three sample documents beside this page were built by applying every rule above to two real records the project supplied: a DeepSpeed ZeRO-3 LoRA fine-tune of `ibm-granite/granite-3.3-2b-instruct` on two H100s ([`sample-training-run.cdx.json`](../examples/cyclonedx/sample-training-run.cdx.json)), and a vLLM benchmark server running an AWQ-quantized Granite 8B with ngram speculative decoding ([`sample-serving-run.cdx.json`](../examples/cyclonedx/sample-serving-run.cdx.json)). The third, [`sample-training-run-with-git.cdx.json`](../examples/cyclonedx/sample-training-run-with-git.cdx.json), is the training record with `source_code` populated, since both real records have it null, so the pedigree rules are exercised too. All three validate against the CycloneDX 1.6 JSON schema. Before publication the namespace was renamed, the signature and public key truncated, and the records' own placeholder node name, pod IP and UIDs kept as supplied; nothing else was changed. The serials in the samples are the interim form described above.
+The three sample documents beside this page are the converter's output for two real records the project supplied (in oc-aibom's `internal/aibom/testdata/cyclonedx/`): a DeepSpeed ZeRO-3 LoRA fine-tune of `ibm-granite/granite-3.3-2b-instruct` on two H100s ([`sample-training-run.cdx.json`](../examples/cyclonedx/sample-training-run.cdx.json)), and a vLLM benchmark server running an AWQ-quantized Granite 8B with ngram speculative decoding ([`sample-serving-run.cdx.json`](../examples/cyclonedx/sample-serving-run.cdx.json)). The third, [`sample-training-run-with-git.cdx.json`](../examples/cyclonedx/sample-training-run-with-git.cdx.json), is the training record with `source_code` populated, since both real records have it null, so the pedigree rules are exercised too. All three validate against the CycloneDX 1.6 JSON schema. oc-aibom's `TestCycloneDXReproducesSamples` checks that the converter still produces them byte for byte; after a rule change, `go test ./internal/aibom -run CycloneDX -update` regenerates them there, and the copies here are updated to match. Before publication the namespace was renamed, the signature and public key truncated, and the records' own placeholder node name, pod IP and UIDs kept as supplied; nothing else was changed. The attestation hash is computed over the redacted record, so it won't match the original. The serials in the samples are the interim form described above.
