@@ -102,26 +102,3 @@ jobs:
           git -C pages add .
           git -C pages commit -m "Release ${{ steps.version.outputs.version }}"
           git -C pages push origin gh-pages
-
-      # Generate the community chart-verifier reports from the tarballs just
-      # published on GitHub Pages, so each report's chart-uri is that public URL
-      # (the catalog serves the chart from it) and its digest is the published
-      # chart's. Pages deploys gh-pages asynchronously, so wait for the files
-      # first. Uploaded as workflow artifacts to hand to the OpenShift Helm
-      # catalog PR (charts/community/...); that submission is a manual step.
-      - name: Wait for GitHub Pages to serve the charts
-        run: |
-          for chart in aibom-webhook aibom-workload-namespace; do
-            url="$HELM_REPO_URL/$chart-${{ steps.version.outputs.version }}.tgz"
-            for _ in $(seq 60); do curl -sfIo /dev/null "$url" && continue 2; sleep 10; done
-            echo "$url not served after 10 minutes" >&2; exit 1
-          done
-
-      - name: Generate community chart-verifier reports
-        run: just chart-verify --version=${{ steps.version.outputs.version }} --out=reports --url=$HELM_REPO_URL
-
-      - name: Upload chart-verifier reports
-        uses: actions/upload-artifact@v4
-        with:
-          name: chart-verifier-reports-${{ steps.version.outputs.version }}
-          path: reports/*-report.yaml

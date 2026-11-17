@@ -10,9 +10,6 @@ webhook_namespace := "project-aibom"
 # quay.io org/user that deploy/deploy-local/chart-push push to and pull from by default.
 # Override per-invocation with --repo=<repo>, or with `just --set default_repo <repo> <recipe>`.
 default_repo := "quay.io/project-aibom"
-
-# The classic Helm repository release.yml publishes to (GitHub Pages on gh-pages).
-helm_repo_url := env("HELM_REPO_URL", "https://gavinsan33.github.io/aibom-webhook-service")
 # Cluster flavor the deploy recipes target: openshift (default) or kubernetes.
 # kubernetes uses kubectl and doesn't impersonate system:admin, an OpenShift
 # identity; a cluster-admin kubeconfig is expected instead.
@@ -665,11 +662,8 @@ _chart-package version out app_version="":
 # Runs Red Hat's chart-verifier on both charts, packaged as <version>, with the
 # community profile the OpenShift Helm catalog uses. Skips chart-testing, which
 # installs the chart into a cluster. Writes a report per chart to <out>.
-# --url=<helm repo> verifies the published <url>/<chart>-<version>.tgz instead
-# of a local package, so the report's chart-uri is that public URL, which a
-# report-only catalog submission needs (the catalog serves the chart from it).
 # Needs podman or docker.
-# Usage: just chart-verify [--version=<semver>] [--out=<dir>] [--url=<helm repo>]
+# Usage: just chart-verify [--version=<semver>] [--out=<dir>]
 [group('charts')]
 chart-verify *args:
     #!/usr/bin/env bash
@@ -677,54 +671,20 @@ chart-verify *args:
     version="$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*')"
     version="${version#v}"
     out="chart-verifier"
-    url=""
     for arg in {{ args }}; do
         case "$arg" in
             --version=*) version="${arg#--version=}" ;;
             --out=*) out="${arg#--out=}" ;;
-            --url=*) url="${arg#--url=}" ;;
-            *) echo "error: unknown argument '$arg' (expected --version=<semver>, --out=<dir> or --url=<helm repo>)" >&2; exit 1 ;;
+            *) echo "error: unknown argument '$arg' (expected --version=<semver> or --out=<dir>)" >&2; exit 1 ;;
         esac
     done
     runtime="$(command -v podman || command -v docker)" || { echo "error: needs podman or docker" >&2; exit 1; }
-    if [[ -z "$url" ]]; then
-        {{ just_executable() }} _chart-package "$version" "$out" "$version"
-    fi
-    mkdir -p "$out"
+    {{ just_executable() }} _chart-package "$version" "$out" "$version"
     out="$(cd "$out" && pwd)"
     for chart in aibom-webhook aibom-workload-namespace; do
-        src="/charts/$chart-$version.tgz"
-        [[ -n "$url" ]] && src="${url%/}/$chart-$version.tgz"
         "$runtime" run --rm -v "$out:/charts:z" quay.io/redhat-certification/chart-verifier:latest \
-            verify "$src" -x chart-testing --set profile.vendortype=community \
+            verify "/charts/$chart-$version.tgz" -x chart-testing --set profile.vendortype=community \
             > "$out/$chart-$version-report.yaml"
         echo "$chart: $out/$chart-$version-report.yaml"
         grep -B2 'outcome: FAIL' "$out/$chart-$version-report.yaml" | grep 'check:' | sed 's/^ */  failed: /' || true
-    done
-
-# Regenerates both charts' community reports (via chart-verify) from the
-# released charts on the Helm repository and writes them into the catalog
-# submission layout, catalog/community/project-aibom/<chart>/<version>/report.yaml.
-# The version must already be released: the report's chart-uri and digest are
-# the published tarball's, which the catalog serves and re-verifies.
-# Usage: just catalog-reports [--version=X.Y.Z]
-[group('charts')]
-catalog-reports *args:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    version="$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*')"
-    version="${version#v}"
-    for arg in {{ args }}; do
-        case "$arg" in
-            --version=*) version="${arg#--version=}" ;;
-            *) echo "error: unknown argument '$arg' (expected --version=X.Y.Z)" >&2; exit 1 ;;
-        esac
-    done
-    tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
-    {{ just_executable() }} chart-verify --version="$version" --out="$tmp" --url="{{ helm_repo_url }}"
-    for chart in aibom-webhook aibom-workload-namespace; do
-        dest="catalog/community/project-aibom/$chart/$version"
-        mkdir -p "$dest"
-        cp "$tmp/$chart-$version-report.yaml" "$dest/report.yaml"
-        echo "wrote $dest/report.yaml"
     done
