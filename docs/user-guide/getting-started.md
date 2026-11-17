@@ -51,20 +51,7 @@ Without `--version`, Helm installs the newest release. Pass `--version=X.Y.Z` to
 
 ## Install from the OpenShift console
 
-To install from the console's Developer Catalog (Helm Charts) instead of the command line, a cluster-admin adds the project's Helm repository once:
-
-```yaml
-apiVersion: helm.openshift.io/v1beta1
-kind: HelmChartRepository
-metadata:
-  name: project-aibom
-spec:
-  name: Project AIBOM
-  connectionConfig:
-    url: https://gavinsan33.github.io/aibom-webhook-service
-```
-
-Both charts then appear in the catalog, with a form built from their values. Install the webhook chart once, as a cluster-admin, then the namespace chart in each namespace that runs workloads, still after labeling the namespace with `oc label`. Upgrades are not automatic: the Helm release's Upgrade action installs a newer version, and the CRDs still need the separate apply described in [Upgrading](../reference/upgrading.md).
+Both charts are listed in the OpenShift Helm catalog as community charts, so they appear under Developer Catalog → Helm Charts on any cluster that keeps the default `openshift-helm-charts` repository. Each chart's form is built from its values. Install the webhook chart once, as a cluster-admin, then the namespace chart in each namespace that runs workloads, still after labeling the namespace with `oc label`. The catalog lists a release once its maintainers approve it, usually within a day or so; until then, install it with `helm` as above. Upgrades are not automatic: the Helm release's Upgrade action installs a newer version, and the CRDs still need the separate apply described in [Upgrading](../reference/upgrading.md).
 
 ## Kubernetes without OpenShift
 

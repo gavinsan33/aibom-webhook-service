@@ -601,8 +601,7 @@ uninstall-namespace *args: _check-auth
 # X.Y.Z with appVersion X.Y.Z, so their images default to :X.Y.Z -- the tags
 # .github/workflows/release.yml builds from the same git tag. Refuses a version
 # that's already published: a release is pushed once.
-# --out keeps the packages, which release.yml also adds to the Helm repo on
-# GitHub Pages.
+# --out keeps the packages, which release.yml attaches to the GitHub release.
 # Usage: just chart-push [--version=X.Y.Z] [--repo=<repo>] [--out=<dir>]
 [group('charts')]
 chart-push *args:
@@ -687,30 +686,4 @@ chart-verify *args:
             > "$out/$chart-$version-report.yaml"
         echo "$chart: $out/$chart-$version-report.yaml"
         grep -B2 'outcome: FAIL' "$out/$chart-$version-report.yaml" | grep 'check:' | sed 's/^ */  failed: /' || true
-    done
-
-# Regenerates both charts' community reports (via chart-verify) and writes them
-# into the catalog submission layout, catalog/community/project-aibom/<chart>/<version>/report.yaml.
-# Run this whenever a chart changes before opening a catalog PR, so the committed
-# report's chart digest matches the chart the upstream CI will re-verify.
-# Usage: just catalog-reports [--version=X.Y.Z]
-[group('charts')]
-catalog-reports *args:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    version="$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*')"
-    version="${version#v}"
-    for arg in {{ args }}; do
-        case "$arg" in
-            --version=*) version="${arg#--version=}" ;;
-            *) echo "error: unknown argument '$arg' (expected --version=X.Y.Z)" >&2; exit 1 ;;
-        esac
-    done
-    tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
-    {{ just_executable() }} chart-verify --version="$version" --out="$tmp"
-    for chart in aibom-webhook aibom-workload-namespace; do
-        dest="catalog/community/project-aibom/$chart/$version"
-        mkdir -p "$dest"
-        cp "$tmp/$chart-$version-report.yaml" "$dest/report.yaml"
-        echo "wrote $dest/report.yaml"
     done

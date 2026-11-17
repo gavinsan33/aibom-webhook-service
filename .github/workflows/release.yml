@@ -8,16 +8,13 @@ name: Release
 # The Quay robot needs push access to the three image repos as well as the two
 # chart repos.
 #
-# The charts are also added to a classic Helm repository (index.yaml) on the
-# gh-pages branch, served by GitHub Pages at HELM_REPO_URL, since OpenShift's
-# HelmChartRepository only documents plain HTTP repositories, not OCI.
+# Both chart tarballs are also attached to a GitHub release for the tag.
 on:
   push:
     tags: ["v*.*.*"]
 
 env:
   REGISTRY: quay.io/project-aibom
-  HELM_REPO_URL: https://gavinsan33.github.io/aibom-webhook-service
 
 permissions:
   contents: write
@@ -85,33 +82,9 @@ jobs:
       - name: Publish charts
         run: just chart-push --version=${{ steps.version.outputs.version }} --repo=$REGISTRY --out=dist
 
-      # Generate the community chart-verifier reports for exactly this version, so
-      # their chart digest matches the charts just published. Uploaded as workflow
-      # artifacts to hand to the OpenShift Helm catalog PR (charts/community/...),
-      # not committed back -- that submission is a separate manual step.
-      - name: Generate community chart-verifier reports
-        run: just chart-verify --version=${{ steps.version.outputs.version }} --out=reports
-
-      - name: Upload chart-verifier reports
-        uses: actions/upload-artifact@v4
-        with:
-          name: chart-verifier-reports-${{ steps.version.outputs.version }}
-          path: reports/*-report.yaml
-
-      - name: Add the charts to the Helm repository on gh-pages
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if git fetch origin gh-pages; then
-            git worktree add pages origin/gh-pages
-            git -C pages switch -c gh-pages
-          else
-            git worktree add --orphan -b gh-pages pages
-          fi
-          cp dist/*.tgz pages/
-          merge=()
-          [[ -f pages/index.yaml ]] && merge=(--merge pages/index.yaml)
-          helm repo index pages --url "$HELM_REPO_URL" "${merge[@]}"
-          git -C pages add .
-          git -C pages commit -m "Release ${{ steps.version.outputs.version }}"
-          git -C pages push origin gh-pages
+      # The tarballs are what gets submitted to the OpenShift Helm catalog
+      # (charts/community/project-aibom/<chart>/X.Y.Z/), which hosts its own copy.
+      - name: Create the GitHub release with the chart tarballs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/*.tgz --verify-tag --generate-notes
