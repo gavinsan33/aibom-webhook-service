@@ -16,7 +16,7 @@ spec:
     shortNames:
       - aibomrun
   versions:
-    - name: v1alpha1
+    - name: v1
       served: true
       storage: true
       schema:
@@ -110,7 +110,7 @@ spec:
     # CRD Helm created, which has no last-applied annotation to diff against.
     categories: []
   versions:
-    - name: v1alpha1
+    - name: v1
       served: true
       storage: true
       schema:

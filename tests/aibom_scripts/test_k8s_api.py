@@ -72,10 +72,10 @@ def test_set_custom_object_owner_merge_patches_owner_references(monkeypatch):
         calls.update(method=method, path=path, body=body, content_type=content_type)
 
     monkeypatch.setattr(k8s_api, "_request", fake_request)
-    owner = {"apiVersion": "aibom.io/v1alpha1", "kind": "AIBOM", "name": "x", "uid": "u"}
-    k8s_api.set_custom_object_owner("ns", "aibom.io", "v1alpha1", "aibomtelemetries", "tel", owner)
+    owner = {"apiVersion": "aibom.io/v1", "kind": "AIBOM", "name": "x", "uid": "u"}
+    k8s_api.set_custom_object_owner("ns", "aibom.io", "v1", "aibomtelemetries", "tel", owner)
     assert calls["method"] == "PATCH"
-    assert calls["path"] == "/apis/aibom.io/v1alpha1/namespaces/ns/aibomtelemetries/tel"
+    assert calls["path"] == "/apis/aibom.io/v1/namespaces/ns/aibomtelemetries/tel"
     assert calls["body"] == {"metadata": {"ownerReferences": [owner]}}
     assert calls["content_type"] == "application/merge-patch+json"
 

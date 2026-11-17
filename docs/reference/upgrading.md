@@ -62,7 +62,7 @@ helm upgrade --install aibom-ns-<namespace> oci://quay.io/project-aibom/aibom-wo
 
 Both charts are published together on each merge, so `--devel` picks the same build for each.
 
-The CRDs are `aibom.io/v1alpha1`. There is no published matrix of which webhook, CLI and console plugin versions work together. The components are built from `main` in separate repositories, and the CLI and plugin read fields the webhook writes. Upgrade the webhook first, then the CLI and plugin.
+The CRDs are `aibom.io/v1`. Releases up to 0.2.0 used `v1alpha1`, and there is no migration: a cluster with existing `v1alpha1` records can't take the new CRDs until those records are deleted or migrated, and the CLI and console plugin read only `v1`. There is no published matrix of which webhook, CLI and console plugin versions work together. The components are built from `main` in separate repositories, and the CLI and plugin read fields the webhook writes. Upgrade the webhook first, then the CLI and plugin.
 
 ## Cluster versions
 
