@@ -24,8 +24,6 @@ oc describe pod <pod-name> -n <namespace>
 
 Set `image.discovery.repository` and `image.discovery.tag` to an image the cluster can pull, as shown in [Getting Started](getting-started.md#cluster-requirements), and upgrade the webhook chart. Pods already created keep the old image, so recreate them.
 
-A common trigger on OpenShift AI is an **offline render** (e.g. Argo CD with `helm template`): the discovery-image default keys on the OpenShift AI API, which an offline render can't see, so it falls through to `pytorch/pytorch` even with `platform=openshift` set. Setting `platform` alone doesn't fix this — set `image.discovery` by hand too (see the offline note in [Getting Started](getting-started.md#cluster-requirements)).
-
 ## Pods fail to start in an enabled namespace
 
 A stale `aibom-scripts` ConfigMap can fail pod startup for every instrumented workload in the namespace. The dataset detector hook mounts `runtime_detector.py` from that ConfigMap, and the `aibom-discovery` and `aibom-dataset-sidecar` init containers each run a script from it.
@@ -62,3 +60,26 @@ oc create clusterrolebinding aibom-postprocess-monitoring-view \
 ```
 
 On a cluster that isn't OpenShift, use a ClusterRole that grants the access your Prometheus requires instead.
+
+## Inference telemetry is empty on OpenShift
+
+The namespace chart's PodMonitor, which scrapes a serving engine's `/metrics`, is only picked up by OpenShift's user-workload monitoring, and that is off by default. Without it the PodMonitor is created and the install succeeds, but nothing scrapes it, so inference performance telemetry comes back empty with no error. GPU and other platform metrics are unaffected. Check whether it's on:
+
+```bash
+oc get pods -n openshift-user-workload-monitoring
+```
+
+No `prometheus-user-workload` pods means it's off. A cluster-admin enables it in `cluster-monitoring-config`. If that ConfigMap already exists, add `enableUserWorkload: true` to its `config.yaml` instead of replacing it:
+
+```bash
+oc apply -f - <<'EOF'
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-monitoring-config
+  namespace: openshift-monitoring
+data:
+  config.yaml: |
+    enableUserWorkload: true
+EOF
+```

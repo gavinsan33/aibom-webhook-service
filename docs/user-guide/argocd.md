@@ -1,15 +1,37 @@
 # Installing with Argo CD
 
-Both charts can be managed by Argo CD, including OpenShift GitOps, instead of `helm` commands. The webhook is one Application, and each workload namespace gets its own Application, which an ApplicationSet can generate. Argo CD renders charts without access to the cluster, so two values that Helm works out on its own have to be set:
+Both charts can be managed by Argo CD, including OpenShift GitOps, instead of `helm` commands. The webhook is one Application, and each workload namespace gets its own Application, which an ApplicationSet can generate. Argo CD renders charts without reading objects from the cluster, so two values should be set:
 
-- **`platform`**, on both charts. `auto` detects OpenShift by querying the cluster, which an offline render can't do, so it would render the plain-Kubernetes variant. Set `openshift` or `kubernetes`.
+- **`platform`**, on both charts. `auto` detects OpenShift from the cluster's API versions, which Argo CD passes to the render, but setting `openshift` or `kubernetes` keeps the result independent of how Argo CD is configured.
 - **`signing.createKeys: false`**, on the namespace chart. The chart reuses existing signing keys by reading them from the cluster, so under Argo CD every sync would replace them, and data from pods running at that moment would fail verification. With it off, the webhook creates any missing key when it admits the namespace's first instrumented pod, and never changes it after that. See [Signing Keys](../reference/signing.md).
 
 Nothing secret goes into Git: the webhook generates the HMAC keys, and the watcher generates the compiled-AIBOM key.
 
 ## Permissions
 
-The webhook chart creates CRDs, ClusterRoles, ClusterRoleBindings and a MutatingWebhookConfiguration, and the namespace chart creates a RoleBinding in the webhook's namespace. The Argo CD instance that syncs them needs cluster-scoped rights to create these kinds. On OpenShift GitOps that is normally the default `openshift-gitops` instance, which may need extra RBAC granted for some of them.
+The webhook chart creates CRDs, ClusterRoles, ClusterRoleBindings and a MutatingWebhookConfiguration, and the namespace chart creates a RoleBinding in the webhook's namespace. The Argo CD instance that syncs them needs rights to create all of these, plus the Deployments, Jobs, Services, ServiceAccounts, ImageStreams, PodMonitors and NetworkPolicies the charts put in `project-aibom` and each workload namespace.
+
+On OpenShift GitOps that is normally the default `openshift-gitops` instance, and out of the box it can't sync either chart. Its controller can create RBAC objects, Namespaces and ConfigMaps, but not CRDs or MutatingWebhookConfigurations, and it has no other rights in a namespace unless that namespace is labeled as managed by it. Grant one of:
+
+- **cluster-admin**, the simplest:
+
+    ```bash
+    oc create clusterrolebinding openshift-gitops-cluster-admin --clusterrole=cluster-admin \
+      --serviceaccount=openshift-gitops:openshift-gitops-argocd-application-controller
+    ```
+
+    Anyone who can create Applications in the `openshift-gitops` project then effectively has cluster-admin.
+
+- **Only what the charts need.** A ClusterRole for the two missing cluster-scoped kinds:
+
+    ```bash
+    oc create clusterrole aibom-argocd \
+      --verb='*' --resource=customresourcedefinitions.apiextensions.k8s.io,mutatingwebhookconfigurations.admissionregistration.k8s.io
+    oc create clusterrolebinding aibom-argocd --clusterrole=aibom-argocd \
+      --serviceaccount=openshift-gitops:openshift-gitops-argocd-application-controller
+    ```
+
+    Then label `project-aibom` and every workload namespace with `argocd.argoproj.io/managed-by=openshift-gitops` before its first sync. The operator then grants the instance admin rights in that namespace. The label can go in the ApplicationSet's `managedNamespaceMetadata` next to `aibom.io/enabled`, but the operator grants the rights only after the namespace exists, so the first sync can fail. Add a `syncPolicy.retry` or sync again.
 
 ## The webhook
 
