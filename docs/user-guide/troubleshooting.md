@@ -62,3 +62,26 @@ oc create clusterrolebinding aibom-postprocess-monitoring-view \
 ```
 
 On a cluster that isn't OpenShift, use a ClusterRole that grants the access your Prometheus requires instead.
+
+## Inference telemetry is empty on OpenShift
+
+The namespace chart's PodMonitor, which scrapes a serving engine's `/metrics`, is only picked up by OpenShift's user-workload monitoring, and that is off by default. Without it the PodMonitor is created and the install succeeds, but nothing scrapes it, so inference performance telemetry comes back empty with no error. GPU and other platform metrics are unaffected. Check whether it's on:
+
+```bash
+oc get pods -n openshift-user-workload-monitoring
+```
+
+No `prometheus-user-workload` pods means it's off. A cluster-admin enables it in `cluster-monitoring-config`. If that ConfigMap already exists, add `enableUserWorkload: true` to its `config.yaml` instead of replacing it:
+
+```bash
+oc apply -f - <<'EOF'
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-monitoring-config
+  namespace: openshift-monitoring
+data:
+  config.yaml: |
+    enableUserWorkload: true
+EOF
+```
