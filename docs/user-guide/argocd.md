@@ -9,7 +9,29 @@ Nothing secret goes into Git: the webhook generates the HMAC keys, and the watch
 
 ## Permissions
 
-The webhook chart creates CRDs, ClusterRoles, ClusterRoleBindings and a MutatingWebhookConfiguration, and the namespace chart creates a RoleBinding in the webhook's namespace. The Argo CD instance that syncs them needs cluster-scoped rights to create these kinds. On OpenShift GitOps that is normally the default `openshift-gitops` instance, which may need extra RBAC granted for some of them.
+The webhook chart creates CRDs, ClusterRoles, ClusterRoleBindings and a MutatingWebhookConfiguration, and the namespace chart creates a RoleBinding in the webhook's namespace. The Argo CD instance that syncs them needs rights to create all of these, plus the Deployments, Jobs, Services, ServiceAccounts, ImageStreams, PodMonitors and NetworkPolicies the charts put in `project-aibom` and each workload namespace.
+
+On OpenShift GitOps that is normally the default `openshift-gitops` instance, and out of the box it can't sync either chart. Its controller can create RBAC objects, Namespaces and ConfigMaps, but not CRDs or MutatingWebhookConfigurations, and it has no other rights in a namespace unless that namespace is labeled as managed by it. Grant one of:
+
+- **cluster-admin**, the simplest:
+
+    ```bash
+    oc create clusterrolebinding openshift-gitops-cluster-admin --clusterrole=cluster-admin \
+      --serviceaccount=openshift-gitops:openshift-gitops-argocd-application-controller
+    ```
+
+    Anyone who can create Applications in the `openshift-gitops` project then effectively has cluster-admin.
+
+- **Only what the charts need.** A ClusterRole for the two missing cluster-scoped kinds:
+
+    ```bash
+    oc create clusterrole aibom-argocd \
+      --verb='*' --resource=customresourcedefinitions.apiextensions.k8s.io,mutatingwebhookconfigurations.admissionregistration.k8s.io
+    oc create clusterrolebinding aibom-argocd --clusterrole=aibom-argocd \
+      --serviceaccount=openshift-gitops:openshift-gitops-argocd-application-controller
+    ```
+
+    Then label `project-aibom` and every workload namespace with `argocd.argoproj.io/managed-by=openshift-gitops` before its first sync. The operator then grants the instance admin rights in that namespace. The label can go in the ApplicationSet's `managedNamespaceMetadata` next to `aibom.io/enabled`, but the operator grants the rights only after the namespace exists, so the first sync can fail. Add a `syncPolicy.retry` or sync again.
 
 ## The webhook
 
