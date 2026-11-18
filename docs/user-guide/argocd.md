@@ -1,8 +1,8 @@
 # Installing with Argo CD
 
-Both charts can be managed by Argo CD, including OpenShift GitOps, instead of `helm` commands. The webhook is one Application, and each workload namespace gets its own Application, which an ApplicationSet can generate. Argo CD renders charts without access to the cluster, so two values that Helm works out on its own have to be set:
+Both charts can be managed by Argo CD, including OpenShift GitOps, instead of `helm` commands. The webhook is one Application, and each workload namespace gets its own Application, which an ApplicationSet can generate. Argo CD renders charts without reading objects from the cluster, so two values should be set:
 
-- **`platform`**, on both charts. `auto` detects OpenShift by querying the cluster, which an offline render can't do, so it would render the plain-Kubernetes variant. Set `openshift` or `kubernetes`.
+- **`platform`**, on both charts. `auto` detects OpenShift from the cluster's API versions, which Argo CD passes to the render, but setting `openshift` or `kubernetes` keeps the result independent of how Argo CD is configured.
 - **`signing.createKeys: false`**, on the namespace chart. The chart reuses existing signing keys by reading them from the cluster, so under Argo CD every sync would replace them, and data from pods running at that moment would fail verification. With it off, the webhook creates any missing key when it admits the namespace's first instrumented pod, and never changes it after that. See [Signing Keys](../reference/signing.md).
 
 Nothing secret goes into Git: the webhook generates the HMAC keys, and the watcher generates the compiled-AIBOM key.
