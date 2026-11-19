@@ -687,3 +687,70 @@ chart-verify *args:
         echo "$chart: $out/$chart-$version-report.yaml"
         grep -B2 'outcome: FAIL' "$out/$chart-$version-report.yaml" | grep 'check:' | sed 's/^ */  failed: /' || true
     done
+
+# Submits both charts at <version> to the OpenShift Helm catalog
+# (openshift-helm-charts/charts): one branch and pull request per chart, from
+# your fork, each adding that chart's tarball from the vX.Y.Z GitHub release.
+# Run it as a GitHub user listed in catalog/**/OWNERS, since the catalog's CI
+# checks who opened the pull request. Refuses a version that's already in the
+# catalog or already has an open pull request. --dry-run commits in a temporary
+# clone and stops before pushing. Needs a logged-in gh and a fork of the catalog.
+# Usage: just catalog-submit [--version=<semver>] [--fork=<owner/repo>] [--dry-run]
+[group('charts')]
+catalog-submit *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    upstream="openshift-helm-charts/charts"
+    charts="aibom-webhook aibom-workload-namespace"
+    version="$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*')"
+    version="${version#v}"
+    fork=""
+    dry_run=false
+    for arg in {{ args }}; do
+        case "$arg" in
+            --version=*) version="${arg#--version=}" ;;
+            --fork=*) fork="${arg#--fork=}" ;;
+            --dry-run) dry_run=true ;;
+            *) echo "error: unknown argument '$arg' (expected --version=<semver>, --fork=<owner/repo> or --dry-run)" >&2; exit 1 ;;
+        esac
+    done
+    repo="$(gh repo view --json nameWithOwner -q .nameWithOwner)"
+    [ -n "$fork" ] || fork="$(gh api user -q .login)/charts"
+    gh repo view "$fork" --json name >/dev/null 2>&1 \
+        || { echo "error: no fork $fork; fork $upstream first, or pass --fork=<owner/repo>" >&2; exit 1; }
+    gh release view "v$version" -R "$repo" --json tagName >/dev/null 2>&1 \
+        || { echo "error: $repo has no GitHub release v$version" >&2; exit 1; }
+    for chart in $charts; do
+        title="Add project-aibom/$chart $version"
+        if gh api "repos/$upstream/contents/charts/community/project-aibom/$chart/$version" --silent 2>/dev/null; then
+            echo "error: $chart $version is already in the catalog" >&2; exit 1
+        fi
+        open="$(gh pr list -R "$upstream" --state open --search "\"$title\" in:title" --json title,url \
+            -q ".[] | select(.title == \"$title\") | .url")"
+        [ -z "$open" ] || { echo "error: $chart $version already has an open pull request: $open" >&2; exit 1; }
+    done
+    work="$(mktemp -d)"
+    trap 'rm -rf "$work"' EXIT
+    gh release download "v$version" -R "$repo" -p '*.tgz' -D "$work/dist"
+    git clone -q --depth 1 --filter=blob:none --sparse "https://github.com/$upstream.git" "$work/catalog"
+    cd "$work/catalog"
+    git sparse-checkout set charts/community/project-aibom
+    git remote add fork "https://github.com/$fork.git"
+    for chart in $charts; do
+        branch="project-aibom-$chart-$version"
+        dir="charts/community/project-aibom/$chart/$version"
+        title="Add project-aibom/$chart $version"
+        git switch -q -C "$branch" origin/main
+        mkdir -p "$dir"
+        cp "$work/dist/$chart-$version.tgz" "$dir/"
+        git add "$dir"
+        git commit -q -m "$title"
+        if $dry_run; then
+            echo "dry run: would push $fork:$branch and open \"$title\" with:"
+            git show --stat --format= HEAD | sed 's/^/  /'
+            continue
+        fi
+        git push -q fork "$branch"
+        gh pr create -R "$upstream" --base main --head "${fork%%/*}:$branch" --title "$title" \
+            --body "Chart tarball for community chart \`project-aibom/$chart\` $version."
+    done
