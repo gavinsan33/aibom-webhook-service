@@ -4169,7 +4169,9 @@ def compile_aibom(
 
     # Metadata
     aibom["_metadata"] = {
-        "aibom_version": "0.1.0",
+        # Record format version: bump whenever spec.data's shape changes.
+        # Every record before 1.0.0 says 0.1.0, whatever its shape.
+        "aibom_version": "1.0.0",
         "generated_at": generated_at,
         "generator": "aibom-webhook postprocess",
         "generator_version": GENERATOR_VERSION,
