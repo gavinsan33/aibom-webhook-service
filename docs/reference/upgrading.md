@@ -21,6 +21,10 @@ Existing AIBOMs are not changed by any of this.
 
 The `AIBOM` CRD's short name changed from `aibom` to `aibomrun`, so the project no longer claims [k8s-aibom](https://github.com/GoogleCloudPlatform/k8s-aibom)'s short name. It takes effect once the CRDs are re-applied (step 1 above). After that, `oc get aibom` fails unless k8s-aibom is installed, so update scripts to `oc get aibomrun` or `oc get aiboms.aibom.io`. The CLI was renamed at the same time and is now `oc aibomrun`; reinstall it as described in its docs.
 
+## Record format version
+
+`_metadata.aibom_version` is now the record format version, `1.0.0`, and is bumped whenever `spec.data`'s shape changes. Earlier records all say `0.1.0` across several shapes, so a script that needs to know a pre-1.0.0 record's shape should check its fields rather than this value.
+
 ## Typed `environment` values
 
 `environment.cpu_cores`, `numa_nodes`, `cpu.cpu_cores_per_socket`, `cpu.cpu_threads_per_core`, `network.rdma_device_count` and `network.primary_mtu` are now numbers, `network.rdma_devices` is a list of device names, and `storage.block_devices` is a list of `{name, size}` objects. AIBOMs created before the upgrade keep the strings (`"512"`, `"mlx5_0,mlx5_1"`, raw `lsblk` output), so a script reading both should accept either form. Update `oc aibomrun` and the console plugin to versions that display both.
