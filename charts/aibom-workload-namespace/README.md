@@ -6,6 +6,8 @@ It creates the `aibom-scripts` ConfigMap that instrumented pods run, the HMAC ke
 
 Full documentation: https://gavinsan33.github.io/project-aibom/
 
+**Prerequisite: label the namespace first.** Run `oc label namespace <namespace> aibom.io/enabled=true` before installing, including from the OpenShift console, which can't add the label itself. Without it the webhook ignores the namespace's pods and no AIBOM is recorded, with no error. If the webhook chart isn't in `project-aibom`, set `aibomSystemNamespace` to its namespace.
+
 ## Install
 
 A cluster-admin installs it, because it also creates a RoleBinding in the webhook's namespace. The namespace must already exist and carry the opt-in label, which Helm can't add:
