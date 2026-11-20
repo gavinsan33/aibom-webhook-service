@@ -681,8 +681,8 @@ _chart-package-catalog dir version:
     grep -q 'releases/download/v<version>/aibom-crds.yaml' "$chart/README.md" \
         || { echo "error: README.md has no v<version> CRD URL to fill in" >&2; exit 1; }
     sed -i 's|releases/download/v<version>/aibom-crds.yaml|releases/download/v{{ version }}/aibom-crds.yaml|g' "$chart/README.md"
-    sed -i 's|^description: \(.*\)$|description: "\1. REQUIRES the AIBOM CRDs, which this chart does not include. Install them first, see the README."|' "$chart/Chart.yaml"
-    jq --arg cmd "$cmd" '.description = "REQUIRED BEFORE INSTALLING: this chart does not include its CRDs. A cluster-admin must install them first, or the install fails: " + $cmd' \
+    sed -i 's|^description: \(.*\)$|description: "\1. PREREQUISITE: the AIBOM CRDs, which this chart does not include. Install them first, see the README."|' "$chart/Chart.yaml"
+    jq --arg cmd "$cmd" '.description = "PREREQUISITE: this chart does not include its CRDs. A cluster-admin must install them before this chart, or the install fails: " + $cmd' \
         "$chart/values.schema.json" > "$work/schema.json"
     mv "$work/schema.json" "$chart/values.schema.json"
     helm package "$work/aibom-webhook" -d "$work/out" >/dev/null
