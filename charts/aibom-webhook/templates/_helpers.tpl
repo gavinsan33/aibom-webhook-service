@@ -108,3 +108,16 @@ no APIs.
 {{- else -}}{{ $p }}
 {{- end -}}
 {{- end -}}
+
+{{/*
+URL of the AIBOM CRDs for this chart's version: the aibom-crds.yaml asset on
+its GitHub release, which release.yml extracts from this chart's crds/. Dev
+builds and the unpackaged chart (0.0.0) have no release, so they point at main.
+*/}}
+{{- define "aibom-webhook.crdsURL" -}}
+{{- if and (regexMatch "^[0-9]+\\.[0-9]+\\.[0-9]+$" .Chart.Version) (ne .Chart.Version "0.0.0") -}}
+https://github.com/gavinsan33/aibom-webhook-service/releases/download/v{{ .Chart.Version }}/aibom-crds.yaml
+{{- else -}}
+https://raw.githubusercontent.com/gavinsan33/aibom-webhook-service/main/charts/aibom-webhook/crds/aibom-crd.yaml
+{{- end -}}
+{{- end -}}

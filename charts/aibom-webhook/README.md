@@ -4,11 +4,23 @@ Records an AI Bill of Materials (AIBOM) for AI workloads. A mutating admission w
 
 Full documentation: https://gavinsan33.github.io/project-aibom/
 
+## Installing from the OpenShift Helm catalog? Install the CRDs first
+
+**The chart in the OpenShift Helm catalog does not include its CRDs, and nothing works without them.** The catalog doesn't accept charts that contain CRDs. Before you install this chart from the Developer Catalog, a cluster-admin must apply the `AIBOM` and `AIBOMTelemetry` CRDs for the same version:
+
+```bash
+oc apply -f https://github.com/gavinsan33/aibom-webhook-service/releases/download/v<version>/aibom-crds.yaml
+```
+
+If they're missing, the install fails and prints this command. **Apply them again before every upgrade**, with the new version in the URL: Helm never installs or updates CRDs for this chart, and an AIBOM created against an older CRD silently loses any field the CRD doesn't know.
+
+The chart from `oci://quay.io/project-aibom/aibom-webhook` includes the CRDs and installs them itself.
+
 ## Requirements
 
 - OpenShift 4.16 or later, or Kubernetes 1.29 or later.
 - On Kubernetes, [cert-manager](https://cert-manager.io/), which issues the webhook's TLS certificate. On OpenShift the built-in service CA issues it, so nothing extra is needed.
-- A cluster-admin to install. The chart creates ClusterRoles, ClusterRoleBindings, a MutatingWebhookConfiguration and the `AIBOM`/`AIBOMTelemetry` CRDs.
+- A cluster-admin to install. The chart creates ClusterRoles, ClusterRoleBindings, a MutatingWebhookConfiguration and, from quay.io, the `AIBOM`/`AIBOMTelemetry` CRDs.
 
 ## Install
 
@@ -31,7 +43,7 @@ Run `helm test aibom-webhook -n project-aibom` to check that the webhook answers
 
 ## Things to know
 
-- **Upgrades don't update the CRDs.** Helm installs a chart's CRDs once and never updates them. Before upgrading, apply the new ones: `helm show crds oci://quay.io/project-aibom/aibom-webhook --version <version> | oc apply -f -`.
+- **Upgrades don't update the CRDs.** Helm installs a chart's CRDs once and never updates them. Before upgrading, apply the new ones: `helm show crds oci://quay.io/project-aibom/aibom-webhook --version <version> | oc apply -f -`, or, without `helm`, the `oc apply -f` command above with the new version.
 - **A `PYTHONPATH` set in the image is overridden.** The webhook sets `PYTHONPATH` on instrumented containers to load its detection hooks, and can't see an `ENV PYTHONPATH` baked into the image. Declare it with the `aibom.io/python-path` pod annotation, for example `/app:/app/lib`, and it's appended.
 - **The webhook fails open.** If it's unreachable, pods are created uninstrumented and no AIBOM is recorded.
 - **Instrumented pods pull a discovery image.** It's `quay.io/project-aibom/aibom-discovery`, about 230 MB, at the chart's version. If the cluster can't reach Quay, set `image.discovery.repository` and `.tag` to a copy it can pull; any image with `python3`, `bash`, `lscpu` and `lsblk` works.

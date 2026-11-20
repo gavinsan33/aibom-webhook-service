@@ -5,5 +5,12 @@ To record AIBOMs in a namespace, label it and install the namespace chart there:
   oc label namespace <namespace> aibom.io/enabled=true
   helm upgrade --install aibom-ns-<namespace> oci://quay.io/project-aibom/aibom-workload-namespace -n <namespace>{{ if ne (include "aibom-webhook.namespace" .) "project-aibom" }} --set aibomSystemNamespace={{ include "aibom-webhook.namespace" . }}{{ end }}
 
+IMPORTANT: before every upgrade of this chart, a cluster-admin must apply the
+AIBOM CRDs for the version being installed. Helm never updates them, and the
+OpenShift Helm catalog's copy of this chart doesn't include them at all. With
+old CRDs, new AIBOM fields are silently dropped. For this version:
+
+  oc apply -f {{ include "aibom-webhook.crdsURL" . }}
+
 Check the install with:  helm test {{ .Release.Name }} -n {{ include "aibom-webhook.namespace" . }}
 Docs: https://gavinsan33.github.io/project-aibom/
