@@ -24,6 +24,16 @@ oc describe pod <pod-name> -n <namespace>
 
 Set `image.discovery.repository` and `image.discovery.tag` to an image the cluster can pull, as shown in [Getting Started](getting-started.md#cluster-requirements), and upgrade the webhook chart. Pods already created keep the old image, so recreate them.
 
+## Install fails with "the AIBOM CRDs are not installed"
+
+The webhook chart from the OpenShift Helm catalog doesn't include the `AIBOM` and `AIBOMTelemetry` CRDs, and refuses to install without them. Nothing has been created at that point. Apply the CRDs for the same version as a cluster-admin, then install again:
+
+```bash
+oc apply -f https://github.com/gavinsan33/aibom-webhook-service/releases/download/v<version>/aibom-crds.yaml
+```
+
+The error message prints this command with the version filled in. The chart from `oci://quay.io/project-aibom/aibom-webhook` includes the CRDs and doesn't hit this.
+
 ## Pods fail to start in an enabled namespace
 
 A stale `aibom-scripts` ConfigMap can fail pod startup for every instrumented workload in the namespace. The dataset detector hook mounts `runtime_detector.py` from that ConfigMap, and the `aibom-discovery` and `aibom-dataset-sidecar` init containers each run a script from it.

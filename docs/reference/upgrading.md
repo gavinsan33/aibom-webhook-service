@@ -7,7 +7,7 @@ Run these in order, as a cluster-admin, for each upgrade:
 1. **Update the CRDs.** Helm installs the contents of a chart's `crds/` directory once and never updates them, so `helm upgrade` leaves the `AIBOM` and `AIBOMTelemetry` CRDs as they were. From a checkout, `just deploy` re-applies the CRD file on every run. With the published chart, apply it yourself:
 
     ```bash
-    helm show crds oci://quay.io/project-aibom/aibom-webhook | oc apply -f -
+    helm show crds oci://quay.io/project-aibom/aibom-webhook --version <version> | oc apply -f -
     ```
 
     Charts from the OpenShift Helm catalog don't contain the CRDs; apply the release's `aibom-crds.yaml` instead:

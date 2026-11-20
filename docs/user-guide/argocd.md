@@ -62,6 +62,8 @@ spec:
 
 Add any other values you'd pass to `helm`, as listed in [Configuration](../reference/configuration.md). On Kubernetes without OpenShift, set `platform: kubernetes` and install cert-manager first, as in [Getting Started](getting-started.md#kubernetes-without-openshift).
 
+Point Argo CD at the quay.io chart, as above, not at the OpenShift Helm catalog's copy. The catalog's copy leaves out the CRDs, and its check for missing CRDs can't run under Argo CD, which renders without cluster access, so a sync would succeed and every AIBOM would then fail to be created.
+
 To upgrade, change `targetRevision`. Argo CD applies the chart's CRDs as part of the sync, so the separate CRD step in [Upgrading](../reference/upgrading.md) isn't needed. Check with `oc get crd aiboms.aibom.io -o yaml` after an upgrade if a release notes a CRD change.
 
 ## Workload namespaces
