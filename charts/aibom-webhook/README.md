@@ -4,6 +4,18 @@ Records an AI Bill of Materials (AIBOM) for AI workloads. A mutating admission w
 
 Full documentation: https://gavinsan33.github.io/project-aibom/
 
+## Installing from the OpenShift Helm catalog? Install the CRDs first
+
+**The chart in the OpenShift Helm catalog does not include its CRDs, and nothing works without them.** The catalog doesn't accept charts that contain CRDs. Before you install this chart from the Developer Catalog, a cluster-admin must apply the `AIBOM` and `AIBOMTelemetry` CRDs for the same version:
+
+```bash
+oc apply -f https://raw.githubusercontent.com/gavinsan33/aibom-webhook-service/v<version>/charts/aibom-webhook/crds/aibom-crd.yaml
+```
+
+If they're missing, the install fails and prints this command. **Apply them again before every upgrade**, with the new version in the URL: Helm never installs or updates CRDs for this chart, and an AIBOM created against an older CRD silently loses any field the CRD doesn't know.
+
+The chart from `oci://quay.io/project-aibom/aibom-webhook` includes the CRDs and installs them itself.
+
 ## Requirements
 
 - OpenShift 4.16 or later, or Kubernetes 1.29 or later.
@@ -26,16 +38,6 @@ helm upgrade --install aibom-ns-<namespace> oci://quay.io/project-aibom/aibom-wo
 ```
 
 If you installed this chart somewhere other than `project-aibom`, also set `aibomSystemNamespace` on the namespace chart.
-
-### From the OpenShift Helm catalog
-
-The catalog doesn't accept charts that contain CRDs, so its copy of this chart leaves them out. Before installing it from the Developer Catalog, apply the CRDs for the same version as a cluster-admin:
-
-```bash
-oc apply -f https://raw.githubusercontent.com/gavinsan33/aibom-webhook-service/v<version>/charts/aibom-webhook/crds/aibom-crd.yaml
-```
-
-If they're missing, the install fails and prints this command.
 
 Run `helm test aibom-webhook -n project-aibom` to check that the webhook answers and the CRDs are installed.
 

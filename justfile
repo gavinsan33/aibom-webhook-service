@@ -661,8 +661,11 @@ _chart-package version out app_version="":
 # Writes <dir>/aibom-webhook-<version>-catalog.tgz: <dir>/aibom-webhook-<version>.tgz
 # without its crds/ directory, since the OpenShift Helm catalog doesn't accept
 # charts with CRDs and its users install them separately
-# (templates/crds-required.yaml says how). release.yml attaches it to the
-# GitHub release, and catalog-submit submits it as aibom-webhook-<version>.tgz.
+# (templates/crds-required.yaml says how). The catalog tile's description, the
+# top of the install form (the schema's description) and the README's command
+# carry the exact CRD apply command for <version>, so console users see it
+# before they install. release.yml attaches it to the GitHub release, and
+# catalog-submit submits it as aibom-webhook-<version>.tgz.
 _chart-package-catalog dir version:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -672,6 +675,15 @@ _chart-package-catalog dir version:
     tar -xzf "$tgz" -C "$work"
     [ -d "$work/aibom-webhook/crds" ] || { echo "error: $tgz has no crds/ directory" >&2; exit 1; }
     rm -rf "$work/aibom-webhook/crds"
+    chart="$work/aibom-webhook"
+    cmd="oc apply -f https://raw.githubusercontent.com/gavinsan33/aibom-webhook-service/v{{ version }}/charts/aibom-webhook/crds/aibom-crd.yaml"
+    grep -q 'aibom-webhook-service/v<version>/' "$chart/README.md" \
+        || { echo "error: README.md has no v<version> CRD URL to fill in" >&2; exit 1; }
+    sed -i 's|aibom-webhook-service/v<version>/|aibom-webhook-service/v{{ version }}/|g' "$chart/README.md"
+    sed -i 's|^description: \(.*\)$|description: "\1. REQUIRES the AIBOM CRDs, which this chart does not include. Install them first, see the README."|' "$chart/Chart.yaml"
+    jq --arg cmd "$cmd" '.description = "REQUIRED BEFORE INSTALLING: this chart does not include its CRDs. A cluster-admin must install them first, or the install fails: " + $cmd' \
+        "$chart/values.schema.json" > "$work/schema.json"
+    mv "$work/schema.json" "$chart/values.schema.json"
     helm package "$work/aibom-webhook" -d "$work/out" >/dev/null
     mv "$work/out/aibom-webhook-{{ version }}.tgz" "{{ dir }}/aibom-webhook-{{ version }}-catalog.tgz"
 
