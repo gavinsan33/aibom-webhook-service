@@ -4,9 +4,9 @@ Records an AI Bill of Materials (AIBOM) for AI workloads. A mutating admission w
 
 Full documentation: https://gavinsan33.github.io/project-aibom/
 
-## Installing from the OpenShift Helm catalog? Install the CRDs first
+## Prerequisite: install the AIBOM CRDs (OpenShift Helm catalog)
 
-**The chart in the OpenShift Helm catalog does not include its CRDs, and nothing works without them.** The catalog doesn't accept charts that contain CRDs. Before you install this chart from the Developer Catalog, a cluster-admin must apply the `AIBOM` and `AIBOMTelemetry` CRDs for the same version:
+**Prerequisite for installing from the OpenShift Helm catalog: the chart there does not include its CRDs, and nothing works without them.** The catalog doesn't accept charts that contain CRDs. Before you install this chart from the Developer Catalog, a cluster-admin must apply the `AIBOM` and `AIBOMTelemetry` CRDs for the same version:
 
 ```bash
 oc apply -f https://github.com/gavinsan33/aibom-webhook-service/releases/download/v<version>/aibom-crds.yaml
@@ -20,6 +20,7 @@ The chart from `oci://quay.io/project-aibom/aibom-webhook` includes the CRDs and
 
 - OpenShift 4.16 or later, or Kubernetes 1.29 or later.
 - On Kubernetes, [cert-manager](https://cert-manager.io/), which issues the webhook's TLS certificate. On OpenShift the built-in service CA issues it, so nothing extra is needed.
+- **From the OpenShift Helm catalog: the `AIBOM` and `AIBOMTelemetry` CRDs, installed first.** See "Prerequisite: install the AIBOM CRDs" above.
 - A cluster-admin to install. The chart creates ClusterRoles, ClusterRoleBindings, a MutatingWebhookConfiguration and, from quay.io, the `AIBOM`/`AIBOMTelemetry` CRDs.
 
 ## Install

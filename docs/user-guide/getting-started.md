@@ -52,7 +52,9 @@ To manage both charts from Argo CD or OpenShift GitOps instead, see [Installing 
 
 ## Install from the OpenShift console
 
-Both charts are listed in the OpenShift Helm catalog as community charts, so they appear under Developer Catalog → Helm Charts on any cluster that keeps the default `openshift-helm-charts` repository. The catalog doesn't accept CRDs, so its copy of the webhook chart leaves them out. Apply them first, as a cluster-admin, for the version you're installing:
+Both charts are submitted to the OpenShift Helm catalog as community charts, so once approved they appear under Developer Catalog → Helm Charts on any cluster that keeps the default `openshift-helm-charts` repository.
+
+**Prerequisite: install the AIBOM CRDs.** The catalog doesn't accept CRDs, so its copy of the webhook chart leaves them out. Apply them first, as a cluster-admin, for the version you're installing:
 
 ```bash
 oc apply -f https://github.com/gavinsan33/aibom-webhook-service/releases/download/v<version>/aibom-crds.yaml --as=system:admin
@@ -130,7 +132,7 @@ helm uninstall aibom-ns-<namespace> -n <namespace> --kube-as-user=system:admin
 helm uninstall aibom-webhook -n project-aibom --kube-as-user=system:admin
 ```
 
-The `aiboms.aibom.io` CRD and any existing AIBOM resources are left in place.
+The `AIBOM` and `AIBOMTelemetry` CRDs and any existing AIBOM resources are left in place.
 
 ## Working from source
 

@@ -14,7 +14,7 @@ There are three ways to get images into the cluster — pick whichever fits:
 
 The recipes target OpenShift: they call `oc` and impersonate `system:admin`. Set `AIBOM_PLATFORM=kubernetes` to use `kubectl` with your own credentials instead. `just deploy-buildconfig` works only on OpenShift.
 
-If your account doesn't have cluster-scoped permission to create/patch CRDs, pass `--skip-crds` to any of the three; the `aiboms.aibom.io` CRD and `project-aibom` namespace must then already exist (created once via `oc apply -f charts/aibom-webhook/crds/aibom-crd.yaml` and `oc create namespace project-aibom`).
+If your account doesn't have cluster-scoped permission to create/patch CRDs, pass `--skip-crds` to any of the three; the `AIBOM` and `AIBOMTelemetry` CRDs and the `project-aibom` namespace must then already exist (created once via `oc apply -f charts/aibom-webhook/crds/aibom-crd.yaml` and `oc create namespace project-aibom`).
 
 ```bash
 # Default: pull whatever images.yml most recently built and pushed
