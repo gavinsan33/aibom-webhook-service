@@ -52,7 +52,13 @@ To manage both charts from Argo CD or OpenShift GitOps instead, see [Installing 
 
 ## Install from the OpenShift console
 
-Both charts are listed in the OpenShift Helm catalog as community charts, so they appear under Developer Catalog → Helm Charts on any cluster that keeps the default `openshift-helm-charts` repository. Each chart's form is built from its values. Install the webhook chart once, as a cluster-admin, then the namespace chart in each namespace that runs workloads, still after labeling the namespace with `oc label`. The catalog lists a release once its maintainers approve it, usually within a day or so; until then, install it with `helm` as above. Upgrades are not automatic: the Helm release's Upgrade action installs a newer version, and the CRDs still need the separate apply described in [Upgrading](../reference/upgrading.md).
+Both charts are listed in the OpenShift Helm catalog as community charts, so they appear under Developer Catalog → Helm Charts on any cluster that keeps the default `openshift-helm-charts` repository. The catalog doesn't accept CRDs, so its copy of the webhook chart leaves them out. Apply them first, as a cluster-admin, for the version you're installing:
+
+```bash
+oc apply -f https://raw.githubusercontent.com/gavinsan33/aibom-webhook-service/v<version>/charts/aibom-webhook/crds/aibom-crd.yaml --as=system:admin
+```
+
+If they're missing, the install fails and prints this command. Each chart's form is built from its values. Install the webhook chart once, as a cluster-admin, then the namespace chart in each namespace that runs workloads, still after labeling the namespace with `oc label`. The catalog lists a release once its maintainers approve it, usually within a day or so; until then, install it with `helm` as above. Upgrades are not automatic: the Helm release's Upgrade action installs a newer version, and the CRDs still need the separate apply described in [Upgrading](../reference/upgrading.md).
 
 ## Kubernetes without OpenShift
 

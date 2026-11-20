@@ -10,6 +10,12 @@ Run these in order, as a cluster-admin, for each upgrade:
     helm show crds oci://quay.io/project-aibom/aibom-webhook | oc apply -f -
     ```
 
+    Charts from the OpenShift Helm catalog don't contain the CRDs; apply them from the release's tag instead:
+
+    ```bash
+    oc apply -f https://raw.githubusercontent.com/gavinsan33/aibom-webhook-service/v<version>/charts/aibom-webhook/crds/aibom-crd.yaml
+    ```
+
     This matters because the apiserver silently drops fields a CRD schema doesn't know. An AIBOM created against an old CRD loses any newer field, such as the signature fields, with no error. `spec` is immutable, so it can't be repaired afterward.
 
 2. **Upgrade the webhook chart** in `project-aibom` with the same `helm upgrade --install` command used to install it. This also updates the `aibom-view` role that lets users read AIBOMs and their telemetry.

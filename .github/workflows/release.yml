@@ -8,7 +8,8 @@ name: Release
 # The Quay robot needs push access to the three image repos as well as the two
 # chart repos.
 #
-# Both chart tarballs are also attached to a GitHub release for the tag.
+# Both chart tarballs are also attached to a GitHub release for the tag, along
+# with aibom-webhook-X.Y.Z-catalog.tgz, the webhook chart without its CRDs.
 on:
   push:
     tags: ["v*.*.*"]
@@ -83,7 +84,13 @@ jobs:
       - name: Publish charts
         run: just chart-push --version=${{ steps.version.outputs.version }} --repo=$REGISTRY --out=dist
 
-      # The tarballs are what gets submitted to the OpenShift Helm catalog
+      # The catalog doesn't accept charts with CRDs, so it gets this copy of the
+      # webhook chart; its users install the CRDs separately.
+      - name: Package the webhook chart for the OpenShift Helm catalog
+        run: just _chart-package-catalog dist ${{ steps.version.outputs.version }}
+
+      # `just catalog-submit` submits aibom-webhook-X.Y.Z-catalog.tgz and the
+      # namespace chart's tarball to the OpenShift Helm catalog
       # (charts/community/project-aibom/<chart>/X.Y.Z/), which hosts its own copy.
       - name: Create the GitHub release with the chart tarballs
         env:

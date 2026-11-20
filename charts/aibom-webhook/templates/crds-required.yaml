@@ -1,0 +1,17 @@
+{{- /*
+Fails an install against a cluster that lacks the AIBOM CRDs. The OpenShift
+Helm catalog doesn't accept charts with CRDs, so its copy of this chart ships
+without crds/ and the CRDs are installed separately. Without this check that
+install would succeed and every postprocess Job would then fail to create its
+AIBOM. Helm installs crds/ before rendering templates, so the quay.io chart
+passes. lookup returns nothing without a cluster (helm template, helm lint,
+Argo CD), so the probe on kube-system skips the check there.
+*/ -}}
+{{- if lookup "v1" "Namespace" "" "kube-system" }}
+{{- $ref := ternary (printf "v%s" .Chart.Version) "main" (regexMatch "^[0-9]+\\.[0-9]+\\.[0-9]+$" .Chart.Version) }}
+{{- range list "aiboms.aibom.io" "aibomtelemetries.aibom.io" }}
+{{- if not (lookup "apiextensions.k8s.io/v1" "CustomResourceDefinition" "" .) }}
+{{- fail (printf "CRD %s is not installed. Install the AIBOM CRDs first, as a cluster-admin:\n\n  oc apply -f https://raw.githubusercontent.com/gavinsan33/aibom-webhook-service/%s/charts/aibom-webhook/crds/aibom-crd.yaml\n" . $ref) }}
+{{- end }}
+{{- end }}
+{{- end }}

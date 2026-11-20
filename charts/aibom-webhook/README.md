@@ -8,7 +8,7 @@ Full documentation: https://gavinsan33.github.io/project-aibom/
 
 - OpenShift 4.16 or later, or Kubernetes 1.29 or later.
 - On Kubernetes, [cert-manager](https://cert-manager.io/), which issues the webhook's TLS certificate. On OpenShift the built-in service CA issues it, so nothing extra is needed.
-- A cluster-admin to install. The chart creates ClusterRoles, ClusterRoleBindings, a MutatingWebhookConfiguration and the `AIBOM`/`AIBOMTelemetry` CRDs.
+- A cluster-admin to install. The chart creates ClusterRoles, ClusterRoleBindings, a MutatingWebhookConfiguration and, from quay.io, the `AIBOM`/`AIBOMTelemetry` CRDs.
 
 ## Install
 
@@ -27,11 +27,21 @@ helm upgrade --install aibom-ns-<namespace> oci://quay.io/project-aibom/aibom-wo
 
 If you installed this chart somewhere other than `project-aibom`, also set `aibomSystemNamespace` on the namespace chart.
 
+### From the OpenShift Helm catalog
+
+The catalog doesn't accept charts that contain CRDs, so its copy of this chart leaves them out. Before installing it from the Developer Catalog, apply the CRDs for the same version as a cluster-admin:
+
+```bash
+oc apply -f https://raw.githubusercontent.com/gavinsan33/aibom-webhook-service/v<version>/charts/aibom-webhook/crds/aibom-crd.yaml
+```
+
+If they're missing, the install fails and prints this command.
+
 Run `helm test aibom-webhook -n project-aibom` to check that the webhook answers and the CRDs are installed.
 
 ## Things to know
 
-- **Upgrades don't update the CRDs.** Helm installs a chart's CRDs once and never updates them. Before upgrading, apply the new ones: `helm show crds oci://quay.io/project-aibom/aibom-webhook --version <version> | oc apply -f -`.
+- **Upgrades don't update the CRDs.** Helm installs a chart's CRDs once and never updates them. Before upgrading, apply the new ones: `helm show crds oci://quay.io/project-aibom/aibom-webhook --version <version> | oc apply -f -`, or, without `helm`, the `oc apply -f` command above with the new version.
 - **A `PYTHONPATH` set in the image is overridden.** The webhook sets `PYTHONPATH` on instrumented containers to load its detection hooks, and can't see an `ENV PYTHONPATH` baked into the image. Declare it with the `aibom.io/python-path` pod annotation, for example `/app:/app/lib`, and it's appended.
 - **The webhook fails open.** If it's unreachable, pods are created uninstrumented and no AIBOM is recorded.
 - **Instrumented pods pull a discovery image.** It's `quay.io/project-aibom/aibom-discovery`, about 230 MB, at the chart's version. If the cluster can't reach Quay, set `image.discovery.repository` and `.tag` to a copy it can pull; any image with `python3`, `bash`, `lscpu` and `lsblk` works.
