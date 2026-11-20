@@ -63,8 +63,8 @@ oc apply -f https://github.com/gavinsan33/aibom-webhook-service/releases/downloa
 If they're missing, the install fails and prints this command. Then, as a cluster-admin:
 
 1. **Create or select the `project-aibom` project**, and install the AIBOM Webhook chart there. The console installs into whichever project is selected when you click Create, often `default`. Another project works, but then every namespace chart needs `aibomSystemNamespace` set to it.
-2. **Label each namespace that runs workloads** with `oc label namespace <namespace> aibom.io/enabled=true --as=system:admin`. The console can't add the label, and without it the webhook ignores the namespace's pods, with no error.
-3. **Select that namespace's project** and install the AIBOM Workload Namespace chart there.
+2. **Label each namespace that runs workloads** with `oc label namespace <namespace> aibom.io/enabled=true --as=system:admin`. The console can't add the label. Without it the webhook would ignore the namespace's pods, so the namespace chart refuses to install and prints this command.
+3. **Select that namespace's project** and install the AIBOM Workload Namespace chart there. If the webhook isn't in `project-aibom`, the install refuses and says what to set `aibomSystemNamespace` to.
 
 Each chart's form is built from its values. If the console shows a 404 page after you click Create, check whether the install succeeded with `helm list -A` before retrying. On clusters with the console's Developer perspective disabled, the page the console opens after an install may not exist even though the install worked. The catalog lists a release once its maintainers approve it, usually within a day or so; until then, install it with `helm` as above. Upgrades are not automatic: the Helm release's Upgrade action installs a newer version, and the CRDs still need the separate apply described in [Upgrading](../reference/upgrading.md).
 

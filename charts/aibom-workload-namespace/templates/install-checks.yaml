@@ -1,0 +1,31 @@
+{{- /*
+Refuses a first install that would leave the namespace silently
+uninstrumented, which the OpenShift console makes easy: it can't add the
+namespace label, and it installs the webhook chart into whichever project is
+selected. The webhook's MutatingWebhookConfiguration is the source of truth
+for both the label it selects on (webhook.namespaceSelectorLabel, which this
+chart can't see) and the namespace the webhook runs in.
+
+Install only, so an upgrade of a namespace whose label was removed to pause
+instrumentation still goes through. lookup returns nothing without a cluster
+(helm template, helm lint, Argo CD), so the probe on kube-system skips the
+checks there.
+*/ -}}
+{{- if and .Release.IsInstall (lookup "v1" "Namespace" "" "kube-system") }}
+{{- $ns := .Release.Namespace }}
+{{- $config := lookup "admissionregistration.k8s.io/v1" "MutatingWebhookConfiguration" "" "aibom-webhook" }}
+{{- if not $config }}
+{{- fail "the AIBOM webhook isn't installed (there's no aibom-webhook MutatingWebhookConfiguration). Install the aibom-webhook chart first, then this chart." }}
+{{- end }}
+{{- $hook := first (dig "webhooks" (list) $config) | default dict }}
+{{- $webhookNs := dig "clientConfig" "service" "namespace" "" $hook }}
+{{- if and $webhookNs (ne $webhookNs .Values.aibomSystemNamespace) }}
+{{- fail (printf "the AIBOM webhook is installed in namespace %q, but aibomSystemNamespace is %q. Set aibomSystemNamespace to %q (in the console's install form, or with --set aibomSystemNamespace=%s) and install again." $webhookNs .Values.aibomSystemNamespace $webhookNs $webhookNs) }}
+{{- end }}
+{{- $labels := dig "metadata" "labels" (dict) (lookup "v1" "Namespace" "" $ns) }}
+{{- range $key, $value := dig "namespaceSelector" "matchLabels" (dict) $hook }}
+{{- if ne (toString (get $labels $key)) (toString $value) }}
+{{- fail (printf "namespace %s isn't labeled %s=%s, so the AIBOM webhook would ignore its pods. Label it as a cluster-admin, then install this chart again:\n\n  oc label namespace %s %s=%s\n" $ns $key $value $ns $key $value) }}
+{{- end }}
+{{- end }}
+{{- end }}
