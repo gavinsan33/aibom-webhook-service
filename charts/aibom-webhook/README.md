@@ -9,7 +9,7 @@ Full documentation: https://gavinsan33.github.io/project-aibom/
 **The chart in the OpenShift Helm catalog does not include its CRDs, and nothing works without them.** The catalog doesn't accept charts that contain CRDs. Before you install this chart from the Developer Catalog, a cluster-admin must apply the `AIBOM` and `AIBOMTelemetry` CRDs for the same version:
 
 ```bash
-oc apply -f https://raw.githubusercontent.com/gavinsan33/aibom-webhook-service/v<version>/charts/aibom-webhook/crds/aibom-crd.yaml
+oc apply -f https://github.com/gavinsan33/aibom-webhook-service/releases/download/v<version>/aibom-crds.yaml
 ```
 
 If they're missing, the install fails and prints this command. **Apply them again before every upgrade**, with the new version in the URL: Helm never installs or updates CRDs for this chart, and an AIBOM created against an older CRD silently loses any field the CRD doesn't know.

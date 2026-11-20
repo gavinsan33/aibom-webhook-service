@@ -8,10 +8,10 @@ passes. lookup returns nothing without a cluster (helm template, helm lint,
 Argo CD), so the probe on kube-system skips the check there.
 */ -}}
 {{- if lookup "v1" "Namespace" "" "kube-system" }}
-{{- $ref := ternary (printf "v%s" .Chart.Version) "main" (regexMatch "^[0-9]+\\.[0-9]+\\.[0-9]+$" .Chart.Version) }}
+{{- $url := include "aibom-webhook.crdsURL" . }}
 {{- range list "aiboms.aibom.io" "aibomtelemetries.aibom.io" }}
 {{- if not (lookup "apiextensions.k8s.io/v1" "CustomResourceDefinition" "" .) }}
-{{- fail (printf "the AIBOM CRDs are not installed (%s is missing). The OpenShift Helm catalog's copy of this chart doesn't include them. Install them as a cluster-admin, then install this chart again:\n\n  oc apply -f https://raw.githubusercontent.com/gavinsan33/aibom-webhook-service/%s/charts/aibom-webhook/crds/aibom-crd.yaml\n" . $ref) }}
+{{- fail (printf "the AIBOM CRDs are not installed (%s is missing). The OpenShift Helm catalog's copy of this chart doesn't include them. Install them as a cluster-admin, then install this chart again:\n\n  oc apply -f %s\n" . $url) }}
 {{- end }}
 {{- end }}
 {{- end }}

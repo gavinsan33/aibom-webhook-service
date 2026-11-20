@@ -658,14 +658,14 @@ _chart-package version out app_version="":
         helm package "charts/$chart" -d "{{ out }}" --version "{{ version }}" {{ if app_version == "" { "" } else { "--app-version " + app_version } }}
     done
 
-# Writes <dir>/aibom-webhook-<version>-catalog.tgz: <dir>/aibom-webhook-<version>.tgz
-# without its crds/ directory, since the OpenShift Helm catalog doesn't accept
-# charts with CRDs and its users install them separately
-# (templates/crds-required.yaml says how). The catalog tile's description, the
-# top of the install form (the schema's description) and the README's command
-# carry the exact CRD apply command for <version>, so console users see it
-# before they install. release.yml attaches it to the GitHub release, and
-# catalog-submit submits it as aibom-webhook-<version>.tgz.
+# Writes two release assets from <dir>/aibom-webhook-<version>.tgz:
+# - <dir>/aibom-crds.yaml, its crds/aibom-crd.yaml, which catalog users (and
+#   anyone without helm) apply from the GitHub release.
+# - <dir>/aibom-webhook-<version>-catalog.tgz, the chart without crds/, since
+#   the OpenShift Helm catalog doesn't accept charts with CRDs. Its tile
+#   description, install form (the schema's description) and README carry the
+#   exact CRD apply command for <version>, so console users see it before they
+#   install. catalog-submit submits it as aibom-webhook-<version>.tgz.
 _chart-package-catalog dir version:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -673,13 +673,14 @@ _chart-package-catalog dir version:
     work="$(mktemp -d)"
     trap 'rm -rf "$work"' EXIT
     tar -xzf "$tgz" -C "$work"
-    [ -d "$work/aibom-webhook/crds" ] || { echo "error: $tgz has no crds/ directory" >&2; exit 1; }
+    [ -f "$work/aibom-webhook/crds/aibom-crd.yaml" ] || { echo "error: $tgz has no crds/aibom-crd.yaml" >&2; exit 1; }
+    cp "$work/aibom-webhook/crds/aibom-crd.yaml" "{{ dir }}/aibom-crds.yaml"
     rm -rf "$work/aibom-webhook/crds"
     chart="$work/aibom-webhook"
-    cmd="oc apply -f https://raw.githubusercontent.com/gavinsan33/aibom-webhook-service/v{{ version }}/charts/aibom-webhook/crds/aibom-crd.yaml"
-    grep -q 'aibom-webhook-service/v<version>/' "$chart/README.md" \
+    cmd="oc apply -f https://github.com/gavinsan33/aibom-webhook-service/releases/download/v{{ version }}/aibom-crds.yaml"
+    grep -q 'releases/download/v<version>/aibom-crds.yaml' "$chart/README.md" \
         || { echo "error: README.md has no v<version> CRD URL to fill in" >&2; exit 1; }
-    sed -i 's|aibom-webhook-service/v<version>/|aibom-webhook-service/v{{ version }}/|g' "$chart/README.md"
+    sed -i 's|releases/download/v<version>/aibom-crds.yaml|releases/download/v{{ version }}/aibom-crds.yaml|g' "$chart/README.md"
     sed -i 's|^description: \(.*\)$|description: "\1. REQUIRES the AIBOM CRDs, which this chart does not include. Install them first, see the README."|' "$chart/Chart.yaml"
     jq --arg cmd "$cmd" '.description = "REQUIRED BEFORE INSTALLING: this chart does not include its CRDs. A cluster-admin must install them first, or the install fails: " + $cmd' \
         "$chart/values.schema.json" > "$work/schema.json"
@@ -725,8 +726,8 @@ chart-verify *args:
 # (openshift-helm-charts/charts): one branch and pull request per chart, from
 # your fork, each adding that chart's tarball from the vX.Y.Z GitHub release.
 # For the webhook chart that's the CRD-less aibom-webhook-X.Y.Z-catalog.tgz,
-# since the catalog doesn't accept CRDs; releases before it was attached can't
-# be submitted.
+# since the catalog doesn't accept CRDs; its users apply the release's
+# aibom-crds.yaml. Releases without both assets can't be submitted.
 # Run it as a GitHub user listed in catalog/**/OWNERS, since the catalog's CI
 # checks who opened the pull request. Refuses a version that's already in the
 # catalog or already has an open pull request. --dry-run commits in a temporary
@@ -756,8 +757,10 @@ catalog-submit *args:
         || { echo "error: no fork $fork; fork $upstream first, or pass --fork=<owner/repo>" >&2; exit 1; }
     assets="$(gh release view "v$version" -R "$repo" --json assets -q '.assets[].name' 2>/dev/null)" \
         || { echo "error: $repo has no GitHub release v$version" >&2; exit 1; }
-    grep -qx "aibom-webhook-$version-catalog.tgz" <<<"$assets" \
-        || { echo "error: release v$version has no aibom-webhook-$version-catalog.tgz (the webhook chart without CRDs)" >&2; exit 1; }
+    for asset in "aibom-webhook-$version-catalog.tgz" aibom-crds.yaml; do
+        grep -qx "$asset" <<<"$assets" \
+            || { echo "error: release v$version has no $asset, which catalog installs need" >&2; exit 1; }
+    done
     for chart in $charts; do
         title="Add project-aibom/$chart $version"
         if gh api "repos/$upstream/contents/charts/community/project-aibom/$chart/$version" --silent 2>/dev/null; then
