@@ -34,6 +34,13 @@ oc apply -f https://github.com/gavinsan33/aibom-webhook-service/releases/downloa
 
 The error message prints this command with the version filled in. The chart from `oci://quay.io/project-aibom/aibom-webhook` includes the CRDs and doesn't hit this.
 
+## No AIBOMs after installing from the OpenShift console
+
+Check the two steps the console can't do for you:
+
+- **The namespace label.** `oc get namespace <namespace> --show-labels` must show `aibom.io/enabled=true`. Without it the webhook ignores the namespace's pods: they run with no `aibom-discovery` init container, and nothing is logged. Add it with `oc label namespace <namespace> aibom.io/enabled=true`, then rerun the workload.
+- **The webhook's namespace.** The console installs into whichever project was selected, often `default`. Find it with `helm list -A`. If it isn't `project-aibom`, the namespace chart's `aibomSystemNamespace` must name it. Upgrade the namespace chart's release with that value set.
+
 ## Pods fail to start in an enabled namespace
 
 A stale `aibom-scripts` ConfigMap can fail pod startup for every instrumented workload in the namespace. The dataset detector hook mounts `runtime_detector.py` from that ConfigMap, and the `aibom-discovery` and `aibom-dataset-sidecar` init containers each run a script from it.

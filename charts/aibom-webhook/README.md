@@ -42,6 +42,12 @@ If you installed this chart somewhere other than `project-aibom`, also set `aibo
 
 Run `helm test aibom-webhook -n project-aibom` to check that the webhook answers and the CRDs are installed.
 
+### From the OpenShift console
+
+1. Apply the CRDs, as in "Prerequisite: install the AIBOM CRDs" above.
+2. **Create or select the `project-aibom` project before clicking Create.** The console installs into whichever project is selected, often `default`, and this chart has no say in it. Another project works, but then every namespace chart needs `aibomSystemNamespace` set to it.
+3. For each namespace that runs workloads, **label it first**, because the console can't: `oc label namespace <namespace> aibom.io/enabled=true`. Without the label the webhook ignores the namespace's pods and no AIBOM is recorded, with no error. Then select that project and install the AIBOM Workload Namespace chart from the catalog.
+
 ## Things to know
 
 - **Upgrades don't update the CRDs.** Helm installs a chart's CRDs once and never updates them. Before upgrading, apply the new ones: `helm show crds oci://quay.io/project-aibom/aibom-webhook --version <version> | oc apply -f -`, or, without `helm`, the `oc apply -f` command above with the new version.
