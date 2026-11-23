@@ -8,7 +8,7 @@ Full documentation: https://gavinsan33.github.io/project-aibom/
 
 ## Install
 
-A cluster-admin installs it, because it also creates a RoleBinding in the webhook's namespace. The namespace must already exist and carry the opt-in label, which Helm can't add:
+A cluster-admin installs it, because it also creates a RoleBinding in the webhook's namespace. The namespace must already exist and carry the opt-in label, which Helm can't add. The install fails without it:
 
 ```bash
 oc label namespace <namespace> aibom.io/enabled=true

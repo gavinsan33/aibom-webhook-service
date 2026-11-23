@@ -1,6 +1,4 @@
-{{ .Release.Namespace }} is set up for AIBOM collection. Workloads get an AIBOM only while the namespace carries the opt-in label:
-
-  oc label namespace {{ .Release.Namespace }} aibom.io/enabled=true
+{{ .Release.Namespace }} is set up for AIBOM collection. Workloads get an AIBOM while the namespace keeps its aibom.io/enabled=true label; remove the label to opt out.
 
 List AIBOMs once a workload finishes:  oc get aibomrun -n {{ .Release.Namespace }}
 Check the install with:  helm test {{ .Release.Name }} -n {{ .Release.Namespace }}
