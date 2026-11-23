@@ -1,0 +1,15 @@
+{{- /*
+The opt-in label is a prerequisite: Helm can't label a namespace it didn't
+create, so refuse a first install into an unlabeled one rather than leave a
+setup that silently records nothing. Upgrades are allowed so an opted-out
+namespace can still be upgraded. lookup is empty when rendering offline
+(Argo CD, helm template), which skips the check.
+ponytail: hardcodes aibom.io/enabled=true; a webhook chart with a custom
+webhook.namespaceSelectorLabel fails here, add a value if anyone needs that.
+*/ -}}
+{{- if .Release.IsInstall }}
+{{- $ns := lookup "v1" "Namespace" "" .Release.Namespace }}
+{{- if and $ns (ne (dig "metadata" "labels" "aibom.io/enabled" "" $ns) "true") }}
+{{- fail (printf "namespace %s must be labeled before installing: oc label namespace %s aibom.io/enabled=true" .Release.Namespace .Release.Namespace) }}
+{{- end }}
+{{- end }}
