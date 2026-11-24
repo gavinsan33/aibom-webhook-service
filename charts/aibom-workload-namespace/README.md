@@ -2,7 +2,7 @@
 
 Enables one namespace for the AIBOM webhook. Install it in every namespace whose workloads should get an AIBOM, after the `aibom-webhook` chart.
 
-It creates the `aibom-scripts` ConfigMap that instrumented pods run, the HMAC keys that sign their hardware and dataset data, the RBAC that lets workload pods and the webhook write that data, the grants the postprocess Job needs to create the namespace's AIBOMs, and a PodMonitor for vLLM metrics.
+It creates the `aibom-scripts` ConfigMap that instrumented pods run, the HMAC keys that sign their hardware and dataset data, the RBAC that lets workload pods and the webhook write that data, the grants the postprocess Job needs to create the namespace's AIBOMs, and a PodMonitor for serving-engine metrics.
 
 Full documentation: https://gavinsan33.github.io/project-aibom/
 
