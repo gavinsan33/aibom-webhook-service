@@ -45,6 +45,7 @@ Set chart values with `--set key=value` or `-f values.yaml` on `helm upgrade --i
 | `build.enabled` | `false` | Builds the webhook and postprocess images in-cluster from source with an OpenShift BuildConfig, for clusters with no route to Quay. `just deploy-buildconfig` sets it. Rendering fails when it is set on a cluster other than OpenShift. |
 | `build.gitRepo` / `build.gitRef` | `https://github.com/gavinsan33/aibom-webhook-service.git` / `main` | What the in-cluster build clones. |
 | `cacheImages.enabled` | `true` | On OpenShift, mirrors the injected images (discovery init container, dataset sidecar, and postprocess Job) into the cluster's internal registry with an `ImageStream` using `referencePolicy: Local`, so workload nodes pull them from inside the cluster instead of re-pulling from Quay on every new node. The injection flags then point at the internal registry. No-op off OpenShift, and skipped when `build.enabled` is set, since that already produces the same ImageStreams from source. The `system:image-puller` RoleBinding that lets workload namespaces pull them is created by the `aibom-workload-namespace` chart. Set `false` to pull from Quay on every node. |
+| `finalizerCleanup.enabled` | `true` | A `post-delete` hook that strips the watcher's `aibom.io/log-extraction` and `aibom.io/log-extraction-pod` finalizers from every Job and Pod on `helm uninstall`. Its short-lived ServiceAccount gets cluster-wide `list`/`patch` on Jobs and Pods. Disable it if the installing account can't create ClusterRoles, or uninstall with `--no-hooks`. |
 | `debug.keepPostprocessJobs` | `false` | Keeps finished postprocess Jobs and their input ConfigMaps, in the webhook's namespace, for inspection. Leaves one of each per workload indefinitely. Not for production. |
 | `debug.telemetryAllPods` | `false` | Queries telemetry for every pod even with no detected GPU, for testing on clusters without GPUs. Not for production. |
 
@@ -54,9 +55,10 @@ Set chart values with `--set key=value` or `-f values.yaml` on `helm upgrade --i
 |-------|---------|-------------|
 | `platform` | `auto` | As in the webhook chart. On OpenShift this chart also creates the image-puller RoleBinding. |
 | `aibomSystemNamespace` | `project-aibom` | The namespace the webhook chart was installed into. The Roles that let its watcher and the `aibom-postprocess` ServiceAccount act in this namespace are bound to ServiceAccounts there, and on OpenShift the image-puller RoleBinding is created there. |
-| `vllmMetrics.enabled` | `true` | Adds a `PodMonitor` scraping vLLM's `/metrics` on port 8000 for instrumented pods. Needs the Prometheus Operator CRDs, or the install fails. Set `false` without them. Inference metrics also need the webhook chart's `monitoringAccess.enabled`. |
+| `vllmMetrics.enabled` | `true` | Adds the `aibom-vllm-metrics` `PodMonitor`, which scrapes `/metrics` on instrumented pods at each serving engine's default port (vLLM 8000, and 8200 behind llm-d's routing sidecar; TGI 80 and 8080; SGLang 30000; LMDeploy 23333). Needs the Prometheus Operator CRDs, or the install fails. Set `false` without them. Inference metrics also need the webhook chart's `monitoringAccess.enabled`. |
 | `signing.createKeys` | `true` | Generates the discovery and dataset HMAC key Secrets. Set `false` for offline renders such as Argo CD, which would replace them on every sync; the webhook then creates any missing key at pod admission. |
 | `scripts.generateSnapshot`, `.runtimeDetector`, `.k8sApi`, `.datasetSidecar` | `""` | Only for installing from a checkout, where `--set-file` reads the scripts from `scripts/aibom-scripts/`. Leave unset for an OCI install, which embeds them. |
+| `test.image` | `""` | Image for the `helm test` pod, which only needs `python3`. Empty means the postprocess image at this chart's version. |
 
 ## Server flags
 

@@ -36,7 +36,9 @@ oc get aibomrun <name> -n <namespace> -o yaml
 | `spec.jobName` | Summary field for printer columns |
 | `spec.modelName` | Summary field for printer columns |
 | `spec.experimentIntent` | Summary field for printer columns |
-| `spec.collectedAt` | Summary field for printer columns |
+| `spec.collectedAt` | When the AIBOM was compiled (RFC 3339), the same value as `spec.data._metadata.generated_at` |
+| `spec.signature` | Base64 Ed25519 signature over the RFC 8785 canonical form of `spec.data`; absent when the AIBOM is unsigned (see [Signing Keys](signing.md)) |
+| `spec.signaturePublicKey` | Base64 raw Ed25519 public key matching `spec.signature` |
 
 ## Workloads with several pods
 
@@ -53,7 +55,7 @@ The postprocess Job queries Prometheus directly for the AIBOM's summary stats. I
 
 ### Stored time series
 
-The AIBOM itself holds only summary statistics per metric. A downsampled copy of each metric's time series is stored next to it in an `AIBOMTelemetry` custom resource (`aibomtelemetries.aibom.io`, short name `aibomtel`), so charts keep working after Prometheus's retention window. It is optional: an AIBOM without one has no `spec.data.telemetry_series_ref`, and readers fall back to live Prometheus.
+The AIBOM itself holds only summary statistics per metric. A downsampled copy of each metric's time series is stored next to it in an `AIBOMTelemetry` custom resource (`aibomtelemetries.aibom.io`, short name `aibomtel`), so charts keep working after Prometheus's retention window. It is optional: an AIBOM without one has no `spec.data.telemetry_series_ref` and keeps only its summary stats. Neither reader queries Prometheus instead: `oc aibomrun graph` leaves such an AIBOM out with a note, and the console plugin shows no charts for it.
 
 **Finding it.** The object is in the AIBOM's namespace, labeled `aibom.io/job-name`, with a random name. Use the name in `spec.data.telemetry_series_ref`, not a naming convention:
 
