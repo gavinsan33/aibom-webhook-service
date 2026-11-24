@@ -18,7 +18,7 @@ A Kubernetes mutating admission webhook that automatically instruments AI worklo
 
 When the workload finishes, a postprocess Job compiles everything (hardware, datasets, model and training config, git provenance, Prometheus telemetry) into a signed, immutable `AIBOM` custom resource in the workload's namespace. To browse, filter, and compare AIBOMs, use the companion tools:
 
-- [`oc-aibom`](https://github.com/gavinsan33/oc-aibom): a `kubectl`/`oc` plugin (`oc aibomrun list|describe|diff|compare|export`). It also verifies the AIBOM's signature.
+- [`oc-aibom`](https://github.com/gavinsan33/oc-aibom): a `kubectl`/`oc` plugin (`oc aibomrun list|describe|diff|compare|graph|export`). It also verifies the AIBOM's signature.
 - [`aibom-console-plugin`](https://github.com/gavinsan33/aibom-console-plugin): an OpenShift web console plugin with list, detail, and compare views and telemetry charts.
 
 **Full documentation lives on the [docs site](https://gavinsan33.github.io/project-aibom/aibom-webhook-service/).** This README only covers what the project does and how to install it.
@@ -38,7 +38,7 @@ The webhook always fails open (`failurePolicy: Ignore`): if the service is down 
 - OpenShift 4.16+, or Kubernetes 1.29+ with [cert-manager](https://cert-manager.io/) installed. Off OpenShift, see [Kubernetes without OpenShift](https://gavinsan33.github.io/project-aibom/aibom-webhook-service/user-guide/getting-started/#kubernetes-without-openshift).
 - `helm` 3.x
 - Cluster-admin (the charts install cluster-scoped RBAC)
-- To build from source: Go 1.22+ and [`just`](https://github.com/casey/just) (`make install-just`)
+- To build from source: Go 1.26+ and [`just`](https://github.com/casey/just) (`make install-just`)
 
 ## Setup
 

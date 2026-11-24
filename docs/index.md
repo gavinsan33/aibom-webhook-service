@@ -17,7 +17,7 @@ To filter, inspect, and compare the resulting `AIBOM` custom resources, see the 
 4. The Kubernetes API server calls the webhook before creating the pod.
 5. The webhook injects an `aibom-discovery` init container (hardware snapshot), dataset detection hooks, and an `aibom.io/instrumented: "true"` label.
 6. The pod is created with the injections. The user's original YAML is untouched.
-7. When the Job completes (or is deleted, for long-running pods such as KServe predictors), the **watcher** creates a postprocess Job that compiles the AIBOM.
+7. When the Job completes (or the pod is deleted, for long-running pods such as KServe predictors), the **watcher** creates a postprocess Job that compiles the AIBOM.
 
 ```mermaid
 flowchart LR

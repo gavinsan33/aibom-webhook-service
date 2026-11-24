@@ -46,7 +46,7 @@ The checks run only on a first install, and not where Helm has no cluster to loo
 
 ## No AIBOMs after installing from the OpenShift console
 
-Releases from 1.0.5 on refuse to install the namespace chart in both of these cases (see above), so this mostly applies to earlier releases and to Argo CD. Check the two steps the console can't do for you:
+Releases from 1.0.5 on refuse to install the namespace chart into an unlabeled namespace, and releases after 1.0.5 also refuse a wrong `aibomSystemNamespace` (see above), so this mostly applies to earlier releases and to Argo CD. Check the two steps the console can't do for you:
 
 - **The namespace label.** `oc get namespace <namespace> --show-labels` must show `aibom.io/enabled=true`. Without it the webhook ignores the namespace's pods: they run with no `aibom-discovery` init container, and nothing is logged. Add it with `oc label namespace <namespace> aibom.io/enabled=true`, then rerun the workload.
 - **The webhook's namespace.** The console installs into whichever project was selected, often `default`. Find it with `helm list -A`. If it isn't `project-aibom`, the namespace chart's `aibomSystemNamespace` must name it. Upgrade the namespace chart's release with that value set.
