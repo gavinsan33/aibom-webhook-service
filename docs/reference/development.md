@@ -8,7 +8,7 @@ There are three ways to get images into the cluster — pick whichever fits:
 
 | Situation | Recipe |
 |---|---|
-| Default — `.github/workflows/images.yml` already builds both images on every push to `main` | `just deploy` |
+| Default — `.github/workflows/images.yml` already builds the images on every push to `main` | `just deploy` |
 | No egress to quay.io, or no external registry account | `just deploy-buildconfig` (in-cluster OpenShift BuildConfig) |
 | Iterating locally, don't want to wait on Quay or a git push | `just deploy-local --repo=<repo>` |
 
@@ -26,7 +26,7 @@ just deploy --version=<sha>
 # Point at a different quay.io org/user than the values.yaml default
 just deploy --repo=quay.io/<your-org>
 
-# Or, build both images in-cluster from source instead (no quay.io dependency)
+# Or, build the images in-cluster from source instead (no quay.io dependency)
 just deploy-buildconfig
 
 # Roll back: rebuilds and redeploys that exact historical commit
@@ -45,24 +45,24 @@ oc get pod <pod-name> -n my-ai-workloads -o jsonpath='{.spec.initContainers[*].n
 
 # Check dataset detector env vars
 oc get pod <pod-name> -n my-ai-workloads -o jsonpath='{.spec.containers[0].env[*].name}'
-# Should include: AIBOM_DATASET_DETECT AIBOM_DEBUG AIBOM_DATASET_OUTPUT PYTHONPATH
+# Should include: AIBOM_DATASET_DETECT AIBOM_DATASET_OUTPUT POD_NAME POD_NAMESPACE PYTHONPATH
 ```
 
 To remove a workload namespace's setup: `just uninstall-namespace --namespace=<ns>` (runs `helm uninstall aibom-ns-<ns>` and removes the `aibom.io/enabled` label, after a confirmation prompt).
 
-To remove the deployment: `just undeploy` (runs `helm uninstall aibom-webhook`, after a confirmation prompt). Helm installs CRDs once but never upgrades or removes them automatically, so `just deploy`/`deploy-buildconfig`/`deploy-local` each explicitly `oc apply -f charts/aibom-webhook/crds/aibom-crd.yaml` before the `helm upgrade --install` step (skipped along with everything else cluster-scoped when `--skip-crds` is passed — see that flag's own note below). `helm uninstall` still leaves the CRD (and any AIBOM custom resources) in place regardless.
+To remove the deployment: `just undeploy` (runs `helm uninstall aibom-webhook`, after a confirmation prompt). Helm installs CRDs once but never upgrades or removes them automatically, so `just deploy`/`deploy-buildconfig`/`deploy-local` each explicitly `oc apply -f charts/aibom-webhook/crds/aibom-crd.yaml` before the `helm upgrade --install` step (skipped along with everything else cluster-scoped when `--skip-crds` is passed — see that flag's own note above). `helm uninstall` still leaves the CRD (and any AIBOM custom resources) in place regardless.
 
 ## Image builds
 
-`.github/workflows/images.yml` rebuilds both images on every push to `main` and pushes them to `quay.io/project-aibom` as `latest` and `<short-sha>`. `just deploy` with no arguments deploys `latest`, and `--version=<sha>` deploys or rolls back to a specific commit's build. It uses the same Quay robot secrets as the release workflow (see below). Quay's own GitHub build triggers aren't used: GitHub rejects the deploy key they generate as too short.
+`.github/workflows/images.yml` rebuilds the three images (`aibom-webhook-service`, `aibom-postprocess`, `aibom-discovery`) on every push to `main` and pushes them to `quay.io/project-aibom` as `latest` and `<short-sha>`. `just deploy` with no arguments deploys `latest`, and `--version=<sha>` deploys or rolls back to a specific commit's build. It uses the same Quay robot secrets as the release workflow (see below). Quay's own GitHub build triggers aren't used: GitHub rejects the deploy key they generate as too short.
 
 ## Releases and chart publishing
 
-**Releases.** Push a `vX.Y.Z` tag. `.github/workflows/release.yml` builds both images as `quay.io/project-aibom/aibom-webhook-service:X.Y.Z` and `.../aibom-postprocess:X.Y.Z`, then runs `just chart-push --version=X.Y.Z`, which packages both charts with `version` and `appVersion` set to `X.Y.Z` (embedding `scripts/aibom-scripts/*.py` into the workload-namespace chart so it doesn't need `--set-file`) and pushes them to `oci://quay.io/project-aibom`, then attaches both chart tarballs to a GitHub release for the tag, plus, for the OpenShift Helm catalog, `aibom-webhook-X.Y.Z-catalog.tgz` (the webhook chart without its CRDs) and `aibom-crds.yaml` (those CRDs, extracted from the published chart). The workflow fails before pushing anything if an image tag already exists, and `chart-push --version` refuses a chart version that's already published, so a release is only ever pushed once. The `version` in both `Chart.yaml` files is unused and never needs bumping.
+**Releases.** Push a `vX.Y.Z` tag. `.github/workflows/release.yml` builds the three images as `quay.io/project-aibom/aibom-webhook-service:X.Y.Z`, `.../aibom-postprocess:X.Y.Z` and `.../aibom-discovery:X.Y.Z`, then runs `just chart-push --version=X.Y.Z`, which packages both charts with `version` and `appVersion` set to `X.Y.Z` (embedding `scripts/aibom-scripts/*.py` into the workload-namespace chart so it doesn't need `--set-file`) and pushes them to `oci://quay.io/project-aibom`, then attaches both chart tarballs to a GitHub release for the tag, plus, for the OpenShift Helm catalog, `aibom-webhook-X.Y.Z-catalog.tgz` (the webhook chart without its CRDs) and `aibom-crds.yaml` (those CRDs, extracted from the published chart). The workflow fails before pushing anything if an image tag already exists, and `chart-push --version` refuses a chart version that's already published, so a release is only ever pushed once. The `version` in both `Chart.yaml` files is unused and never needs bumping.
 
 **Dev builds.** `.github/workflows/chart-publish.yml` runs `just chart-push` on every push to `main` that touches `charts/aibom-webhook/**`, `charts/aibom-workload-namespace/**` or `scripts/aibom-scripts/**`. It publishes a dev build versioned from the latest release tag: the next patch, the commits since the tag and the SHA (e.g. `0.1.1-dev.5.gabc1234` five commits after `v0.1.0`, `-dirty`-suffixed for an uncommitted tree). Newer builds sort higher, and all sort below the next release. Their images are `latest`, built by `images.yml`. The hyphen makes it a SemVer prerelease, so `helm install` with no `--version` skips it. Run `just chart-push` by hand the same way, after `helm registry login quay.io`.
 
-**One-time setup.** Create a Quay robot account with push access to the two image repos and the two chart repos (used by all three workflows), and add its username and token as the `QUAY_ROBOT_USERNAME`/`QUAY_ROBOT_TOKEN` repo secrets (Settings → Secrets and variables → Actions). Make all four repos public, or arrange pull credentials, so installs can pull anonymously.
+**One-time setup.** Create a Quay robot account with push access to the three image repos and the two chart repos (used by all three workflows), and add its username and token as the `QUAY_ROBOT_USERNAME`/`QUAY_ROBOT_TOKEN` repo secrets (Settings → Secrets and variables → Actions). Make all five repos public, or arrange pull credentials, so installs can pull anonymously.
 
 **Checking a release for the catalog.** `just chart-verify --version=X.Y.Z` packages both charts and runs Red Hat's chart-verifier with the community profile, writing a report per chart to `chart-verifier/`. Only `helm-lint` is mandatory for a community chart. It verifies the webhook chart without its CRDs (`aibom-webhook-X.Y.Z-catalog.tgz`), the one `catalog-submit` submits. Both charts' `images-are-certified` fails and is expected to; it's mandatory only for certified partner charts.
 
@@ -73,7 +73,7 @@ Both charts are submitted to [openshift-helm-charts/charts](https://github.com/o
 1. **Once, register the charts.** In a fork of that repository, add each `OWNERS` file from `catalog/` at `charts/community/project-aibom/<chart>/OWNERS` and open a pull request to `main` for each. Their CI always reports these as failed ("OWNERS file changes require manual review by maintainers"); a maintainer reviews and merges them by hand, which can take weeks. Wait for both to merge. Only the GitHub users listed in `users` can submit versions.
 2. **For each release you want in the catalog,** run `just catalog-submit --version=X.Y.Z` as a user listed in OWNERS. Not every release has to go there, and a published version can't be withdrawn. The recipe takes the tarballs from the release's GitHub release, which has exactly what was published: the namespace chart's, and for the webhook chart `aibom-webhook-X.Y.Z-catalog.tgz`, which `release.yml` packages without the `crds/` directory because the catalog's maintainers don't accept CRDs in community charts. Releases up to v1.0.2 don't have it or `aibom-crds.yaml` and can't be submitted. It adds each one to your fork as `charts/community/project-aibom/<chart>/X.Y.Z/<chart>-X.Y.Z.tgz` on its own branch off the catalog's `main`. It then opens one pull request per chart. It refuses a version that's already in the catalog or already has an open pull request. Pass `--dry-run` to see what it would push, or `--fork=<owner/repo>` if your fork isn't `<you>/charts`. Submit the tarball rather than a chart-verifier report: the catalog then hosts its own copy, and its CI runs chart-verifier itself. Its `chart-testing` check fails there and is expected to: the CI installs with a namespace-scoped service account, and both charts need cluster-admin. It's optional for community charts. CI reports community charts as "Pending Manual Review"; a maintainer approves each version, then the bot merges it. A published version can't be changed; release a new one instead.
 
-Catalog users install the CRDs themselves with `oc apply -f` on the release's `aibom-crds.yaml`. `_chart-package-catalog` writes that command, with the exact version, into the catalog tarball's README (a section at the top), its `Chart.yaml` description (the catalog tile) and its `values.schema.json` description (the top of the console's install form), and `NOTES.txt` repeats it after every install and upgrade. `templates/crds-required.yaml` fails an install against a cluster without them and prints that command; it's skipped when there's no cluster to look at (`helm template`, `helm lint`, Argo CD), and the quay.io chart passes it because Helm installs `crds/` before rendering templates. They upgrade from the console's Upgrade action on the Helm release and re-apply the CRDs first, so each release's notes should say when the CRDs changed.
+Catalog users install the CRDs themselves with `oc apply -f` on the release's `aibom-crds.yaml`. `_chart-package-catalog` writes that command, with the exact version, into the catalog tarball's README (a section at the top) and its `values.schema.json` description (the top of the console's install form); its `Chart.yaml` description (the catalog tile) points to the README, and `NOTES.txt` repeats it after every install and upgrade. `templates/crds-required.yaml` fails an install against a cluster without them and prints that command; it's skipped when there's no cluster to look at (`helm template`, `helm lint`, Argo CD), and the quay.io chart passes it because Helm installs `crds/` before rendering templates. They upgrade from the console's Upgrade action on the Helm release and re-apply the CRDs first, so each release's notes should say when the CRDs changed.
 
 ## Local testing (without a cluster)
 
@@ -143,7 +143,7 @@ charts/
       signing.yaml                   # HMAC keys + the watcher's read access to them
       webhook-access.yaml            # the webhook's writes in this namespace
       scripts-configmap.yaml
-      monitoring.yaml                # vLLM PodMonitor
+      monitoring.yaml                # serving-engine PodMonitor
 scripts/
   generate-certs.sh                 # Self-signed TLS cert generation for local dev only (cluster deploy uses service-ca or cert-manager)
   remote-build-sha.sh                # Resolves the short SHA `just deploy`'s --version defaults to (justfile helper)
@@ -162,8 +162,8 @@ tests/
   postprocess/test_postprocess.py   # Unit tests for postprocess.py's CLI-arg detectors and compile_aibom
   aibom_scripts/                    # Unit tests for runtime_detector.py's hooks (fake torch/datasets/transformers/peft modules)
 pyproject.toml                      # pytest config (pythonpath into postprocess/ and scripts/aibom-scripts/)
-requirements-dev.txt                # Test-only deps (pytest, pyyaml) — production scripts stay dependency-free
-Dockerfile                          # Multi-stage build (distroless)
+requirements-dev.txt                # Test-only deps (pytest, pyyaml, cryptography, rfc8785) — production scripts stay dependency-free
+Dockerfile                          # Multi-stage build (UBI micro)
 justfile                            # Build, test, deploy recipes (just test, just test go, just test python)
 Makefile                            # Bootstrap only: `make install-just` installs the just task runner
 ```

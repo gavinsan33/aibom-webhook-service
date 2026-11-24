@@ -4,7 +4,7 @@
 
 - OpenShift 4.16 or later, or Kubernetes 1.29 or later (see [Kubernetes without OpenShift](#kubernetes-without-openshift)), and `helm` 3.x.
 - A cluster-admin account. The webhook chart installs cluster-scoped RBAC, including ClusterRoleBindings for the `aibom-postprocess` ServiceAccount (see [Install the webhook](#install-the-webhook)). The workload-namespace chart creates only namespaced RBAC, plus a RoleBinding in the webhook's namespace.
-- To work from source: Go 1.22+, [`just`](https://github.com/casey/just) (run `make install-just` if you don't have it), and `openssl` for local TLS certificates.
+- To work from source: Go 1.26+, [`just`](https://github.com/casey/just) (run `make install-just` if you don't have it), and `openssl` for local TLS certificates.
 
 ### Cluster requirements
 
@@ -33,7 +33,7 @@ helm upgrade --install aibom-webhook oci://quay.io/project-aibom/aibom-webhook \
 
 Both charts detect OpenShift by its `image.openshift.io` API and choose these defaults from that (`platform: auto`). `helm template` without a cluster can't see the API and renders the non-OpenShift defaults, so when rendering offline set `platform=openshift` or `platform=kubernetes` explicitly.
 
-Supported workload types are Job, JobSet, PyTorchJob and RayJob, plus any pod that requests `nvidia.com/gpu`. The Kubeflow Training Operator (PyTorchJob), JobSet and KubeRay are needed only if you run those kinds.
+Supported workload types are Job, JobSet, PyTorchJob and RayJob, plus any pod that requests a GPU (`nvidia.com/gpu`, `nvidia.com/gpu.shared`, `nvidia.com/mig-*` or `amd.com/gpu`). The Kubeflow Training Operator (PyTorchJob), JobSet and KubeRay are needed only if you run those kinds.
 
 ## Install the webhook
 
@@ -46,7 +46,7 @@ helm upgrade --install aibom-webhook oci://quay.io/project-aibom/aibom-webhook \
 
 The chart installs cluster-scoped RBAC, which a namespace-scoped admin cannot grant themselves, so run it as a cluster-admin. The commands here use `--kube-as-user=system:admin` to do that by impersonation, which needs impersonation rights and so won't work on managed clusters such as ROSA or ARO. There, log in as a cluster-admin user and drop `--kube-as-user=system:admin` from the `helm` commands and `--as=system:admin` from the `oc` commands.
 
-Without `--version`, Helm installs the newest release. Pass `--version=X.Y.Z` to pin one, or `--version=<version>-<git-sha>` for a dev build from `main` (see [Upgrading](../reference/upgrading.md#versions)).
+Without `--version`, Helm installs the newest release. Pass `--version=X.Y.Z` to pin one, or `--devel` (or an exact `--version=X.Y.Z-dev.N.g<sha>`) for a dev build from `main` (see [Upgrading](../reference/upgrading.md#versions)).
 
 To manage both charts from Argo CD or OpenShift GitOps instead, see [Installing with Argo CD](argocd.md).
 

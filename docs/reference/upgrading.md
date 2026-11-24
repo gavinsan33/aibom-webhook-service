@@ -59,7 +59,7 @@ Set `cacheImages.enabled=false` to keep pulling the injected images from Quay.
 
 ## Versions
 
-Releases are published from `vX.Y.Z` git tags. Each release publishes both charts at version `X.Y.Z` and both images tagged `X.Y.Z`, and the charts' image tags default to their own version, so installing a chart version always runs the same images. A release is never republished. With no `--version`, Helm installs the newest release; pass `--version=X.Y.Z` to pin one.
+Releases are published from `vX.Y.Z` git tags. Each release publishes both charts at version `X.Y.Z` and all three images (webhook, postprocess, discovery) tagged `X.Y.Z`, and the charts' image tags default to their own version, so installing a chart version always runs the same images. A release is never republished. With no `--version`, Helm installs the newest release; pass `--version=X.Y.Z` to pin one.
 
 Merges to `main` also publish dev builds of the charts, versioned after the last release (e.g. `0.1.1-dev.5.gabc1234`), using the `latest` images. Helm skips these unless you pass `--devel` or the exact version. To install the newest dev build, add `--devel` to both install commands:
 
@@ -76,5 +76,5 @@ The CRDs are `aibom.io/v1`. Releases up to 0.2.0 used `v1alpha1`, and there is n
 
 ## Cluster versions
 
-- **Console plugin:** its docs state OpenShift 4.12 or later.
+- **Console plugin:** OpenShift 4.22 or later, the console version its SDK targets.
 - **Webhook:** the dataset sidecar is a Kubernetes native sidecar, which is generally available from Kubernetes 1.29 (OpenShift 4.16). OpenShift isn't required; see [Kubernetes without OpenShift](../user-guide/getting-started.md#kubernetes-without-openshift). The webhook chart's other requirements are in [Getting Started](../user-guide/getting-started.md#cluster-requirements).

@@ -127,4 +127,4 @@ helm template aibom-webhook oci://quay.io/project-aibom/aibom-webhook --version 
   --show-only templates/finalizer-cleanup-hook.yaml | oc apply -f -
 ```
 
-That applies the hook's own Job, ServiceAccount and ClusterRole, which grants only `list` and `patch` on Jobs and Pods. Once the Job has succeeded, delete it and those RBAC objects with the same command and `oc delete -f -`. As with Helm, the CRDs and existing AIBOMs are left in place.
+That applies the hook's own Job, ServiceAccount, ClusterRole and ClusterRoleBinding; the ClusterRole grants only `get`, `list` and `patch` on Jobs and Pods. Once the Job has succeeded, delete it and those RBAC objects with the same command and `oc delete -f -`. As with Helm, the CRDs and existing AIBOMs are left in place.
