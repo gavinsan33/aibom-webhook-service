@@ -31,6 +31,7 @@ nav:
       - Troubleshooting: user-guide/troubleshooting.md
   - Reference:
       - Detected Fields: CAPABILITIES.md
+      - Auto-Detection Flow: reference/auto-detection.md
       - AIBOM Schema: reference/schema.md
       - CycloneDX Mapping: reference/cyclonedx-mapping.md
       - Signing Keys: reference/signing.md
